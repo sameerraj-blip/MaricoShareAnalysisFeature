@@ -22,30 +22,60 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Server is running' });
 });
 
-(async () => {
+// Initialize services (for both local and Vercel)
+let initialized = false;
+async function initializeServices() {
+  if (initialized) return;
+  
   try {
     // Initialize CosmosDB (optional)
     try {
       await initializeCosmosDB();
     } catch (cosmosError) {
-      console.warn("⚠️ CosmosDB initialization failed, continuing without it:", cosmosError.message);
+      const errorMessage = cosmosError instanceof Error ? cosmosError.message : String(cosmosError);
+      console.warn("⚠️ CosmosDB initialization failed, continuing without it:", errorMessage);
     }
     
     // Initialize Azure Blob Storage (optional)
     try {
       await initializeBlobStorage();
     } catch (blobError) {
-      console.warn("⚠️ Azure Blob Storage initialization failed, continuing without it:", blobError.message);
+      const errorMessage = blobError instanceof Error ? blobError.message : String(blobError);
+      console.warn("⚠️ Azure Blob Storage initialization failed, continuing without it:", errorMessage);
     }
     
-    const server = await registerRoutes(app);
-    
-    const port = process.env.PORT || 3003;
-    server.listen(port, () => {
-      console.log(`Server running on port ${port}`);
-    });
+    await registerRoutes(app);
+    initialized = true;
   } catch (error) {
-    console.error("Failed to start server:", error);
-    process.exit(1);
+    console.error("Failed to initialize services:", error);
+    throw error;
   }
-})();
+}
+
+// For Vercel: export the app and initialize on first request
+// For local: run the server normally
+if (process.env.VERCEL) {
+  // Vercel serverless mode - initialize services
+  initializeServices().catch(console.error);
+}
+
+// Local development mode
+if (!process.env.VERCEL) {
+  (async () => {
+    try {
+      await initializeServices();
+      const { createServer } = await import("http");
+      const server = createServer(app);
+      const port = process.env.PORT || 3003;
+      server.listen(port, () => {
+        console.log(`Server running on port ${port}`);
+      });
+    } catch (error) {
+      console.error("Failed to start server:", error);
+      process.exit(1);
+    }
+  })();
+}
+
+// Export app for Vercel (only exported when imported by api/index.ts)
+export default app;

@@ -8,7 +8,7 @@ import sessionRoutes from "./sessions.js";
 import dataRetrievalRoutes from "./dataRetrieval.js";
 import dashboardRoutes from "./dashboards.js";
 
-export async function registerRoutes(app: Express): Promise<Server> {
+export async function registerRoutes(app: Express): Promise<Server | void> {
   // Register route modules
   app.use('/api', uploadRoutes);
   app.use('/api', chatRoutes);
@@ -18,6 +18,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/data', dataRetrievalRoutes);
   app.use('/api', dashboardRoutes);
 
+  // For Vercel, we don't need to create HTTP server
+  if (process.env.VERCEL) {
+    return;
+  }
+  
+  // For local development, create HTTP server
   const httpServer = createServer(app);
   return httpServer;
 }
