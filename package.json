@@ -14,6 +14,8 @@
   },
   "dependencies": {
     "@azure/cosmos": "^4.7.0",
+    "@azure/storage-blob": "^12.29.1",
+    "@google/generative-ai": "^0.21.0",
     "@hookform/resolvers": "^3.10.0",
     "@jridgewell/trace-mapping": "^0.3.25",
     "@neondatabase/serverless": "^0.10.4",
@@ -49,6 +51,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "connect-pg-simple": "^10.0.0",
+    "cors": "^2.8.5",
     "csv-parse": "^6.1.0",
     "date-fns": "^3.6.0",
     "dotenv": "^17.2.3",
