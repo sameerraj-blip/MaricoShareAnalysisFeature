@@ -67,8 +67,13 @@ vercel --prod
 Make sure to add these in Vercel Dashboard → Settings → Environment Variables:
 
 ### Required:
-- `OPENAI_API_KEY` - Your OpenAI API key
 - `NODE_ENV=production`
+
+### Azure OpenAI (REQUIRED - App won't work without these):
+- `AZURE_OPENAI_API_KEY` - Your Azure OpenAI API key
+- `AZURE_OPENAI_ENDPOINT` - Your Azure OpenAI endpoint (e.g., `https://your-resource.openai.azure.com`)
+- `AZURE_OPENAI_DEPLOYMENT_NAME` - Your Azure OpenAI deployment name (e.g., `gpt-4o`)
+- `AZURE_OPENAI_API_VERSION` - API version (optional, defaults to `2024-02-15-preview`)
 
 ### Azure AD (Required for Authentication):
 - `VITE_AZURE_CLIENT_ID` - Your Azure AD Client ID (`5e4faaa4-8f8b-4766-a2d5-d382004beea2`)

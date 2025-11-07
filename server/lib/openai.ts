@@ -1,47 +1,89 @@
 import OpenAI from "openai";
 
-// Azure OpenAI configuration
-console.log("🔧 Configuring Azure OpenAI...");
+// Azure OpenAI configuration - lazy initialization
+let openaiInstance: OpenAI | null = null;
+let modelName: string | null = null;
 
-// Check for required Azure OpenAI environment variables
-const requiredEnvVars = [
-  'AZURE_OPENAI_API_KEY',
-  'AZURE_OPENAI_ENDPOINT', 
-  'AZURE_OPENAI_DEPLOYMENT_NAME'
-];
+/**
+ * Initialize Azure OpenAI client (lazy initialization)
+ * This allows the module to load even if env vars aren't set yet
+ * But will fail with clear error when actually trying to use OpenAI
+ */
+function getOpenAIClient(): OpenAI {
+  if (openaiInstance) {
+    return openaiInstance;
+  }
 
-const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  console.log("🔧 Initializing Azure OpenAI...");
 
-if (missingVars.length > 0) {
-  console.error("❌ Missing required Azure OpenAI environment variables:");
-  missingVars.forEach(varName => console.error(`   - ${varName}`));
-  console.error("\nPlease set the following environment variables in your .env file:");
-  console.error("AZURE_OPENAI_API_KEY=your_azure_openai_api_key");
-  console.error("AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com");
-  console.error("AZURE_OPENAI_DEPLOYMENT_NAME=your_deployment_name");
-  console.error("AZURE_OPENAI_API_VERSION=2024-02-15-preview (optional)");
-  throw new Error("Azure OpenAI configuration is missing. Please set the required environment variables.");
+  // Check for required Azure OpenAI environment variables
+  const requiredEnvVars = [
+    'AZURE_OPENAI_API_KEY',
+    'AZURE_OPENAI_ENDPOINT', 
+    'AZURE_OPENAI_DEPLOYMENT_NAME'
+  ];
+
+  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+  if (missingVars.length > 0) {
+    const errorMsg = `Missing required Azure OpenAI environment variables: ${missingVars.join(', ')}. Please set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_DEPLOYMENT_NAME in Vercel environment variables.`;
+    console.error("❌", errorMsg);
+    throw new Error(errorMsg);
+  }
+
+  // Create Azure OpenAI client
+  openaiInstance = new OpenAI({
+    apiKey: process.env.AZURE_OPENAI_API_KEY!,
+    baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT_NAME}`,
+    defaultQuery: { 
+      'api-version': process.env.AZURE_OPENAI_API_VERSION || '2024-02-15-preview' 
+    },
+    defaultHeaders: {
+      'api-key': process.env.AZURE_OPENAI_API_KEY!,
+    },
+  });
+
+  // Use the deployment name as the model
+  modelName = process.env.AZURE_OPENAI_DEPLOYMENT_NAME!;
+
+  console.log("✅ Azure OpenAI initialized successfully");
+  console.log(`   Endpoint: ${process.env.AZURE_OPENAI_ENDPOINT}`);
+  console.log(`   Deployment: ${modelName}`);
+  console.log(`   API Version: ${process.env.AZURE_OPENAI_API_VERSION || '2024-02-15-preview'}`);
+
+  return openaiInstance;
 }
 
-// Create Azure OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.AZURE_OPENAI_API_KEY,
-  baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT_NAME}`,
-  defaultQuery: { 
-    'api-version': process.env.AZURE_OPENAI_API_VERSION || '2024-02-15-preview' 
+// Export openai object with lazy initialization
+export const openai = {
+  get chat() {
+    return getOpenAIClient().chat;
   },
-  defaultHeaders: {
-    'api-key': process.env.AZURE_OPENAI_API_KEY,
+  get embeddings() {
+    return getOpenAIClient().embeddings;
   },
-});
+  get models() {
+    return getOpenAIClient().models;
+  },
+  get images() {
+    return getOpenAIClient().images;
+  },
+  get audio() {
+    return getOpenAIClient().audio;
+  },
+  get files() {
+    return getOpenAIClient().files;
+  },
+  get beta() {
+    return getOpenAIClient().beta;
+  },
+} as OpenAI;
 
-// Use the deployment name as the model
-const MODEL = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
-
-console.log("✅ Azure OpenAI configured successfully");
-console.log(`   Endpoint: ${process.env.AZURE_OPENAI_ENDPOINT}`);
-console.log(`   Deployment: ${MODEL}`);
-console.log(`   API Version: ${process.env.AZURE_OPENAI_API_VERSION || '2024-02-15-preview'}`);
-
-export { openai, MODEL };
+// Export MODEL with lazy initialization
+export const MODEL = (() => {
+  if (!modelName) {
+    getOpenAIClient();
+  }
+  return modelName || process.env.AZURE_OPENAI_DEPLOYMENT_NAME || '';
+})() as string;
 
