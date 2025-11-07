@@ -6,27 +6,25 @@ import { registerRoutes } from "./routes/index.js";
 import { initializeCosmosDB } from "./lib/cosmosDB.js";
 import { initializeBlobStorage } from "./lib/blobStorage.js";
 
-const app = express();
+// Factory function to create the Express app
+export async function createApp() {
+  const app = express();
 
-// Middleware (increase payload limits for chat history and chart data)
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: false, limit: '20mb' }));
+  // Middleware (increase payload limits for chat history and chart data)
+  app.use(express.json({ limit: '20mb' }));
+  app.use(express.urlencoded({ extended: false, limit: '20mb' }));
 
-// Handle preflight requests explicitly
-app.options('*', corsConfig);
+  // Handle preflight requests explicitly
+  app.options('*', corsConfig);
 
-app.use(corsConfig);
+  app.use(corsConfig);
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
-});
+  // Health check endpoint
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'OK', message: 'Server is running' });
+  });
 
-// Initialize services (for both local and Vercel)
-let initialized = false;
-async function initializeServices() {
-  if (initialized) return;
-  
+  // Initialize services
   try {
     // Initialize CosmosDB (optional)
     try {
@@ -44,26 +42,22 @@ async function initializeServices() {
       console.warn("⚠️ Azure Blob Storage initialization failed, continuing without it:", errorMessage);
     }
     
+    // Register all routes
     await registerRoutes(app);
-    initialized = true;
   } catch (error) {
     console.error("Failed to initialize services:", error);
-    throw error;
+    // Don't throw - allow app to start even if some services fail
   }
+
+  return app;
 }
 
-// For Vercel: export the app and initialize on first request
-// For local: run the server normally
-if (process.env.VERCEL) {
-  // Vercel serverless mode - initialize services
-  initializeServices().catch(console.error);
-}
-
-// Local development mode
+// For Vercel: create app synchronously (will be initialized on first request)
+// For local: create and start server
 if (!process.env.VERCEL) {
   (async () => {
     try {
-      await initializeServices();
+      const app = await createApp();
       const { createServer } = await import("http");
       const server = createServer(app);
       const port = process.env.PORT || 3003;
@@ -77,5 +71,4 @@ if (!process.env.VERCEL) {
   })();
 }
 
-// Export app for Vercel (only exported when imported by api/index.ts)
-export default app;
+// No default export needed - createApp is used directly by api/index.ts
