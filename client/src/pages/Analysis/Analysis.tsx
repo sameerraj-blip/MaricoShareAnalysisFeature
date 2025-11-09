@@ -1,13 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { sessionsApi } from '@/lib/api';
 import { getUserEmail } from '@/utils/userStorage';
-import { Search, Plus, Calendar, FileText, MessageSquare, BarChart3, Loader2 } from 'lucide-react';
+import { Search, Plus, Calendar, FileText, MessageSquare, BarChart3, Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 interface Session {
   id: string;
@@ -37,8 +47,12 @@ interface AnalysisProps {
 const Analysis: React.FC<AnalysisProps> = ({ onNavigate, onNewChat, onLoadSession, onUploadNew }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [sessionToDelete, setSessionToDelete] = useState<Session | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const { toast } = useToast();
   const userEmail = getUserEmail();
+  const queryClient = useQueryClient();
 
   // Debug user email
   useEffect(() => {
@@ -121,6 +135,50 @@ const Analysis: React.FC<AnalysisProps> = ({ onNavigate, onNewChat, onLoadSessio
     } else {
       toast({ title: 'New Analysis', description: 'Starting a new analysis session' });
     }
+  };
+
+  // Handle delete button click
+  const handleDeleteClick = (e: React.MouseEvent, session: Session) => {
+    e.stopPropagation(); // Prevent card click event
+    setSessionToDelete(session);
+    setDeleteDialogOpen(true);
+  };
+
+  // Handle delete confirmation
+  const handleDeleteConfirm = async () => {
+    if (!sessionToDelete) return;
+
+    setIsDeleting(true);
+    try {
+      await sessionsApi.deleteSession(sessionToDelete.sessionId);
+      
+      toast({
+        title: 'Session Deleted',
+        description: `Analysis session for ${sessionToDelete.fileName} has been deleted.`,
+      });
+
+      // Invalidate and refetch sessions
+      await queryClient.invalidateQueries({ queryKey: ['sessions', userEmail] });
+      refetch();
+
+      setDeleteDialogOpen(false);
+      setSessionToDelete(null);
+    } catch (error) {
+      console.error('❌ Failed to delete session:', error);
+      toast({
+        title: 'Error Deleting Session',
+        description: error instanceof Error ? error.message : 'Failed to delete session. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Handle delete cancel
+  const handleDeleteCancel = () => {
+    setDeleteDialogOpen(false);
+    setSessionToDelete(null);
   };
 
   // Format date for display
@@ -259,16 +317,26 @@ const Analysis: React.FC<AnalysisProps> = ({ onNavigate, onNewChat, onLoadSessio
                         </div>
                       </div>
                       
-                      <div className="text-xs text-gray-500">
-                        Session ID: {session.sessionId.substring(0, 8)}...
+                      <div className="text-xs text-gray-500 break-all">
+                        Session ID: {session.sessionId}
                       </div>
                     </div>
                     
-                    <div className="text-right text-sm text-gray-500">
-                      <div>{new Date(session.uploadedAt).toLocaleDateString()}</div>
-                      <div className="text-xs">
-                        {new Date(session.uploadedAt).toLocaleTimeString()}
+                    <div className="flex items-center gap-4">
+                      <div className="text-right text-sm text-gray-500">
+                        <div>{new Date(session.uploadedAt).toLocaleDateString()}</div>
+                        <div className="text-xs">
+                          {new Date(session.uploadedAt).toLocaleTimeString()}
+                        </div>
                       </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => handleDeleteClick(e, session)}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
                 </CardContent>
@@ -277,6 +345,39 @@ const Analysis: React.FC<AnalysisProps> = ({ onNavigate, onNewChat, onLoadSessio
           )}
         </div>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure you want to delete this session?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This action cannot be undone. This will permanently delete the analysis session
+              {sessionToDelete && ` for "${sessionToDelete.fileName}"`} and all associated data,
+              including messages, charts, and insights.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleDeleteCancel} disabled={isDeleting}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteConfirm}
+              disabled={isDeleting}
+              className="bg-red-600 hover:bg-red-700 focus:ring-red-600"
+            >
+              {isDeleting ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };

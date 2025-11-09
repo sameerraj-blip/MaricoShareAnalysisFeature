@@ -103,9 +103,10 @@ export const createChatDocument = async (
   const timestamp = Date.now();
   const chatId = `${fileName.replace(/[^a-zA-Z0-9]/g, '_')}_${timestamp}`;
   
-  const chatDocument: ChatDocument = {
+  const chatDocument: ChatDocument & { fsmrora?: string } = {
     id: chatId,
     username,
+    fsmrora: username, // Add partition key field to match partition key path /fsmrora
     fileName,
     uploadedAt: timestamp,
     createdAt: timestamp,
@@ -262,6 +263,10 @@ export const getUserChats = async (username: string): Promise<ChatDocument[]> =>
 // Get chat by session ID (more efficient)
 export const getChatBySessionIdEfficient = async (sessionId: string): Promise<ChatDocument | null> => {
   try {
+    if (!container) {
+      throw new Error("CosmosDB container not initialized. Please wait for initialization to complete.");
+    }
+    
     const query = "SELECT * FROM c WHERE c.sessionId = @sessionId";
     const { resources } = await container.items.query({
       query,
@@ -283,6 +288,10 @@ export const getChatBySessionIdEfficient = async (sessionId: string): Promise<Ch
 // Delete chat document
 export const deleteChatDocument = async (chatId: string, username: string): Promise<void> => {
   try {
+    if (!container) {
+      throw new Error("CosmosDB container not initialized. Please wait for initialization to complete.");
+    }
+    
     await container.item(chatId, username).delete();
     console.log(`✅ Deleted chat document: ${chatId}`);
   } catch (error) {
@@ -291,6 +300,166 @@ export const deleteChatDocument = async (chatId: string, username: string): Prom
   }
 };
 
+// Delete chat document by session ID
+export const deleteSessionBySessionId = async (sessionId: string, username: string): Promise<void> => {
+  try {
+    // Wait for container to be initialized (with timeout)
+    let retries = 0;
+    const maxRetries = 10;
+    const retryDelay = 500; // 500ms
+    
+    while (!container && retries < maxRetries) {
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+      retries++;
+    }
+    
+    if (!container) {
+      throw new Error("CosmosDB container not initialized. Please wait for initialization to complete.");
+    }
+    
+    // First, get the chat document by sessionId to find the chatId
+    const chatDocument = await getChatBySessionIdEfficient(sessionId);
+    
+    if (!chatDocument) {
+      throw new Error(`Session not found for sessionId: ${sessionId}`);
+    }
+    
+    const chatId = chatDocument.id;
+    
+    console.log(`🗑️ Attempting to delete session: ${sessionId}`);
+    console.log(`   Chat ID: ${chatId}`);
+    console.log(`   Username from doc: ${chatDocument.username}`);
+    console.log(`   fsmrora from doc: ${(chatDocument as any).fsmrora || 'not found'}`);
+    
+    // Try to delete using SQL query since we know the document exists but partition key might be wrong
+    // This approach doesn't require the exact partition key value
+    try {
+      // First, try to read the document to verify the partition key
+      // Try with fsmrora field value if it exists
+      let partitionKeyValue: string | undefined;
+      let deleteSuccess = false;
+      
+      // Try different partition key values
+      const possiblePartitionKeys = [
+        (chatDocument as any).fsmrora,
+        chatDocument.username,
+        username
+      ].filter(Boolean) as string[];
+      
+      console.log(`   Trying partition keys: ${possiblePartitionKeys.join(', ')}`);
+      
+      // Try each possible partition key value
+      for (const pkValue of possiblePartitionKeys) {
+        try {
+          // Try to read with this partition key to verify it works
+          const testRead = await container.item(chatId, pkValue).read();
+          console.log(`   ✅ Verified partition key: ${pkValue}`);
+          
+          // Now delete with the verified partition key
+          await container.item(chatId, pkValue).delete();
+          console.log(`✅ Successfully deleted session: ${sessionId} (chatId: ${chatId}, partitionKey: ${pkValue})`);
+          deleteSuccess = true;
+          break;
+        } catch (pkError: any) {
+          if (pkError.code === 404) {
+            console.log(`   ⚠️ Partition key ${pkValue} didn't work (404), trying next...`);
+            continue;
+          }
+          // For other errors, re-throw
+          throw pkError;
+        }
+      }
+      
+      if (!deleteSuccess) {
+        // If direct delete failed, the document might have been stored with undefined/null partition key
+        // Try using the document's actual partition key from the query result
+        console.log(`   ⚠️ Direct delete failed, trying to get actual partition key from document...`);
+        
+        // Query the document by id to get its actual partition key value
+        const queryResult = await container.items.query({
+          query: "SELECT * FROM c WHERE c.id = @id",
+          parameters: [{ name: "@id", value: chatId }]
+        }).fetchAll();
+        
+        if (queryResult.resources.length > 0) {
+          const doc = queryResult.resources[0];
+          // Try to get the actual partition key value from the document
+          // CosmosDB might have stored it differently
+          const actualPartitionKey = doc.fsmrora || doc.username || chatDocument.username;
+          
+          console.log(`   Document from query - fsmrora: ${doc.fsmrora || 'not found'}, username: ${doc.username}`);
+          console.log(`   Attempting delete with partition key: ${actualPartitionKey}`);
+          
+          try {
+            await container.item(chatId, actualPartitionKey).delete();
+            console.log(`✅ Successfully deleted using partition key from query`);
+            deleteSuccess = true;
+          } catch (queryDeleteError: any) {
+            // If that fails, the document might have been stored without the fsmrora field
+            // Try updating the document first to add the fsmrora field, then delete
+            console.log(`   ⚠️ Delete with query partition key failed: ${queryDeleteError.code}`);
+            console.log(`   Attempting to update document with fsmrora field, then delete...`);
+            
+            try {
+              // Update the document to add the fsmrora field with the username value
+              // First, we need to read it with the correct partition key (which we don't know)
+              // So we'll use a workaround: update via query result
+              const docToUpdate = queryResult.resources[0];
+              docToUpdate.fsmrora = docToUpdate.username || chatDocument.username;
+              
+              // Try to replace the document - this requires the correct partition key
+              // Since we don't know it, we'll try with username
+              const partitionKeyForUpdate = docToUpdate.fsmrora || docToUpdate.username || chatDocument.username;
+              
+              try {
+                await container.item(chatId, partitionKeyForUpdate).replace(docToUpdate);
+                console.log(`   ✅ Updated document with fsmrora field`);
+                
+                // Now try to delete with the updated partition key
+                await container.item(chatId, partitionKeyForUpdate).delete();
+                console.log(`✅ Successfully deleted after updating fsmrora field`);
+                deleteSuccess = true;
+              } catch (updateError: any) {
+                console.log(`   ⚠️ Update failed: ${updateError.code} - ${updateError.message}`);
+                throw new Error(`Cannot delete document - partition key mismatch. The document may need to be manually updated in CosmosDB to include the fsmrora field.`);
+              }
+            } catch (updateDeleteError: any) {
+              throw new Error(`Cannot delete document - partition key mismatch. Error: ${updateDeleteError.message}`);
+            }
+          }
+        } else {
+          throw new Error(`Document not found in query - may have already been deleted`);
+        }
+      }
+      
+      if (!deleteSuccess) {
+        throw new Error(`Could not delete document with any partition key value`);
+      }
+      
+      // Verify deletion
+      try {
+        const verifyDoc = await container.item(chatId, possiblePartitionKeys[0]).read();
+        console.warn(`⚠️ Warning: Document still exists after deletion attempt. ChatId: ${chatId}`);
+        throw new Error(`Deletion failed - document still exists in database`);
+      } catch (verifyError: any) {
+        if (verifyError.code === 404 || verifyError.statusCode === 404) {
+          console.log(`   ✅ Verified: Document no longer exists - deletion successful`);
+          return; // Success
+        }
+        throw verifyError;
+      }
+    } catch (deleteError: any) {
+      // If all methods fail, throw the error
+      throw deleteError;
+    }
+  } catch (error: any) {
+    console.error("❌ Failed to delete session by sessionId:", error);
+    console.error("   Error code:", error.code);
+    console.error("   Error statusCode:", error.statusCode);
+    console.error("   Error message:", error.message);
+    throw error;
+  }
+};
 // =================== Dashboards CRUD ===================
 
 export const createDashboard = async (

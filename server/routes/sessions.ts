@@ -5,7 +5,8 @@ import {
   getSessionsFilteredEndpoint,
   getSessionStatisticsEndpoint,
   getSessionDetailsEndpoint,
-  getSessionsByUserEndpoint
+  getSessionsByUserEndpoint,
+  deleteSessionEndpoint
 } from "../controllers/sessionController.js";
 
 const router = Router();
@@ -27,5 +28,8 @@ router.get('/sessions/details/:sessionId', getSessionDetailsEndpoint);
 
 // Get sessions by user
 router.get('/sessions/user/:username', getSessionsByUserEndpoint);
+
+// Delete session by session ID
+router.delete('/sessions/:sessionId', deleteSessionEndpoint);
 
 export default router;

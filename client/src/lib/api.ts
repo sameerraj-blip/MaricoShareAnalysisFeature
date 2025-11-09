@@ -235,6 +235,9 @@ export const sessionsApi = {
   
   // Get sessions by specific user
   getSessionsByUser: (username: string) => api.get(`/api/sessions/user/${username}`),
+  
+  // Delete session by session ID
+  deleteSession: (sessionId: string) => api.delete(`/api/sessions/${sessionId}`),
 };
 
 export default apiClient;

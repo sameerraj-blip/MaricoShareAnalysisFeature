@@ -278,8 +278,8 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
   }
 
   return (
-    <div className="bg-muted/30 min-h-[calc(100vh-72px)]">
-      <div className="flex w-full flex-col gap-6 px-4 py-8 lg:px-8">
+    <div className="bg-muted/30 h-[calc(100vh-72px)] flex flex-col overflow-y-auto">
+      <div className="flex-shrink-0 px-4 pt-8 pb-4 lg:px-8">
         <DashboardHeader
           name={dashboard.name}
           createdAt={dashboard.createdAt}
@@ -289,14 +289,18 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
           onExport={handleExport}
         />
 
-        <DashboardFilters
-          isLoading={isExporting || isRefreshing}
-          onReset={handleResetAllFilters}
-          appliedFilters={dashboardFilterSummary}
-          hasActiveFilters={dashboardFilterSummary.length > 0}
-        />
+        <div className="mt-6">
+          <DashboardFilters
+            isLoading={isExporting || isRefreshing}
+            onReset={handleResetAllFilters}
+            appliedFilters={dashboardFilterSummary}
+            hasActiveFilters={dashboardFilterSummary.length > 0}
+          />
+        </div>
+      </div>
 
-        <div className="flex flex-col gap-8 lg:flex-row">
+      <div className="flex-1 min-h-0 flex flex-col gap-8 px-4 pb-8 lg:px-8 lg:flex-row overflow-hidden">
+        <div className="flex-shrink-0">
           <DashboardSectionNav
             sections={sections.map((section) => ({
               id: section.id,
@@ -306,36 +310,36 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
             activeSectionId={activeSection?.id || 'overview'}
             onSelect={(sectionId) => setActiveSectionId(sectionId)}
           />
+        </div>
 
-          <div className="flex-1 space-y-10 overflow-x-hidden">
-            {activeSection ? (
-              <section
-                key={activeSection.id}
-                id={`section-${activeSection.id}`}
-                className="space-y-4"
-                data-dashboard-section={activeSection.id}
-              >
-                <div>
-                  <h2 className="text-lg font-semibold text-foreground">{activeSection.title}</h2>
-                  {activeSection.description && (
-                    <p className="text-sm text-muted-foreground">{activeSection.description}</p>
-                  )}
-                </div>
-
-                <DashboardTiles
-                  dashboardId={dashboard.id}
-                  tiles={activeSection.tiles}
-                  onDeleteChart={onDeleteChart}
-                  filtersByTile={tileFilters}
-                  onTileFiltersChange={handleTileFiltersChange}
-                />
-              </section>
-            ) : (
-              <div className="rounded-lg border border-dashed border-border p-12 text-center text-sm text-muted-foreground">
-                Select a section to get started.
+        <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden">
+          {activeSection ? (
+            <section
+              key={activeSection.id}
+              id={`section-${activeSection.id}`}
+              className="space-y-4"
+              data-dashboard-section={activeSection.id}
+            >
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">{activeSection.title}</h2>
+                {activeSection.description && (
+                  <p className="text-sm text-muted-foreground">{activeSection.description}</p>
+                )}
               </div>
-            )}
-          </div>
+
+              <DashboardTiles
+                dashboardId={dashboard.id}
+                tiles={activeSection.tiles}
+                onDeleteChart={onDeleteChart}
+                filtersByTile={tileFilters}
+                onTileFiltersChange={handleTileFiltersChange}
+              />
+            </section>
+          ) : (
+            <div className="rounded-lg border border-dashed border-border p-12 text-center text-sm text-muted-foreground">
+              Select a section to get started.
+            </div>
+          )}
         </div>
       </div>
     </div>

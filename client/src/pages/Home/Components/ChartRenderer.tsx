@@ -803,296 +803,6 @@ export function ChartRenderer({
         >
           <div className="mb-2 flex items-start justify-between gap-2">
             <h3 className="line-clamp-2 text-sm font-semibold text-foreground">{title}</h3>
-            {enableFilters && filterDefinitions.length > 0 && (
-              <div
-                className="flex items-center gap-2"
-                data-chart-filter-control="true"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant={filtersApplied ? 'default' : 'outline'}
-                      size="sm"
-                      className="h-7 gap-1 px-3 text-xs"
-                    >
-                      <Filter className="h-3.5 w-3.5" />
-                      Filters
-                      {filtersApplied && (
-                        <Badge
-                          variant="secondary"
-                          className="ml-1 h-4 rounded-full px-1 text-[10px] font-medium leading-none"
-                        >
-                          {Object.keys(effectiveFilters).length}
-                        </Badge>
-                      )}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    align="end"
-                    className="w-80 space-y-4 p-4"
-                    sideOffset={8}
-                    onClick={(event) => event.stopPropagation()}
-                    data-chart-filter-control="true"
-                  >
-                    {filterDefinitions.map((definition) => {
-                      const selection = effectiveFilters[definition.key];
-
-                      if (definition.type === 'categorical') {
-                        return (
-                          <div key={definition.key} className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium text-foreground">{definition.label}</span>
-                              {selection && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-xs"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleClearFilterKey(definition.key);
-                                  }}
-                                >
-                                  Clear
-                                </Button>
-                              )}
-                            </div>
-                            <ScrollArea className="max-h-52 pr-2">
-                              <div className="flex flex-col gap-2">
-                                {definition.options.map((option) => {
-                                  const isChecked =
-                                    selection?.type === 'categorical' &&
-                                    selection.values.includes(option.value);
-                                  return (
-                                    <label
-                                      key={option.value}
-                                      className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-muted/30 px-2 py-1.5"
-                                    >
-                                      <div className="flex items-center gap-2">
-                                        <Checkbox
-                                          checked={isChecked}
-                                          onCheckedChange={(checked) =>
-                                            handleToggleCategoricalOption(
-                                              definition.key,
-                                              option.value,
-                                              Boolean(checked)
-                                            )
-                                          }
-                                        />
-                                        <span className="text-sm text-foreground">{option.label}</span>
-                                      </div>
-                                      <span className="text-xs text-muted-foreground">{option.count}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            </ScrollArea>
-                          </div>
-                        );
-                      }
-
-                      if (definition.type === 'date') {
-                        return (
-                          <div key={definition.key} className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium text-foreground">{definition.label}</span>
-                              {selection && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-xs"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleClearFilterKey(definition.key);
-                                  }}
-                                >
-                                  Clear
-                                </Button>
-                              )}
-                            </div>
-                            <div className="grid grid-cols-1 gap-3">
-                              {definition.min && definition.max && (
-                                <p className="text-xs text-muted-foreground">
-                                  {formatDateForDisplay(definition.min) ?? definition.min} –{' '}
-                                  {formatDateForDisplay(definition.max) ?? definition.max}
-                                </p>
-                              )}
-                              <div className="flex flex-col gap-1">
-                                <Label
-                                  htmlFor={`filter-${definition.key}-start`}
-                                  className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
-                                >
-                                  Start
-                                </Label>
-                                <Input
-                                  id={`filter-${definition.key}-start`}
-                                  type="date"
-                                  value={selection?.type === 'date' && selection.start ? selection.start : ''}
-                                  min={definition.min}
-                                  max={
-                                    selection?.type === 'date' && selection.end
-                                      ? selection.end
-                                      : definition.max
-                                  }
-                                  onChange={(event) =>
-                                    handleDateChange(
-                                      definition.key,
-                                      'start',
-                                      event.target.value ? event.target.value : undefined
-                                    )
-                                  }
-                                />
-                              </div>
-                              <div className="flex flex-col gap-1">
-                                <Label
-                                  htmlFor={`filter-${definition.key}-end`}
-                                  className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
-                                >
-                                  End
-                                </Label>
-                                <Input
-                                  id={`filter-${definition.key}-end`}
-                                  type="date"
-                                  value={selection?.type === 'date' && selection.end ? selection.end : ''}
-                                  min={
-                                    selection?.type === 'date' && selection.start
-                                      ? selection.start
-                                      : definition.min
-                                  }
-                                  max={definition.max}
-                                  onChange={(event) =>
-                                    handleDateChange(
-                                      definition.key,
-                                      'end',
-                                      event.target.value ? event.target.value : undefined
-                                    )
-                                  }
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }
-
-                      if (definition.type === 'numeric') {
-                        const numericSelection = selection?.type === 'numeric' ? selection : undefined;
-                        const currentMin =
-                          numericSelection?.min !== undefined ? numericSelection.min : definition.min;
-                        const currentMax =
-                          numericSelection?.max !== undefined ? numericSelection.max : definition.max;
-                        const step = determineSliderStep(definition.min, definition.max);
-
-                        return (
-                          <div key={definition.key} className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium text-foreground">{definition.label}</span>
-                              {numericSelection && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-xs"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleClearFilterKey(definition.key);
-                                  }}
-                                >
-                                  Clear
-                                </Button>
-                              )}
-                            </div>
-                            <div className="space-y-3">
-                              <Slider
-                                value={[currentMin, currentMax]}
-                                min={definition.min}
-                                max={definition.max}
-                                step={step}
-                                onValueChange={(values) => handleNumericSliderChange(definition, values)}
-                              />
-                              <div className="grid grid-cols-2 gap-2">
-                                <div className="flex flex-col gap-1">
-                                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                                    Min
-                                  </Label>
-                                  <Input
-                                    type="number"
-                                    value={
-                                      numericSelection?.min !== undefined
-                                        ? String(numericSelection.min)
-                                        : ''
-                                    }
-                                    placeholder={definition.min.toString()}
-                                    onChange={(event) => {
-                                      const raw = event.target.value.trim();
-                                      if (raw === '') {
-                                        handleNumericBoundsChange(definition, 'min', undefined);
-                                        return;
-                                      }
-                                      const parsed = Number(raw);
-                                      if (Number.isNaN(parsed)) return;
-                                      handleNumericBoundsChange(
-                                        definition,
-                                        'min',
-                                        parsed
-                                      );
-                                    }}
-                                  />
-                                </div>
-                                <div className="flex flex-col gap-1">
-                                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                                    Max
-                                  </Label>
-                                  <Input
-                                    type="number"
-                                    value={
-                                      numericSelection?.max !== undefined
-                                        ? String(numericSelection.max)
-                                        : ''
-                                    }
-                                    placeholder={definition.max.toString()}
-                                    onChange={(event) => {
-                                      const raw = event.target.value.trim();
-                                      if (raw === '') {
-                                        handleNumericBoundsChange(definition, 'max', undefined);
-                                        return;
-                                      }
-                                      const parsed = Number(raw);
-                                      if (Number.isNaN(parsed)) return;
-                                      handleNumericBoundsChange(
-                                        definition,
-                                        'max',
-                                        parsed
-                                      );
-                                    }}
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }
-
-                      return null;
-                    })}
-
-                    <div className="flex items-center justify-between pt-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 px-3 text-xs"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleResetFilters();
-                        }}
-                        disabled={!filtersApplied}
-                      >
-                        Reset filters
-                      </Button>
-                      <span className="text-xs text-muted-foreground">{chartData.length} rows</span>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              </div>
-            )}
           </div>
 
           {enableFilters && activeFilterChips.length > 0 && (
@@ -1146,12 +856,40 @@ export function ChartRenderer({
           isOpen={isModalOpen}
           onClose={() => setIsModalOpen(false)}
           chart={chart}
+          enableFilters={enableFilters}
+          filterDefinitions={filterDefinitions}
+          effectiveFilters={effectiveFilters}
+          filtersApplied={filtersApplied}
+          chartData={chartData}
+          onFiltersChange={updateFilters}
+          handleClearFilterKey={handleClearFilterKey}
+          handleToggleCategoricalOption={handleToggleCategoricalOption}
+          handleDateChange={handleDateChange}
+          handleNumericSliderChange={handleNumericSliderChange}
+          handleNumericBoundsChange={handleNumericBoundsChange}
+          handleResetFilters={handleResetFilters}
+          formatDateForDisplay={formatDateForDisplay}
+          determineSliderStep={determineSliderStep}
         />
       ) : (
       <ChartModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         chart={chart}
+        enableFilters={enableFilters}
+        filterDefinitions={filterDefinitions}
+        effectiveFilters={effectiveFilters}
+        filtersApplied={filtersApplied}
+        chartData={chartData}
+        onFiltersChange={updateFilters}
+        handleClearFilterKey={handleClearFilterKey}
+        handleToggleCategoricalOption={handleToggleCategoricalOption}
+        handleDateChange={handleDateChange}
+        handleNumericSliderChange={handleNumericSliderChange}
+        handleNumericBoundsChange={handleNumericBoundsChange}
+        handleResetFilters={handleResetFilters}
+        formatDateForDisplay={formatDateForDisplay}
+        determineSliderStep={determineSliderStep}
       />
       )}
       <DashboardModal

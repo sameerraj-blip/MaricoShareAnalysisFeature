@@ -43,7 +43,7 @@ export function DashboardList({
 }: DashboardListProps) {
   if (!isLoading && dashboards.length === 0) {
     return (
-      <div className="h-[calc(100vh-10vh)] flex flex-col items-center justify-center text-center py-12">
+      <div className="h-[calc(100vh-72px)] flex flex-col items-center justify-center text-center py-12">
         <div className="rounded-full bg-muted p-6 mb-4">
           <BarChart3 className="h-12 w-12 text-muted-foreground" />
         </div>
@@ -60,8 +60,8 @@ export function DashboardList({
   }
 
   return (
-    <div className="h-[calc(100vh-10vh)] overflow-y-auto">
-      <div className="p-6">
+    <div className="h-[calc(100vh-72px)] flex flex-col overflow-hidden">
+      <div className="flex-shrink-0 p-6 pb-4">
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-foreground mb-2">Your Dashboards</h1>
           <p className="text-muted-foreground flex items-center gap-2">
@@ -73,7 +73,9 @@ export function DashboardList({
             )}
           </p>
         </div>
+      </div>
 
+      <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {isLoading
           ? Array.from({ length: 3 }).map((_, index) => <SkeletonCard key={`skeleton-${index}`} />)

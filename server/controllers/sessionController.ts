@@ -5,6 +5,7 @@ import {
   getSessionsWithFilters, 
   getSessionStatistics,
   getChatBySessionIdEfficient,
+  deleteSessionBySessionId,
   ChatDocument 
 } from "../lib/cosmosDB.js";
 
@@ -233,6 +234,57 @@ export const getSessionsByUserEndpoint = async (req: Request, res: Response) => 
     console.error('Get sessions by user error:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to fetch sessions by user',
+    });
+  }
+};
+
+// Delete session by session ID
+export const deleteSessionEndpoint = async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    // Get username from headers or query parameters
+    const username = req.headers['x-user-email'] || req.query.username;
+    
+    if (!username) {
+      return res.status(400).json({ 
+        error: 'Username is required. Please ensure you are logged in.' 
+      });
+    }
+
+    // Delete the session
+    await deleteSessionBySessionId(sessionId, username as string);
+    
+    res.json({
+      success: true,
+      message: `Session ${sessionId} deleted successfully`,
+      sessionId
+    });
+  } catch (error) {
+    console.error('Delete session error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to delete session';
+    
+    // Check if it's a "not found" error
+    if (errorMessage.includes('not found') || errorMessage.includes('Session not found')) {
+      return res.status(404).json({
+        error: errorMessage
+      });
+    }
+    
+    // Check if it's a CosmosDB initialization error
+    if (errorMessage.includes('not initialized')) {
+      return res.status(503).json({
+        error: 'Database is initializing. Please try again in a moment.',
+        retryAfter: 2
+      });
+    }
+    
+    res.status(500).json({
+      error: errorMessage
     });
   }
 };
