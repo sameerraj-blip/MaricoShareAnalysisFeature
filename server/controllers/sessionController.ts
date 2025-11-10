@@ -43,8 +43,18 @@ export const getAllSessionsEndpoint = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Get all sessions error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to fetch all sessions';
+    
+    // Check if it's a CosmosDB initialization error
+    if (errorMessage.includes('not initialized')) {
+      return res.status(503).json({
+        error: 'Database is initializing. Please try again in a moment.',
+        retryAfter: 2
+      });
+    }
+    
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to fetch all sessions',
+      error: errorMessage,
     });
   }
 };
