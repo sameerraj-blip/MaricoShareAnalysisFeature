@@ -1,4 +1,4 @@
-import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest } from '../../shared/queryTypes.js';
+import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest, AggregationOperation } from '../../shared/queryTypes.js';
 import { DataSummary } from '../../shared/schema.js';
 
 interface TransformationResult {
@@ -199,7 +199,9 @@ function applyValueFilter(data: Record<string, any>[], filter: ValueFilter): { d
   if (filter.reference && referenceVal === null) {
     referenceVal = referenceValue(data[0] || {}, filter, data);
   }
-  const displayValue = filter.reference ? `${filter.reference} (${referenceVal?.toFixed(2) || 'N/A'})` : filter.value;
+  const displayValue = filter.reference 
+    ? `${filter.reference} (${referenceVal !== null ? referenceVal.toFixed(2) : 'N/A'})` 
+    : filter.value;
   
   console.log(`   Filter result: ${result.length} rows passed filter (from ${data.length} total)`);
   if (result.length === 0 && data.length > 0) {
@@ -336,7 +338,7 @@ function applyAggregations(
   }
 
   // For percent_change, we need to calculate across groups, so handle it separately
-  const hasPercentChange = aggregations.some(agg => (agg.operation as string) === 'percent_change');
+  const hasPercentChange = aggregations.some(agg => agg.operation === 'percent_change');
   
   let aggregatedRows: Record<string, any>[] = [];
   
@@ -351,13 +353,15 @@ function applyAggregations(
       });
 
       for (const agg of aggregations) {
-        if ((agg.operation as string) === 'percent_change') {
+        if (agg.operation === 'percent_change') {
           // Skip percent_change for now, will calculate after sorting
           continue;
         }
         const values = rows.map((r: Record<string, any>) => toNumber(r[agg.column])).filter((v: number) => !isNaN(v));
         let resultValue: number | null = null;
-        switch (agg.operation) {
+        // TypeScript: percent_change is already filtered out above, so we can safely narrow the type
+        const op = agg.operation as Exclude<AggregationOperation, 'percent_change'>;
+        switch (op) {
           case 'sum':
             resultValue = values.reduce((sum, val) => sum + val, 0);
             break;
@@ -409,7 +413,7 @@ function applyAggregations(
     
     // Now calculate percent_change for each aggregation
     for (const agg of aggregations) {
-      if ((agg.operation as string) === 'percent_change') {
+      if (agg.operation === 'percent_change') {
         const targetName = agg.alias || `${agg.column}_${agg.operation}`;
         
         for (let i = 0; i < aggregatedRows.length; i++) {
@@ -462,7 +466,9 @@ function applyAggregations(
       for (const agg of aggregations) {
         const values = rows.map((r: Record<string, any>) => toNumber(r[agg.column])).filter((v: number) => !isNaN(v));
         let resultValue: number | null = null;
-        switch (agg.operation) {
+        // TypeScript: percent_change is handled separately, so we can safely narrow the type
+        const op = agg.operation as Exclude<AggregationOperation, 'percent_change'>;
+        switch (op) {
           case 'sum':
             resultValue = values.reduce((sum: number, val: number) => sum + val, 0);
             break;
