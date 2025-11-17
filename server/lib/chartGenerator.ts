@@ -293,13 +293,13 @@ export function processChartData(
       // X-axis is dates - sort chronologically by date
       console.log(`   X-axis contains dates (${dateParseCount}/${sampleXValues.length} samples parsed as dates), sorting chronologically`);
       result = aggregated
-        .sort((a, b) => compareValues(a[xCol], b[xCol]))
-        .slice(0, 50); // Allow more points for time series
+        .sort((a, b) => compareValues(a[xCol], b[xCol]));
+      // No limit - show all date-based bars
     } else {
-      // X-axis is not dates - sort by Y value (descending) and take top 10
+      // X-axis is not dates - sort by Y value (descending)
       result = aggregated
-      .sort((a, b) => toNumber(b[yCol]) - toNumber(a[yCol]))
-      .slice(0, 10);
+        .sort((a, b) => toNumber(b[yCol]) - toNumber(a[yCol]));
+      // No limit - show all bars
     }
     
     console.log(`   Bar chart result: ${result.length} bars`);

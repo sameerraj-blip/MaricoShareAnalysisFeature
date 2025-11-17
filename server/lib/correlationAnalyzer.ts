@@ -46,7 +46,8 @@ export async function analyzeCorrelations(
   numericColumns: string[],
   filter: 'all' | 'positive' | 'negative' = 'all',
   sortOrder?: 'ascending' | 'descending',
-  chatInsights?: Insight[]
+  chatInsights?: Insight[],
+  maxResults?: number
 ): Promise<{ charts: ChartSpec[]; insights: Insight[] }> {
   console.log('=== CORRELATION ANALYSIS DEBUG ===');
   console.log('Target variable:', targetVariable);
@@ -95,7 +96,15 @@ export async function analyzeCorrelations(
 
   // Get top correlations (by absolute value, then apply filter)
   const sortedCorrelations = filteredCorrelations.sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
-  const topCorrelations = sortedCorrelations.slice(0, 12);
+  
+  // Apply limit if specified (e.g., "top 10"), otherwise show all
+  const topCorrelations = maxResults 
+    ? sortedCorrelations.slice(0, maxResults)
+    : sortedCorrelations;
+  
+  if (maxResults) {
+    console.log(`Limiting to top ${maxResults} correlations as requested`);
+  }
 
   // Generate scatter plots for top 3 correlations
   // IMPORTANT: For correlation/impact questions, target variable ALWAYS goes on Y-axis
@@ -254,7 +263,7 @@ export async function analyzeCorrelations(
     console.error('Failed to enrich correlation charts with insights:', e);
   }
 
-  // Generate AI insights about correlations (use full sorted list so AI doesn't miss variables)
+  // Generate AI insights about correlations (use the same correlations shown in charts)
   // Pass data and summary for quantified recommendations
   const summaryStub: DataSummary = {
     rowCount: data.length,
@@ -263,7 +272,8 @@ export async function analyzeCorrelations(
     numericColumns: numericColumns,
     dateColumns: [],
   } as unknown as DataSummary;
-  const insights = await generateCorrelationInsights(targetVariable, sortedCorrelations, data, summaryStub, filter);
+  // Pass topCorrelations (same as used in charts) to ensure insights match what's displayed
+  const insights = await generateCorrelationInsights(targetVariable, topCorrelations, data, summaryStub, filter);
 
   return { charts, insights };
 }
@@ -334,13 +344,14 @@ async function generateCorrelationInsights(
   // Ensure filter is defined (defensive check)
   const correlationFilter: 'all' | 'positive' | 'negative' = filter || 'all';
   
-  // Calculate quantified statistics for top correlations if data is available
+  // Calculate quantified statistics for correlations if data is available
+  // Include statistics for all correlations (or top 10 if there are many) to help AI generate better insights
   let quantifiedStats = '';
   if (data && data.length > 0 && summary) {
-    const top3Correlations = correlations.slice(0, 3);
-    quantifiedStats = '\n\nQUANTIFIED STATISTICS FOR TOP FACTORS:\n';
+    const correlationsForStats = correlations.slice(0, Math.min(correlations.length, 10));
+    quantifiedStats = '\n\nQUANTIFIED STATISTICS FOR FACTORS:\n';
     
-    for (const corr of top3Correlations) {
+    for (const corr of correlationsForStats) {
       const factorValues = data
         .map(row => Number(String(row[corr.variable]).replace(/[%,,]/g, '')))
         .filter(v => !isNaN(v));
@@ -398,6 +409,10 @@ ${optimalFactorRange ? `- Optimal ${corr.variable} range for top ${targetVariabl
     }
   }
   
+  // Determine dynamic insight limit based on number of correlations
+  // Generate insights for all correlations shown (matching what's in charts)
+  const insightCount = correlations.length;
+  
   const filterContext = correlationFilter === 'positive' 
     ? '\nIMPORTANT: The user specifically requested ONLY POSITIVE correlations. All correlations shown are positive. Focus your insights on these positive relationships only.'
     : correlationFilter === 'negative'
@@ -422,7 +437,7 @@ CRITICAL CONTEXT:
 - The listed variables are FACTOR VARIABLES we can CHANGE (X-axis)
 - Suggestions MUST explain: "How to change [FACTOR] to improve [TARGET]"
 
-Write 5-7 insights. Each must include:
+Write exactly ${insightCount} insights (one for each variable listed above). Each must include:
 1. **Bold headline** with the key finding
 2. Exact r and nPairs values
 3. Interpretation of the relationship
@@ -433,6 +448,8 @@ Write 5-7 insights. Each must include:
    - NEVER use percentile labels like "P75", "P90", "P25", "P75 level", "P90 level", "P75 value", "P90 value" - ONLY use the numeric values themselves
    - Example format: "**Current suggestion:** [explain relationship]. **Quantified Action:** To improve ${targetVariable} to [target value], adjust [factor] from current average ([current]) to optimal range ([optimal range]) or target value ([target value])."
 5. End with: "Reminder: Correlation does not imply causation."
+
+IMPORTANT: Generate exactly ${insightCount} insights - one for each of the ${insightCount} variables listed above, in order of correlation strength (strongest first).
 
 Output JSON only: {"insights":[{"text":"..."}]}`;
 
@@ -450,7 +467,9 @@ Output JSON only: {"insights":[{"text":"..."}]}`;
     ],
     response_format: { type: 'json_object' },
     temperature: 0.7,
-    max_tokens: 2000,
+    // Scale tokens dynamically with insight count: base 2000 + ~200 per additional insight beyond 7
+    // Cap at 10,000 to allow for many insights, but scales down for fewer insights
+    max_tokens: Math.min(2000 + Math.max(0, (insightCount - 7) * 200), 10000),
   });
 
   const content = response.choices[0].message.content || '{}';
@@ -459,7 +478,9 @@ Output JSON only: {"insights":[{"text":"..."}]}`;
     const parsed = JSON.parse(content);
     const insightArray = parsed.insights || [];
     
-    return insightArray.slice(0, 7).map((item: any, index: number) => ({
+    // Return all insights up to the expected count (no hard limit)
+    // If AI generated fewer, return what we got; if more, cap at expected count
+    return insightArray.slice(0, insightCount).map((item: any, index: number) => ({
       id: index + 1,
       text: item.text || item.insight || String(item),
     }));

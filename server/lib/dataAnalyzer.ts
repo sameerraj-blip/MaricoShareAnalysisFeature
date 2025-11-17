@@ -1117,7 +1117,8 @@ export async function answerQuestion(
         comparisonColumns,
         correlationFilter,
         sortOrder,
-        chatInsights
+        chatInsights,
+        undefined // No limit for legacy dataAnalyzer
       );
       
       // Update bar chart title to be more specific if adstocked variables were requested
@@ -1234,7 +1235,8 @@ export async function answerQuestion(
           [xVar],
           correlationFilter,
           sortOrder,
-          chatInsights
+          chatInsights,
+          undefined // No limit for legacy dataAnalyzer
         );
         const filterNote = correlationFilter === 'positive' ? ' (showing only positive correlations)' : correlationFilter === 'negative' ? ' (showing only negative correlations)' : '';
         const answer = `I've analyzed the correlation between ${specificCol} and ${targetCol}${filterNote}. The scatter plot is oriented with X = ${xVar} and Y = ${yVar} as requested.`;
@@ -1299,7 +1301,8 @@ export async function answerQuestion(
         comparisonColumns,
         correlationFilter,
         sortOrderGeneral,
-        chatInsights
+        chatInsights,
+        undefined // No limit for legacy dataAnalyzer
       );
 
       // Fallback: if for any reason charts came back without per-chart insights,

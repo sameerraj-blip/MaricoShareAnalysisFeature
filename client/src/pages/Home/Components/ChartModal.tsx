@@ -98,6 +98,39 @@ const determineSliderStepLocal = (min: number, max: number) => {
   return Math.pow(10, Math.floor(Math.log10(range)) - 1);
 };
 
+const parseNumericValue = (value: any): number => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : NaN;
+  }
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[,%]/g, '').trim();
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
+};
+
+const getNumericValues = (rows: Record<string, any>[], key?: string | null) => {
+  if (!key) return [];
+  return rows
+    .map((row) => parseNumericValue(row?.[key]))
+    .filter((val) => Number.isFinite(val)) as number[];
+};
+
+const getDynamicDomain = (values: number[], paddingFraction: number = 0.1) => {
+  if (!values.length) return undefined;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return undefined;
+  if (min === max) {
+    const pad = Math.max(Math.abs(min) * 0.1, 5);
+    return [min - pad, max + pad] as [number, number];
+  }
+  const range = max - min;
+  const padding = Math.max(range * paddingFraction, 2);
+  return [min - padding, max + padding] as [number, number];
+};
+
 export function ChartModal({ 
   isOpen, 
   onClose, 
@@ -130,6 +163,10 @@ export function ChartModal({
         // For dual-axis charts, use blue for left axis, red for right axis
         const leftAxisColor = chart.y2 ? '#3b82f6' : chartColor; // Blue for left when dual-axis
         const rightAxisColor = '#ef4444'; // Red for right axis
+        const leftValues = getNumericValues(data as Record<string, any>[], y);
+        const leftDomain = yDomain || getDynamicDomain(leftValues);
+        const rightValues = chart.y2 ? getNumericValues(data as Record<string, any>[], chart.y2 as string) : [];
+        const rightDomain = chart.y2 ? getDynamicDomain(rightValues) : undefined;
         
         return (
           <ResponsiveContainer width="100%" height={400}>
@@ -153,6 +190,7 @@ export function ChartModal({
                 width={90}
                     label={{ value: yLabel || y, angle: -90, position: 'left', style: { textAnchor: 'middle', fill: leftAxisColor, fontSize: 16, fontWeight: 600 } }}
                 yAxisId="left"
+                domain={leftDomain}
               />
                 <YAxis
                   orientation="right"
@@ -162,6 +200,7 @@ export function ChartModal({
                     tickFormatter={formatAxisLabel}
                     width={90}
                     label={{ value: chart.y2Label || chart.y2, angle: 90, position: 'right', style: { textAnchor: 'middle', fill: rightAxisColor, fontSize: 16, fontWeight: 600 } }}
+                  domain={rightDomain}
                   />
                 </>
               ) : (
@@ -171,6 +210,7 @@ export function ChartModal({
                   tickFormatter={formatAxisLabel}
                   width={90}
                   label={{ value: yLabel || y, angle: -90, position: 'left', style: { textAnchor: 'middle', fill: leftAxisColor, fontSize: 16, fontWeight: 600 } }}
+                domain={leftDomain}
                 />
               )}
               <Tooltip
@@ -241,16 +281,17 @@ export function ChartModal({
       case 'bar':
         return (
           <ResponsiveContainer width="100%" height={400}>
-            <BarChart data={data} margin={{ left: 60, right: 20, top: 20, bottom: 40 }}>
+            <BarChart data={data} margin={{ left: 60, right: 20, top: 20, bottom: 80 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
               <XAxis
                 dataKey={x}
-                tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12, fontFamily: 'var(--font-mono)' }}
+                tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11, fontFamily: 'var(--font-mono)' }}
                 angle={-45}
                 textAnchor="end"
                 stroke="hsl(var(--muted-foreground))"
-                label={{ value: xLabel || x, position: 'insideBottom', offset: -5, style: { textAnchor: 'middle', fill: 'hsl(var(--foreground))', fontSize: 16, fontWeight: 600 } }}
-                height={60}
+                interval={0}
+                label={{ value: xLabel || x, position: 'bottom', offset: 5, style: { textAnchor: 'middle', fill: 'hsl(var(--foreground))', fontSize: 14, fontWeight: 600 } }}
+                height={70}
               />
               <YAxis
                 tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 14, fontFamily: 'var(--font-mono)' }}

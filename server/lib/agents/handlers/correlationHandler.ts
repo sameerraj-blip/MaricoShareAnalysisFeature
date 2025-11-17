@@ -210,6 +210,10 @@ export class CorrelationHandler extends BaseHandler {
       const wantsAscending = /\bascending|lowest\s+to\s+highest|low\s+to\s+high|smallest\s+to\s+largest|smallest\s+to\s+biggest\b/i.test(originalQuestion);
       const sortOrder = wantsDescending ? 'descending' : wantsAscending ? 'ascending' : undefined; // Only set if user explicitly requested
       
+      // Detect "top N" request (e.g., "top 10 variables", "top 5 factors")
+      const topNMatch = originalQuestion.match(/\btop\s+(\d+)\b/i);
+      const maxResults = topNMatch ? parseInt(topNMatch[1], 10) : undefined;
+      
       // Call correlation analyzer
       let { charts, insights } = await analyzeCorrelations(
         context.data,
@@ -217,7 +221,8 @@ export class CorrelationHandler extends BaseHandler {
         filteredComparisonColumns,
           filter,
           sortOrder,
-          context.chatInsights
+          context.chatInsights,
+          maxResults
       );
 
       // Post-process: Apply general constraint system (works for ANY relationship type, not just "sister brands")
@@ -277,6 +282,10 @@ export class CorrelationHandler extends BaseHandler {
 
       // Build answer
       let answer = `I've analyzed what affects ${targetCol}. `;
+      
+      if (maxResults) {
+        answer += `I've limited the analysis to the top ${maxResults} variables as requested. `;
+      }
       
       if (filter === 'positive') {
         answer += `I've filtered to show only positive correlations as requested. `;

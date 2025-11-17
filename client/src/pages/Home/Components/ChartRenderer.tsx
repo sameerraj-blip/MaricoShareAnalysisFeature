@@ -83,6 +83,39 @@ const determineSliderStep = (min: number, max: number) => {
   return Math.pow(10, Math.floor(Math.log10(range)) - 1);
 };
 
+const parseNumericValue = (value: any): number => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : NaN;
+  }
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[,%]/g, '').trim();
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
+};
+
+const getNumericValues = (rows: Record<string, any>[], key?: string | null) => {
+  if (!key) return [];
+  return rows
+    .map((row) => parseNumericValue(row?.[key]))
+    .filter((val) => Number.isFinite(val)) as number[];
+};
+
+const getDynamicDomain = (values: number[], paddingFraction: number = 0.1) => {
+  if (!values.length) return undefined;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return undefined;
+  if (min === max) {
+    const pad = Math.max(Math.abs(min) * 0.1, 5);
+    return [min - pad, max + pad] as [number, number];
+  }
+  const range = max - min;
+  const padding = Math.max(range * paddingFraction, 2);
+  return [min - padding, max + padding] as [number, number];
+};
+
 // Smart number formatter for axis labels
 const formatAxisLabel = (value: number): string => {
   if (Math.abs(value) < 0.01 && value !== 0) {
@@ -505,6 +538,10 @@ export function ChartRenderer({
         // For dual-axis charts, use blue for left axis, red for right axis
         const leftAxisColor = chart.y2 ? '#3b82f6' : chartColor; // Blue for left when dual-axis
         const rightAxisColor = '#ef4444'; // Red for right axis
+        const leftValues = getNumericValues(chartData as Record<string, any>[], y);
+        const leftDomain = yDomain || getDynamicDomain(leftValues);
+        const rightValues = chart.y2 ? getNumericValues(chartData as Record<string, any>[], chart.y2 as string) : [];
+        const rightDomain = chart.y2 ? getDynamicDomain(rightValues) : undefined;
         
         return (
           <ResponsiveContainer width="100%" height={fillParent ? '100%' : isSingleChart ? 400 : 250}>
@@ -527,6 +564,7 @@ export function ChartRenderer({
                     label={{ value: yLabel || y, angle: -90, position: 'left', style: { textAnchor: 'middle', fill: leftAxisColor, fontSize: 12, fontWeight: 600 } }}
                 yAxisId="left"
                     stroke={leftAxisColor}
+                domain={leftDomain}
               />
                 <YAxis
                   orientation="right"
@@ -536,6 +574,7 @@ export function ChartRenderer({
                     tickFormatter={formatAxisLabel}
                     label={{ value: chart.y2Label || chart.y2, angle: 90, position: 'right', style: { textAnchor: 'middle', fill: rightAxisColor, fontSize: 12, fontWeight: 600 } }}
                     stroke={rightAxisColor}
+                  domain={rightDomain}
                   />
                 </>
               ) : (
@@ -545,6 +584,7 @@ export function ChartRenderer({
                   tickFormatter={formatAxisLabel}
                   label={{ value: yLabel || y, angle: -90, position: 'left', style: { textAnchor: 'middle', fill: leftAxisColor, fontSize: 12, fontWeight: 600 } }}
                   stroke={leftAxisColor}
+                domain={leftDomain}
                 />
               )}
               <Tooltip />
@@ -608,15 +648,16 @@ export function ChartRenderer({
       case 'bar':
         return (
           <ResponsiveContainer width="100%" height={fillParent ? '100%' : isSingleChart ? 400 : 250}>
-            <BarChart data={chartData} margin={{ left: 50, right: 10, top: 10, bottom: 30 }}>
+            <BarChart data={chartData} margin={{ left: 50, right: 10, top: 10, bottom: fillParent ? 120 : isSingleChart ? 100 : 80 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
               <XAxis
                 dataKey={x}
                 tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
                 angle={-45}
                 textAnchor="end"
-                label={{ value: xLabel || x, position: 'insideBottom', offset: -5, style: { textAnchor: 'middle', fill: 'hsl(var(--foreground))', fontSize: 12, fontWeight: 600 } }}
-                height={50}
+                interval={0}
+                label={{ value: xLabel || x, position: 'bottom', offset: 10, style: { textAnchor: 'middle', fill: 'hsl(var(--foreground))', fontSize: 12, fontWeight: 600 } }}
+                height={fillParent ? 100 : isSingleChart ? 90 : 70}
               />
               <YAxis
                 tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}

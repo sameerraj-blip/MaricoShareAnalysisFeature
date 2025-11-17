@@ -211,7 +211,8 @@ export class ComparisonHandler extends BaseHandler {
         optionsToCompare,
         'all', // Get all correlations (positive and negative)
         sortOrder,
-        context.chatInsights
+        context.chatInsights,
+        undefined // No limit for comparison handler
       );
       
       console.log(`📊 Correlation analyzer returned ${charts?.length || 0} charts and ${insights?.length || 0} insights`);
@@ -261,7 +262,8 @@ export class ComparisonHandler extends BaseHandler {
       }) || [];
       
       // Create a ranking chart with proper data structure
-      const rankingData = positiveCorrelations.slice(0, 5).map(corr => ({
+      // No limit - show all correlations in ranking chart
+      const rankingData = positiveCorrelations.map(corr => ({
         variable: corr.variable,
         correlation: corr.correlation,
       }));
