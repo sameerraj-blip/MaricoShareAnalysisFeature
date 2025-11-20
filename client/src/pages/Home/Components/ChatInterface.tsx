@@ -24,10 +24,21 @@ interface ChatInterfaceProps {
   onEditMessage?: (messageIndex: number, newContent: string) => void;
   thinkingSteps?: ThinkingStep[]; // Thinking steps to display during loading
   thinkingTargetTimestamp?: number | null;
+  aiSuggestions?: string[]; // AI-generated suggestions
 }
 
 // Dynamic suggestions based on conversation context
-const getSuggestions = (messages: Message[], columns?: string[], numericColumns?: string[]) => {
+const getSuggestions = (
+  messages: Message[], 
+  columns?: string[], 
+  numericColumns?: string[],
+  aiSuggestions?: string[]
+) => {
+  // If AI suggestions are provided, use them first (they're contextually relevant)
+  if (aiSuggestions && aiSuggestions.length > 0) {
+    return aiSuggestions;
+  }
+
   // If there's conversation history, suggest follow-ups
   if (messages.length > 1) {
     const lastMessage = messages[messages.length - 1];
@@ -75,6 +86,7 @@ export function ChatInterface({
   onEditMessage,
   thinkingSteps,
   thinkingTargetTimestamp,
+  aiSuggestions,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -348,7 +360,7 @@ export function ChatInterface({
             <div className="mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">Try asking:</h3>
               <div className="flex flex-wrap gap-2 justify-center" data-testid="suggestion-chips">
-                {getSuggestions(messages, columns, numericColumns).map((suggestion, idx) => (
+                {getSuggestions(messages, columns, numericColumns, aiSuggestions).map((suggestion, idx) => (
                   <Button
                     key={idx}
                     variant="outline"
@@ -369,7 +381,7 @@ export function ChatInterface({
           {messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !isLoading && (
             <div className="mb-4 mt-2">
               <div className="flex flex-wrap gap-2 justify-center">
-                {getSuggestions(messages, columns, numericColumns).slice(0, 3).map((suggestion, idx) => (
+                {getSuggestions(messages, columns, numericColumns, aiSuggestions).slice(0, 3).map((suggestion, idx) => (
                   <Button
                     key={idx}
                     variant="ghost"

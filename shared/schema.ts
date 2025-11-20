@@ -172,6 +172,7 @@ export const chatResponseSchema = z.object({
   answer: z.string(),
   charts: z.array(chartSpecSchema).optional(),
   insights: z.array(insightSchema).optional(),
+  suggestions: z.array(z.string()).optional(),
 });
 
 export type ChatResponse = z.infer<typeof chatResponseSchema>;

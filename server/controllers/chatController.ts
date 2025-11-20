@@ -4,6 +4,7 @@ import { processChartData } from "../lib/chartGenerator.js";
 import { generateChartInsights } from "../lib/insightGenerator.js";
 import { chatResponseSchema, ThinkingStep } from "../../shared/schema.js";
 import { getChatBySessionIdEfficient, addMessageToChat, addMessagesBySessionId } from "../lib/cosmosDB.js";
+import { generateAISuggestions } from '../lib/suggestionGenerator.js';
 
 export const chatWithAI = async (req: Request, res: Response) => {
   try {
@@ -108,6 +109,26 @@ export const chatWithAI = async (req: Request, res: Response) => {
       } catch {}
     }
 
+    // Generate AI suggestions
+    let suggestions: string[] = [];
+    try {
+      const updatedChatHistory = [
+        ...(chatHistory || []),
+        { role: 'user' as const, content: message, timestamp: Date.now() },
+        { role: 'assistant' as const, content: validated.answer, timestamp: Date.now() }
+      ];
+      suggestions = await generateAISuggestions(
+        updatedChatHistory,
+        chatDocument.dataSummary,
+        validated.answer
+      );
+    } catch (error) {
+      console.error('Failed to generate suggestions:', error);
+    }
+
+    // Add suggestions to validated response
+    validated = { ...validated, suggestions } as any;
+
     // Save messages to CosmosDB (by sessionId to avoid partition mismatches)
     try {
       await addMessagesBySessionId(sessionId, [
@@ -135,6 +156,7 @@ export const chatWithAI = async (req: Request, res: Response) => {
       answerLength: validated.answer.length,
       chartsCount: validated.charts?.length || 0,
       insightsCount: validated.insights?.length || 0,
+      suggestionsCount: suggestions.length,
     });
     res.json(validated);
     console.log('✅ Response sent successfully');
@@ -288,6 +310,26 @@ export const chatWithAIStream = async (req: Request, res: Response) => {
         }
       } catch {}
     }
+
+    // Generate AI suggestions
+    let suggestions: string[] = [];
+    try {
+      const updatedChatHistory = [
+        ...(chatHistory || []),
+        { role: 'user' as const, content: message, timestamp: Date.now() },
+        { role: 'assistant' as const, content: validated.answer, timestamp: Date.now() }
+      ];
+      suggestions = await generateAISuggestions(
+        updatedChatHistory,
+        chatDocument.dataSummary,
+        validated.answer
+      );
+    } catch (error) {
+      console.error('Failed to generate suggestions:', error);
+    }
+
+    // Add suggestions to validated response
+    validated = { ...validated, suggestions } as any;
 
     // Save messages to CosmosDB (by sessionId to avoid partition mismatches)
     try {

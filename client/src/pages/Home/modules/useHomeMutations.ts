@@ -18,6 +18,7 @@ interface UseHomeMutationsProps {
   setTotalRows: (rows: number) => void;
   setTotalColumns: (columns: number) => void;
   setMessages: (messages: Message[] | ((prev: Message[]) => Message[])) => void;
+  setSuggestions?: (suggestions: string[]) => void;
 }
 
 export const useHomeMutations = ({
@@ -33,6 +34,7 @@ export const useHomeMutations = ({
   setTotalRows,
   setTotalColumns,
   setMessages,
+  setSuggestions,
 }: UseHomeMutationsProps) => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -217,6 +219,7 @@ export const useHomeMutations = ({
       console.log('📝 Answer:', data.answer);
       console.log('📊 Charts:', data.charts?.length || 0);
       console.log('💡 Insights:', data.insights?.length || 0);
+      console.log('💬 Suggestions:', data.suggestions?.length || 0);
       
       if (!data.answer || data.answer.trim().length === 0) {
         console.error('❌ Empty answer received from server!');
@@ -242,6 +245,11 @@ export const useHomeMutations = ({
         console.log('📋 Total messages now:', updated.length);
         return updated;
       });
+
+      // Update suggestions if provided
+      if (data.suggestions && setSuggestions) {
+        setSuggestions(data.suggestions);
+      }
     },
     onError: (error) => {
       // Don't show toast for cancelled requests

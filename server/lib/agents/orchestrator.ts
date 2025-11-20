@@ -31,7 +31,13 @@ export class AgentOrchestrator {
   }
 
   /**
+   * Track the current active step to ensure proper sequencing
+   */
+  private currentActiveStep: string | null = null;
+
+  /**
    * Emit a thinking step if callback is provided
+   * Automatically completes the previous active step when starting a new one
    */
   private emitThinkingStep(
     callback: ThinkingStepCallback | undefined,
@@ -39,14 +45,31 @@ export class AgentOrchestrator {
     status: ThinkingStep['status'],
     details?: string
   ): void {
-    if (callback) {
+    if (!callback) return;
+
+    // If we're starting a new active step, complete the previous one first
+    if (status === 'active' && this.currentActiveStep && this.currentActiveStep !== step) {
       callback({
-        step,
-        status,
+        step: this.currentActiveStep,
+        status: 'completed',
         timestamp: Date.now(),
-        details,
       });
     }
+
+    // Update current active step
+    if (status === 'active') {
+      this.currentActiveStep = step;
+    } else if (status === 'completed' && this.currentActiveStep === step) {
+      this.currentActiveStep = null;
+    }
+
+    // Emit the current step
+    callback({
+      step,
+      status,
+      timestamp: Date.now(),
+      details,
+    });
   }
 
   /**
@@ -65,9 +88,14 @@ export class AgentOrchestrator {
     try {
       console.log(`\n🔍 Processing query: "${question}"`);
 
+      // Reset current active step at the start
+      this.currentActiveStep = null;
+      
       this.emitThinkingStep(onThinkingStep, "Understanding your question", "active");
 
       // Step 1: Resolve context references ("that", "it", etc.)
+      // Complete "Understanding your question" before starting the next step
+      this.emitThinkingStep(onThinkingStep, "Understanding your question", "completed");
       this.emitThinkingStep(onThinkingStep, "Checking what you meant earlier", "active");
       const enrichedQuestion = resolveContextReferences(question, chatHistory);
       if (enrichedQuestion !== question) {

@@ -11,6 +11,7 @@ interface HomeProps {
 
 export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const {
     sessionId,
     messages,
@@ -48,6 +49,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     setTotalRows,
     setTotalColumns,
     setMessages,
+    setSuggestions,
   });
 
   const { handleFileSelect, handleSendMessage, handleUploadNew, handleEditMessage } = useHomeHandlers({
@@ -82,6 +84,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
   useEffect(() => {
     if (resetTrigger > 0) {
       resetState();
+      setSuggestions([]); // Clear suggestions when resetting
     }
   }, [resetTrigger, resetState]);
 
@@ -159,6 +162,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
       onEditMessage={handleEditMessage}
       thinkingSteps={thinkingSteps}
       thinkingTargetTimestamp={thinkingTargetTimestamp}
+      aiSuggestions={suggestions}
     />
   );
 }
