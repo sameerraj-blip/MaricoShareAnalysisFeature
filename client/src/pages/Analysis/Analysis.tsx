@@ -102,6 +102,7 @@ const Analysis: React.FC<AnalysisProps> = ({ onNavigate, onNewChat, onLoadSessio
     shareDialogOpen,
     setShareDialogOpen,
     sessionToShare,
+    setSessionToShare,
     handleShareClick,
     handleSessionClick,
   } = useSessionManagement({

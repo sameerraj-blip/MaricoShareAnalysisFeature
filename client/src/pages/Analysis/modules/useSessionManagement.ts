@@ -194,6 +194,7 @@ export const useSessionManagement = ({
     shareDialogOpen,
     setShareDialogOpen,
     sessionToShare,
+    setSessionToShare,
     handleShareClick,
 
     // Session operations
