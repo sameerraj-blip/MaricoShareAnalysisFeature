@@ -7,6 +7,7 @@ import { DataPreview } from './DataPreview';
 import { ThinkingDisplay } from './ThinkingDisplay';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
+import { getUserEmail } from '@/utils/userStorage';
 
 interface MessageBubbleProps {
   message: Message;
@@ -36,6 +37,13 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
   thinkingSteps,
 }, ref) => {
   const isUser = message.role === 'user';
+  const currentUserEmail = getUserEmail()?.toLowerCase();
+  const messageUserEmail = message.userEmail?.toLowerCase();
+  
+  // Show name if it's a user message and has a different email (shared analysis)
+  const showUserName = isUser && messageUserEmail && messageUserEmail !== currentUserEmail;
+  const displayName = message.userEmail ? message.userEmail.split('@')[0] : 'You';
+  
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(message.content);
 
@@ -66,6 +74,24 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
       <div className={`flex-1 max-w-[90%] ${isUser ? 'ml-auto' : 'mr-0'}`}>
         {isUser && (
           <div className="relative group">
+            {/* Display user name and edit button in a flex container to avoid overlap */}
+            {(showUserName || (isLastUserMessage && onEditMessage)) && (
+              <div className="flex items-center justify-end gap-2 mb-1 mr-2">
+                {showUserName && (
+                  <span className="text-xs text-gray-500">{displayName}</span>
+                )}
+                {isLastUserMessage && onEditMessage && !isEditing && (
+                  <button
+                    onClick={() => setIsEditing(true)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-gray-100 text-gray-600 hover:text-gray-900 text-xs font-medium flex items-center gap-1"
+                    title="Edit message"
+                  >
+                    <Edit2 className="h-3 w-3" />
+                    <span>Edit</span>
+                  </button>
+                )}
+              </div>
+            )}
             {isEditing ? (
               <div className="rounded-xl px-4 py-3 shadow-sm bg-primary text-primary-foreground ml-auto">
                 <Textarea
@@ -110,16 +136,6 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
                 <p className="text-sm leading-relaxed whitespace-pre-wrap">
                   {message.content}
                 </p>
-                {isLastUserMessage && onEditMessage && (
-                  <button
-                    onClick={() => setIsEditing(true)}
-                    className="absolute -top-8 right-0 opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-gray-100 text-gray-600 hover:text-gray-900 text-xs font-medium flex items-center gap-1"
-                    title="Edit message"
-                  >
-                    <Edit2 className="h-3 w-3" />
-                    Edit
-                  </button>
-                )}
               </div>
             )}
           </div>

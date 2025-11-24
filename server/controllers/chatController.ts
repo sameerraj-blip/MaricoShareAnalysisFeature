@@ -135,11 +135,13 @@ export const chatWithAI = async (req: Request, res: Response) => {
 
     // Save messages to CosmosDB (by sessionId to avoid partition mismatches)
     try {
+      const userEmail = username?.toLowerCase();
       await addMessagesBySessionId(sessionId, [
         {
           role: 'user',
           content: message,
           timestamp: Date.now(),
+          userEmail: userEmail, // Add user email for shared analyses
         },
         {
           role: 'assistant',
@@ -179,15 +181,33 @@ export const chatWithAI = async (req: Request, res: Response) => {
 
 /**
  * SSE helper function to send events
+ * Safely handles client disconnections
  */
-function sendSSE(res: Response, event: string, data: any): void {
-  const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  res.write(message);
-  // Force flush the response (if supported by the platform)
-  if (typeof (res as any).flush === 'function') {
-    (res as any).flush();
+function sendSSE(res: Response, event: string, data: any): boolean {
+  // Check if connection is still writable
+  if (res.writableEnded || res.destroyed || !res.writable) {
+    return false;
   }
-  console.log(`📤 SSE sent: ${event}`, data);
+
+  try {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    res.write(message);
+    // Force flush the response (if supported by the platform)
+    if (typeof (res as any).flush === 'function') {
+      (res as any).flush();
+    }
+    console.log(`📤 SSE sent: ${event}`, data);
+    return true;
+  } catch (error: any) {
+    // Ignore errors from client disconnections (ECONNRESET, EPIPE are expected)
+    if (error.code === 'ECONNRESET' || error.code === 'EPIPE' || error.code === 'ECONNABORTED') {
+      // Client disconnected - this is normal, don't log as error
+      return false;
+    }
+    // Log unexpected errors
+    console.error('Error sending SSE event:', error);
+    return false;
+  }
 }
 
 /**
@@ -343,11 +363,13 @@ export const chatWithAIStream = async (req: Request, res: Response) => {
 
     // Save messages to CosmosDB (by sessionId to avoid partition mismatches)
     try {
+      const userEmail = username?.toLowerCase();
       await addMessagesBySessionId(sessionId, [
         {
           role: 'user',
           content: message,
           timestamp: Date.now(),
+          userEmail: userEmail, // Add user email for shared analyses
         },
         {
           role: 'assistant',
@@ -425,10 +447,15 @@ export const streamChatMessagesController = async (req: Request, res: Response) 
 
     // Function to fetch and send new messages
     const sendMessageUpdate = async () => {
+      // Check if connection is still open before attempting to send
+      if (res.writableEnded || res.destroyed || !res.writable) {
+        return false;
+      }
+
       try {
         const currentChat = await getChatBySessionIdEfficient(sessionId);
         if (!currentChat) {
-          return;
+          return true; // Connection still valid, just no chat found
         }
 
         const currentMessageCount = currentChat.messages?.length || 0;
@@ -438,16 +465,25 @@ export const streamChatMessagesController = async (req: Request, res: Response) 
           const newMessages = currentChat.messages?.slice(lastMessageCount) || [];
           lastMessageCount = currentMessageCount;
           
-          sendSSE(res, 'messages', {
+          const sent = sendSSE(res, 'messages', {
             messages: newMessages,
             totalCount: currentMessageCount,
           });
+          
+          if (!sent) {
+            return false; // Connection closed
+          }
         }
+        return true;
       } catch (error) {
-        console.error('Error fetching chat messages for SSE:', error);
-        sendSSE(res, 'error', { 
-          message: error instanceof Error ? error.message : 'Failed to fetch messages.' 
-        });
+        // Only try to send error if connection is still open
+        if (!res.writableEnded && !res.destroyed && res.writable) {
+          console.error('Error fetching chat messages for SSE:', error);
+          sendSSE(res, 'error', { 
+            message: error instanceof Error ? error.message : 'Failed to fetch messages.' 
+          });
+        }
+        return false;
       }
     };
 
@@ -460,25 +496,48 @@ export const streamChatMessagesController = async (req: Request, res: Response) 
     // Set up polling to check for new messages every 2 seconds
     const checkInterval = setInterval(async () => {
       // Check if connection is still open
-      if (res.writableEnded || res.destroyed) {
+      if (res.writableEnded || res.destroyed || !res.writable) {
         clearInterval(checkInterval);
         return;
       }
 
-      await sendMessageUpdate();
+      const stillConnected = await sendMessageUpdate();
+      if (!stillConnected) {
+        clearInterval(checkInterval);
+        try {
+          res.end();
+        } catch (e) {
+          // Ignore errors when ending already closed connection
+        }
+      }
     }, 2000); // Check every 2 seconds
 
     // Clean up on client disconnect
     req.on('close', () => {
       clearInterval(checkInterval);
-      res.end();
+      try {
+        if (!res.writableEnded && !res.destroyed) {
+          res.end();
+        }
+      } catch (e) {
+        // Ignore errors when ending already closed connection
+      }
     });
 
-    // Handle errors
-    req.on('error', (error) => {
-      console.error('SSE connection error:', error);
+    // Handle errors - only log unexpected errors
+    req.on('error', (error: any) => {
+      // ECONNRESET is expected when clients disconnect normally
+      if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
+        console.error('SSE connection error:', error);
+      }
       clearInterval(checkInterval);
-      res.end();
+      try {
+        if (!res.writableEnded && !res.destroyed) {
+          res.end();
+        }
+      } catch (e) {
+        // Ignore errors when ending already closed connection
+      }
     });
 
   } catch (error) {

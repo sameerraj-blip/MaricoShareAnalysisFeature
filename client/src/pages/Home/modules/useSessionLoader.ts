@@ -12,6 +12,7 @@ interface UseSessionLoaderProps {
   setTotalRows: (rows: number) => void;
   setTotalColumns: (columns: number) => void;
   setMessages: (messages: any[] | ((prev: any[]) => any[])) => void;
+  setCollaborators?: (collaborators: string[]) => void;
 }
 
 /**
@@ -30,6 +31,7 @@ export const useSessionLoader = ({
   setTotalRows,
   setTotalColumns,
   setMessages,
+  setCollaborators,
 }: UseSessionLoaderProps) => {
   useEffect(() => {
     if (!loadedSessionData) return;
@@ -39,6 +41,11 @@ export const useSessionLoader = ({
 
     // Set session ID
     setSessionId(session.sessionId);
+
+    // Set collaborators if available
+    if (setCollaborators && session.collaborators && Array.isArray(session.collaborators)) {
+      setCollaborators(session.collaborators);
+    }
 
     // Set initial charts and insights for the first assistant message context
     setInitialCharts(session.charts || []);
@@ -85,6 +92,7 @@ export const useSessionLoader = ({
     setTotalRows,
     setTotalColumns,
     setMessages,
+    setCollaborators,
   ]);
 };
 

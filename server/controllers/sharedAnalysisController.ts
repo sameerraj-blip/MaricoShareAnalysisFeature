@@ -44,12 +44,29 @@ const toSessionSummary = (chatDocument: ChatDocument): AnalysisSessionSummary =>
 const sanitizeEmail = (value: string) => value.trim().toLowerCase();
 
 // SSE helper function (similar to chatController)
-function sendSSE(res: Response, event: string, data: any): void {
-  const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  res.write(message);
-  // Force flush the response (if supported by the platform)
-  if (typeof (res as any).flush === 'function') {
-    (res as any).flush();
+function sendSSE(res: Response, event: string, data: any): boolean {
+  // Check if connection is still writable
+  if (res.writableEnded || res.destroyed || !res.writable) {
+    return false;
+  }
+
+  try {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    res.write(message);
+    // Force flush the response (if supported by the platform)
+    if (typeof (res as any).flush === 'function') {
+      (res as any).flush();
+    }
+    return true;
+  } catch (error: any) {
+    // Ignore errors from client disconnections (ECONNRESET, EPIPE are expected)
+    if (error.code === 'ECONNRESET' || error.code === 'EPIPE' || error.code === 'ECONNABORTED') {
+      // Client disconnected - this is normal, don't log as error
+      return false;
+    }
+    // Log unexpected errors
+    console.error('Error sending SSE event:', error);
+    return false;
   }
 }
 
@@ -219,6 +236,11 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
 
     // Function to fetch and send shared analyses
     const sendSharedAnalyses = async () => {
+      // Check if connection is still open before attempting to send
+      if (res.writableEnded || res.destroyed || !res.writable) {
+        return false;
+      }
+
       try {
         const invitations = await listSharedAnalysesForUser(userEmail);
         const responsePayload = {
@@ -228,12 +250,21 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
 
         // Validate payload before sending
         sharedAnalysesResponseSchema.parse(responsePayload);
-        sendSSE(res, 'update', responsePayload);
+        const sent = sendSSE(res, 'update', responsePayload);
+        
+        if (!sent) {
+          return false; // Connection closed
+        }
+        return true;
       } catch (error) {
-        console.error('Error fetching shared analyses for SSE:', error);
-        sendSSE(res, 'error', { 
-          message: error instanceof Error ? error.message : 'Failed to fetch shared analyses.' 
-        });
+        // Only try to send error if connection is still open
+        if (!res.writableEnded && !res.destroyed && res.writable) {
+          console.error('Error fetching shared analyses for SSE:', error);
+          sendSSE(res, 'error', { 
+            message: error instanceof Error ? error.message : 'Failed to fetch shared analyses.' 
+          });
+        }
+        return false;
       }
     };
 
@@ -243,25 +274,48 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
     // Set up polling to check for new invites every 3 seconds
     const checkInterval = setInterval(async () => {
       // Check if connection is still open
-      if (res.writableEnded || res.destroyed) {
+      if (res.writableEnded || res.destroyed || !res.writable) {
         clearInterval(checkInterval);
         return;
       }
 
-      await sendSharedAnalyses();
+      const stillConnected = await sendSharedAnalyses();
+      if (!stillConnected) {
+        clearInterval(checkInterval);
+        try {
+          res.end();
+        } catch (e) {
+          // Ignore errors when ending already closed connection
+        }
+      }
     }, 3000); // Check every 3 seconds
 
     // Clean up on client disconnect
     req.on('close', () => {
       clearInterval(checkInterval);
-      res.end();
+      try {
+        if (!res.writableEnded && !res.destroyed) {
+          res.end();
+        }
+      } catch (e) {
+        // Ignore errors when ending already closed connection
+      }
     });
 
-    // Handle errors
-    req.on('error', (error) => {
-      console.error('SSE connection error:', error);
+    // Handle errors - only log unexpected errors
+    req.on('error', (error: any) => {
+      // ECONNRESET is expected when clients disconnect normally
+      if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
+        console.error('SSE connection error:', error);
+      }
       clearInterval(checkInterval);
-      res.end();
+      try {
+        if (!res.writableEnded && !res.destroyed) {
+          res.end();
+        }
+      } catch (e) {
+        // Ignore errors when ending already closed connection
+      }
     });
 
   } catch (error) {

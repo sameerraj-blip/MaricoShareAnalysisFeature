@@ -49,6 +49,7 @@ export const messageSchema = z.object({
   insights: z.array(insightSchema).optional(),
   timestamp: z.number(),
   thinkingSteps: z.array(thinkingStepSchema).optional(), // Temporary thinking steps shown during processing
+  userEmail: z.string().optional(), // Email of the user who sent the message (for shared analyses)
 });
 
 export type Message = z.infer<typeof messageSchema>;

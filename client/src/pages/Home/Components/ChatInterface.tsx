@@ -1,10 +1,19 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Message, ThinkingStep } from '@/shared/schema';
 import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Upload as UploadIcon, Loader2, Square } from 'lucide-react';
+import { Send, Upload as UploadIcon, Square, Filter } from 'lucide-react';
 import { Card } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { getUserEmail } from '@/utils/userStorage';
+import { useToast } from '@/hooks/use-toast';
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -25,6 +34,7 @@ interface ChatInterfaceProps {
   thinkingSteps?: ThinkingStep[]; // Thinking steps to display during loading
   thinkingTargetTimestamp?: number | null;
   aiSuggestions?: string[]; // AI-generated suggestions
+  collaborators?: string[]; // List of all collaborators in the session
 }
 
 // Dynamic suggestions based on conversation context
@@ -87,8 +97,11 @@ export function ChatInterface({
   thinkingSteps,
   thinkingTargetTimestamp,
   aiSuggestions,
+  collaborators: propCollaborators,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
+  const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
+  const { toast } = useToast();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastMessageRef = useRef<HTMLDivElement | null>(null);
   const previousLastTimestampRef = useRef<number | null>(null);
@@ -106,10 +119,66 @@ export function ChatInterface({
     selectedIndex: 0
   });
 
-  useEffect(() => {
-    if (!messages.length || !lastMessageRef.current) return;
+  const currentUserEmail = getUserEmail()?.toLowerCase();
 
-    const lastMessage = messages[messages.length - 1];
+  // Get all collaborators: from prop, or extract from messages, and always include current user
+  const collaborators = useMemo(() => {
+    const collaboratorSet = new Set<string>();
+    
+    // Add collaborators from prop (session data)
+    if (propCollaborators && propCollaborators.length > 0) {
+      propCollaborators.forEach((email) => {
+        if (email) collaboratorSet.add(email.toLowerCase());
+      });
+    }
+    
+    // Also extract from messages (in case some collaborators haven't sent messages yet)
+    messages.forEach((message) => {
+      if (message.role === 'user' && message.userEmail) {
+        collaboratorSet.add(message.userEmail.toLowerCase());
+      }
+    });
+    
+    // Always include current user
+    if (currentUserEmail) {
+      collaboratorSet.add(currentUserEmail);
+    }
+    
+    return Array.from(collaboratorSet).sort();
+  }, [propCollaborators, messages, currentUserEmail]);
+
+  // Handle filter change with toast notification
+  const handleFilterChange = (value: string) => {
+    setSelectedCollaborator(value);
+    const displayName = value === 'all' 
+      ? 'All Messages' 
+      : collaborators.find(c => c.toLowerCase() === value.toLowerCase())?.split('@')[0] || value.split('@')[0];
+    
+    toast({
+      title: "Filter applied",
+      description: `Showing messages from ${displayName}`,
+    });
+  };
+
+  // Filter messages based on selected collaborator
+  const filteredMessages = useMemo(() => {
+    if (selectedCollaborator === 'all') {
+      return messages;
+    }
+    return messages.filter((message) => {
+      // Always show assistant messages
+      if (message.role === 'assistant') {
+        return true;
+      }
+      // For user messages, filter by selected collaborator
+      return message.userEmail?.toLowerCase() === selectedCollaborator.toLowerCase();
+    });
+  }, [messages, selectedCollaborator]);
+
+  useEffect(() => {
+    if (!filteredMessages.length || !lastMessageRef.current) return;
+
+    const lastMessage = filteredMessages[filteredMessages.length - 1];
     if (!lastMessage) return;
 
     if (previousLastTimestampRef.current === lastMessage.timestamp) {
@@ -125,7 +194,7 @@ export function ChatInterface({
     });
 
     previousLastTimestampRef.current = lastMessage.timestamp;
-  }, [messages]);
+  }, [filteredMessages]);
 
   useEffect(() => {
     if (isLoading && thinkingSteps && thinkingSteps.length > 0 && lastMessageRef.current) {
@@ -315,35 +384,53 @@ export function ChatInterface({
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
-          <div className="flex justify-between items-center mb-2">
-            <div />
-            {onLoadHistory && canLoadHistory && (
-              <Button variant="outline" size="sm" onClick={onLoadHistory} disabled={loadingHistory || isLoading}>
-                {loadingHistory ? <Loader2 className="w-3 h-3 mr-2 animate-spin" /> : null}
-                Load chat history
-              </Button>
-            )}
-          </div>
-          {messages.map((message, idx) => {
-            const isLastMessage = idx === messages.length - 1;
+          {collaborators.length > 0 && (
+            <div className="flex justify-end items-center mb-2">
+              <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1.5 shadow-sm hover:shadow-md transition-all duration-200">
+                <Filter className="w-3.5 h-3.5 text-gray-600" />
+                <span className="text-xs font-medium text-gray-700">Filter messages</span>
+                <Select value={selectedCollaborator} onValueChange={handleFilterChange}>
+                  <SelectTrigger className="h-6 px-2 text-xs font-semibold border-none bg-transparent shadow-none focus:ring-0 focus:ring-offset-0 hover:bg-transparent text-gray-900 min-w-[120px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Messages</SelectItem>
+                    {collaborators.map((email) => {
+                      const displayName = email.split('@')[0];
+                      const isCurrentUser = email.toLowerCase() === currentUserEmail;
+                      return (
+                        <SelectItem key={email} value={email}>
+                          {isCurrentUser ? `${displayName} (You)` : displayName}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
+          {filteredMessages.map((message, idx) => {
+            // Find the original index in the full messages array for edit functionality
+            const originalIndex = messages.findIndex((m) => m.timestamp === message.timestamp && m.role === message.role);
+            const isLastMessage = idx === filteredMessages.length - 1;
             // Check if this is the last user message (for edit button and thinking steps)
             const isLastUserMessage = message.role === 'user' && 
-              (idx === messages.length - 1 || 
-               (idx < messages.length - 1 && messages[idx + 1].role === 'assistant'));
+              (idx === filteredMessages.length - 1 || 
+               (idx < filteredMessages.length - 1 && filteredMessages[idx + 1].role === 'assistant'));
             const isThinkingTarget = thinkingTargetTimestamp != null && message.timestamp === thinkingTargetTimestamp;
             const showThinkingSteps = isThinkingTarget && isLoading && thinkingSteps && thinkingSteps.length > 0;
             return (
               <MessageBubble
-                key={idx}
+                key={`${message.timestamp}-${message.role}-${idx}`}
                 message={message}
-                sampleRows={idx === 0 ? sampleRows : undefined}
-                columns={idx === 0 ? columns : undefined}
-                numericColumns={idx === 0 ? numericColumns : undefined}
-                dateColumns={idx === 0 ? dateColumns : undefined}
-                totalRows={idx === 0 ? totalRows : undefined}
-                totalColumns={idx === 0 ? totalColumns : undefined}
+                sampleRows={originalIndex === 0 ? sampleRows : undefined}
+                columns={originalIndex === 0 ? columns : undefined}
+                numericColumns={originalIndex === 0 ? numericColumns : undefined}
+                dateColumns={originalIndex === 0 ? dateColumns : undefined}
+                totalRows={originalIndex === 0 ? totalRows : undefined}
+                totalColumns={originalIndex === 0 ? totalColumns : undefined}
                 onEditMessage={onEditMessage}
-                messageIndex={idx}
+                messageIndex={originalIndex >= 0 ? originalIndex : idx}
                 isLastUserMessage={isLastUserMessage}
                 thinkingSteps={showThinkingSteps ? thinkingSteps : undefined}
                 ref={isLastMessage ? lastMessageRef : undefined}
@@ -356,6 +443,13 @@ export function ChatInterface({
       {/* Input Area */}
       <div className="sticky bottom-0 bg-white/95 backdrop-blur-sm border-t border-gray-100">
         <div className="max-w-6xl mx-auto px-4 py-4">
+          {filteredMessages.length === 0 && messages.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">
+                No messages from selected collaborator
+              </h3>
+            </div>
+          )}
           {messages.length === 0 && (
             <div className="mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">Try asking:</h3>
@@ -378,7 +472,7 @@ export function ChatInterface({
           )}
           
           {/* Show follow-up suggestions after assistant messages */}
-          {messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !isLoading && (
+          {filteredMessages.length > 0 && filteredMessages[filteredMessages.length - 1].role === 'assistant' && !isLoading && (
             <div className="mb-4 mt-2">
               <div className="flex flex-wrap gap-2 justify-center">
                 {getSuggestions(messages, columns, numericColumns, aiSuggestions).slice(0, 3).map((suggestion, idx) => (

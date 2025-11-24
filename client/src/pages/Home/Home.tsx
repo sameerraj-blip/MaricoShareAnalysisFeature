@@ -13,6 +13,7 @@ interface HomeProps {
 export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [collaborators, setCollaborators] = useState<string[]>([]);
   const {
     sessionId,
     messages,
@@ -71,8 +72,24 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     setIsLoadingHistory(true);
     try {
       const data = await sessionsApi.getSessionDetails(sessionId);
-      if (data && Array.isArray(data.messages)) {
-        setMessages(data.messages as any);
+      if (data) {
+        if (data.session) {
+          // Handle response with session object
+          if (Array.isArray(data.session.messages)) {
+            setMessages(data.session.messages as any);
+          }
+          if (data.session.collaborators && Array.isArray(data.session.collaborators)) {
+            setCollaborators(data.session.collaborators);
+          }
+        } else {
+          // Handle direct response
+          if (Array.isArray(data.messages)) {
+            setMessages(data.messages as any);
+          }
+          if (data.collaborators && Array.isArray(data.collaborators)) {
+            setCollaborators(data.collaborators);
+          }
+        }
       }
     } catch (e) {
       console.error('Failed to load chat history', e);
@@ -121,7 +138,27 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     setTotalRows,
     setTotalColumns,
     setMessages,
+    setCollaborators,
   });
+
+  // Fetch collaborators when sessionId is available
+  useEffect(() => {
+    const fetchCollaborators = async () => {
+      if (!sessionId) return;
+      try {
+        const data = await sessionsApi.getSessionDetails(sessionId);
+        if (data) {
+          const sessionData = data.session || data;
+          if (sessionData.collaborators && Array.isArray(sessionData.collaborators)) {
+            setCollaborators(sessionData.collaborators);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fetch collaborators', e);
+      }
+    };
+    fetchCollaborators();
+  }, [sessionId]);
 
   if (!sessionId) {
     return (
@@ -153,6 +190,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
       thinkingSteps={thinkingSteps}
       thinkingTargetTimestamp={thinkingTargetTimestamp}
       aiSuggestions={suggestions}
+      collaborators={collaborators}
     />
   );
 }
