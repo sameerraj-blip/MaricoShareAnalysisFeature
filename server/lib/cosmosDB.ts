@@ -1,5 +1,5 @@
 import { CosmosClient, Database, Container } from "@azure/cosmos";
-import { ChartSpec, Message, DataSummary, Insight, Dashboard, SharedAnalysisInvite } from "../../shared/schema.js";
+import { ChartSpec, Message, DataSummary, Insight, Dashboard, SharedAnalysisInvite } from "../shared/schema.js";
 
 // CosmosDB configuration
 const COSMOS_ENDPOINT = process.env.COSMOS_ENDPOINT || "";

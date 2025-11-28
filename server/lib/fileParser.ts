@@ -1,6 +1,6 @@
 import { parse } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
-import { DataSummary } from '../../shared/schema.js';
+import { DataSummary } from '../shared/schema.js';
 
 // Month name mapping for date detection
 const MONTH_MAP: Record<string, number> = {

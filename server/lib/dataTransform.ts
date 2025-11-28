@@ -1,5 +1,5 @@
-import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest, AggregationOperation } from '../../shared/queryTypes.js';
-import { DataSummary } from '../../shared/schema.js';
+import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest, AggregationOperation } from '../shared/queryTypes.js';
+import { DataSummary } from '../shared/schema.js';
 import { normalizeDateToPeriod, DatePeriod, parseFlexibleDate } from './dateUtils.js';
 
 interface TransformationResult {

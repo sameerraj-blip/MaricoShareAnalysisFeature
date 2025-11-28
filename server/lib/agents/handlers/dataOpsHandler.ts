@@ -5,7 +5,7 @@ import {
   parseDataOpsIntent,
   executeDataOperation,
 } from '../../dataOps/dataOpsOrchestrator.js';
-import { getChatBySessionIdEfficient } from '../../cosmosDB.js';
+import { getChatBySessionIdEfficient } from '../../../models/chat.model.js';
 
 /**
  * DataOps Handler

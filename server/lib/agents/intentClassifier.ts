@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { openai } from '../openai.js';
 import { getModelForTask } from './models.js';
-import { DataSummary, Message } from '../../../shared/schema.js';
+import { DataSummary, Message } from '../../shared/schema.js';
 
 /**
  * Analysis Intent Schema
@@ -114,6 +114,9 @@ ${dateColumns ? `- Date columns: ${dateColumns}` : ''}
 
 CLASSIFICATION RULES:
 1. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
+   * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
+   * These are correlation queries even if the target variable (X) is not immediately recognizable
+   * Set confidence to 0.9+ for these patterns
 2. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area)
 3. "statistical" - User asks for statistics (mean, median, average, sum, count, max, min, highest, lowest, best, worst) OR asks "which month/row/period has the [highest/lowest/best/worst] [variable]" - these are statistical queries, NOT comparison queries
 4. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
@@ -126,6 +129,16 @@ IMPORTANT: Questions like "which month had the highest X?", "which was the best 
 
 EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
 - Extract targetVariable: Any entity/variable the user wants to analyze (extract from natural language, don't assume domain)
+  * For questions like "what impacts X" or "what affects X", extract X as the targetVariable
+  * For questions like "what influences Y", extract Y as the targetVariable
+  * For questions like "correlation of X with all the other variables", extract X as the targetVariable
+  * Target variables can be multi-word (e.g., "PAB nGRP", "PA TOM", "Revenue Growth")
+  * Match the EXACT phrase from the question, preserving spaces and capitalization
+  * Look for patterns: 
+    - "what impacts/affects/influences [TARGET]"
+    - "correlation of [TARGET] with all (the other) variables"
+    - "correlation between [TARGET] and [OTHER]"
+  * IMPORTANT: When user says "correlation of X with all the other variables", extract X as targetVariable (not "X with all the other variables")
 - Extract variables array: Any related entities/variables mentioned
 - Extract chartType: If user explicitly requests a chart type
 - Extract filters (GENERAL constraint system):

@@ -3,7 +3,7 @@ import {
   addChartToDashboardRequestSchema,
   createDashboardRequestSchema,
   removeChartFromDashboardRequestSchema,
-} from "../../shared/schema.js";
+} from "../shared/schema.js";
 import {
   addChartToDashboard,
   addSheetToDashboard,
@@ -16,7 +16,7 @@ import {
   renameSheet,
   renameDashboard,
   updateChartInsightOrRecommendation,
-} from "../lib/cosmosDB.js";
+} from "../models/dashboard.model.js";
 
 export const createDashboardController = async (req: Request, res: Response) => {
   try {

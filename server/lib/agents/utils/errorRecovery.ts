@@ -1,6 +1,6 @@
 import { AnalysisIntent } from '../intentClassifier.js';
-import { DataSummary } from '../../../../shared/schema.js';
-import { ChartSpec, Insight } from '../../../../shared/schema.js';
+import { DataSummary } from '../../../shared/schema.js';
+import { ChartSpec, Insight } from '../../../shared/schema.js';
 
 /**
  * Error Response Interface

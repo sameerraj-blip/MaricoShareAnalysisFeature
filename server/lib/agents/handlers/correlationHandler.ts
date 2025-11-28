@@ -28,22 +28,97 @@ export class CorrelationHandler extends BaseHandler {
     // Extract target variable
     let targetVariable = intent.targetVariable;
     
-    // If no target variable but question mentions "my brand" or similar, try to extract it
+    // If no target variable, try to extract it from the question
     if (!targetVariable) {
       const question = intent.originalQuestion || intent.customRequest || '';
-      // Look for patterns like "X is my brand", "X is the brand", "X is the main brand"
-      const brandMatch = question.match(/(\w+)\s+is\s+(?:my|the|our)\s+brand/i);
-      if (brandMatch && brandMatch[1]) {
-        targetVariable = brandMatch[1];
-        console.log(`📝 Extracted target brand from question: ${targetVariable}`);
+      console.log(`🔍 No targetVariable in intent, trying to extract from question: "${question}"`);
+      
+      // Pattern 1: "what impacts X" or "what affects X" or "what influences X"
+      // Handle both "what impacts X?" and "what impacts X" (with or without question mark)
+      const impactMatch = question.match(/what\s+(?:impacts?|affects?|influences?)\s+(.+?)(?:\s*\?|$)/i);
+      if (impactMatch && impactMatch[1]) {
+        targetVariable = impactMatch[1].trim();
+        // Remove trailing question mark if present
+        targetVariable = targetVariable.replace(/\?+$/, '').trim();
+        console.log(`📝 Extracted target from "what impacts" pattern: ${targetVariable}`);
+      }
+      
+      // Pattern 2: "X is my brand", "X is the brand", "X is the main brand"
+      if (!targetVariable) {
+        const brandMatch = question.match(/(\w+(?:\s+\w+)*)\s+is\s+(?:my|the|our)\s+brand/i);
+        if (brandMatch && brandMatch[1]) {
+          targetVariable = brandMatch[1].trim();
+          console.log(`📝 Extracted target brand from question: ${targetVariable}`);
+        }
+      }
+      
+      // Pattern 3: "correlation of X with all the other variables" or "correlation between X and Y"
+      if (!targetVariable) {
+        // First try: "correlation of X with all (the other) variables"
+        const correlationWithAllMatch = question.match(/correlation\s+of\s+(.+?)\s+with\s+all(?:\s+the\s+other)?\s+variables?/i);
+        if (correlationWithAllMatch && correlationWithAllMatch[1]) {
+          targetVariable = correlationWithAllMatch[1].trim();
+          console.log(`📝 Extracted target from "correlation of X with all" pattern: ${targetVariable}`);
+        }
+        
+        // Second try: "correlation between X and Y" or "correlation of X with Y"
+        if (!targetVariable) {
+          const correlationMatch = question.match(/correlation\s+(?:between|of)\s+(.+?)\s+(?:and|with)\s+(?!all\s+the?\s+other)/i);
+          if (correlationMatch && correlationMatch[1]) {
+            targetVariable = correlationMatch[1].trim();
+            console.log(`📝 Extracted target from correlation pattern: ${targetVariable}`);
+          }
+        }
+      }
+      
+      // Pattern 4: Look for any column name mentioned in the question
+      if (!targetVariable) {
+        const allColumns = context.summary.columns.map(c => c.name);
+        const questionLower = question.toLowerCase();
+        // Try to find a column name that appears in the question
+        for (const col of allColumns) {
+          const colLower = col.toLowerCase();
+          // Check if column name (or significant part of it) appears in question
+          const colWords = colLower.split(/\s+/).filter(w => w.length > 2);
+          if (colWords.length > 0 && colWords.some(word => questionLower.includes(word))) {
+            // Verify it's a reasonable match (not too generic)
+            if (colWords.length >= 2 || col.length >= 4) {
+              targetVariable = col;
+              console.log(`📝 Extracted target from column name match: ${targetVariable}`);
+              break;
+            }
+          }
+        }
       }
     }
     
     if (!targetVariable) {
-      return {
-        answer: "I need to know which variable you'd like to analyze. For example: 'What affects revenue?' or 'PA is my brand, what affects it?'",
-        requiresClarification: true,
-      };
+      // Last resort: try to find any column name mentioned in the question
+      const question = intent.originalQuestion || intent.customRequest || '';
+      const allColumns = context.summary.columns.map(c => c.name);
+      const questionLower = question.toLowerCase();
+      
+      // Try to find any column that appears in the question
+      for (const col of allColumns) {
+        const colWords = col.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+        // Check if any significant word from column appears in question
+        if (colWords.some(word => questionLower.includes(word))) {
+          // Check if it's a reasonable match (not too generic, at least 2 words or 4+ chars)
+          if (colWords.length >= 2 || col.length >= 4) {
+            targetVariable = col;
+            console.log(`📝 Last resort: extracted target from column name in question: ${targetVariable}`);
+            break;
+          }
+        }
+      }
+      
+      if (!targetVariable) {
+        return {
+          answer: `I need to know which variable you'd like to analyze. For example: 'What affects revenue?' or 'What impacts ${allColumns[0] || 'PA TOM'}?'`,
+          requiresClarification: true,
+          suggestions: allColumns.slice(0, 5),
+        };
+      }
     }
 
     // Find matching column - use intelligent pattern discovery, not hardcoded suffixes
@@ -329,8 +404,8 @@ export class CorrelationHandler extends BaseHandler {
     const searchLower = searchTerm.toLowerCase().trim();
     const searchWords = searchLower.split(/\s+/).filter(w => w.length > 0);
     
-    // Strategy 1: Find columns that contain all words from search term (exact phrase match)
-    // This handles cases like "PA TOM" matching "PA TOM" or "PA TOM Value"
+    // Strategy 1: Find columns that contain the exact search phrase as a substring
+    // This handles cases like "PAB nGRP" matching "PAB nGRP Adstocked" or "PAB nGRP Value"
     for (const col of columns) {
       const colLower = col.toLowerCase().trim();
       if (colLower.includes(searchLower)) {
@@ -338,7 +413,18 @@ export class CorrelationHandler extends BaseHandler {
       }
     }
     
-    // Strategy 2: Find columns that contain all words (in any order)
+    // Strategy 2: Find columns that start with the search phrase (prefix match)
+    // This handles cases like "PAB nGRP" matching "PAB nGRP Adstocked"
+    for (const col of columns) {
+      const colLower = col.toLowerCase().trim();
+      if (candidates.includes(col)) continue; // Already added
+      
+      if (colLower.startsWith(searchLower + ' ') || colLower === searchLower) {
+        candidates.push(col);
+      }
+    }
+    
+    // Strategy 3: Find columns that contain all words from search term (in any order)
     // This handles cases like "PA TOM" matching "TOM PA" or "PA Brand TOM"
     if (searchWords.length > 1) {
       for (const col of columns) {
@@ -347,7 +433,9 @@ export class CorrelationHandler extends BaseHandler {
         
         let allWordsFound = true;
         for (const word of searchWords) {
-          if (!colLower.includes(word)) {
+          // Use word boundary matching for better accuracy
+          const wordRegex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+          if (!wordRegex.test(colLower)) {
             allWordsFound = false;
             break;
           }
@@ -358,7 +446,7 @@ export class CorrelationHandler extends BaseHandler {
       }
     }
     
-    // Strategy 3: Find columns that start with first word (prefix match)
+    // Strategy 4: Find columns that start with first word (prefix match)
     // This handles cases like "PA" matching "PA TOM", "PA nGRP", etc.
     if (searchWords.length > 0) {
       const firstWord = searchWords[0];
@@ -366,14 +454,32 @@ export class CorrelationHandler extends BaseHandler {
         const colLower = col.toLowerCase().trim();
         if (candidates.includes(col)) continue; // Already added
         
-        if (colLower.startsWith(firstWord) && colLower.length > firstWord.length) {
+        // Check if column starts with first word followed by space or is exactly the first word
+        if ((colLower.startsWith(firstWord + ' ') || colLower === firstWord) && colLower.length > firstWord.length) {
           candidates.push(col);
         }
       }
     }
     
+    // Sort candidates by relevance (exact matches first, then prefix matches, then word matches)
+    const sortedCandidates = candidates.sort((a, b) => {
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      
+      // Exact match gets highest priority
+      if (aLower === searchLower) return -1;
+      if (bLower === searchLower) return 1;
+      
+      // Prefix match gets second priority
+      if (aLower.startsWith(searchLower)) return -1;
+      if (bLower.startsWith(searchLower)) return 1;
+      
+      // Then by length (shorter matches are better)
+      return a.length - b.length;
+    });
+    
     // Return unique candidates, prioritizing exact matches
-    return Array.from(new Set(candidates)).slice(0, 10);
+    return Array.from(new Set(sortedCandidates)).slice(0, 10);
   }
 }
 

@@ -2,11 +2,28 @@
  * Data Ops Orchestrator
  * Handles intent parsing, clarification flow, and coordinates data operations
  */
-import { Message, DataSummary } from '../../../shared/schema.js';
+import { Message, DataSummary } from '../../shared/schema.js';
 import { removeNulls, getDataPreview, getDataSummary, convertDataType, createDerivedColumn } from './pythonService.js';
 import { saveModifiedData } from './dataPersistence.js';
-import { getChatBySessionIdEfficient, ChatDocument } from '../cosmosDB.js';
+import { getChatBySessionIdEfficient, ChatDocument } from '../../models/chat.model.js';
 import { openai } from '../openai.js';
+
+/**
+ * Get preview data from saved rawData (first 50 rows)
+ */
+async function getPreviewFromSavedData(sessionId: string, fallbackData: Record<string, any>[]): Promise<Record<string, any>[]> {
+  try {
+    const updatedDoc = await getChatBySessionIdEfficient(sessionId);
+    if (updatedDoc?.rawData && Array.isArray(updatedDoc.rawData) && updatedDoc.rawData.length > 0) {
+      // Return first 50 rows from saved rawData
+      return updatedDoc.rawData.slice(0, 50);
+    }
+  } catch (error) {
+    console.error('⚠️ Failed to get preview from saved data, using fallback:', error);
+  }
+  // Fallback to provided data if document not found
+  return fallbackData.slice(0, 50);
+}
 
 export interface DataOpsIntent {
   operation: 'remove_nulls' | 'preview' | 'summary' | 'convert_type' | 'count_nulls' | 'describe' | 'create_derived_column' | 'create_column' | 'modify_column' | 'normalize_column' | 'remove_column' | 'remove_rows' | 'add_row' | 'unknown';
@@ -794,7 +811,7 @@ export async function executeDataOperation(
         intent.customValue
       );
       
-      // Save modified data
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         result.data,
@@ -803,13 +820,13 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview of modified data
-      const preview = await getDataPreview(result.data, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, result.data);
       
       return {
         answer: `✅ Removed ${result.nulls_removed} null value(s). Rows: ${result.rows_before} → ${result.rows_after}. Here's a preview of the updated data:`,
         data: result.data,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -975,7 +992,7 @@ export async function executeDataOperation(
         [newColumnName!]: defaultValue !== undefined ? defaultValue : null
       }));
       
-      // Save modified data
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
@@ -984,13 +1001,14 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview
-      const preview = await getDataPreview(modifiedData, 50);
+      // Get preview from saved rawData (reload document to get updated rawData)
+      const updatedDoc = await getChatBySessionIdEfficient(sessionId);
+      const previewData = updatedDoc?.rawData ? updatedDoc.rawData.slice(0, 50) : modifiedData.slice(0, 50);
       
       return {
         answer: `✅ Successfully created column "${newColumnName}"${defaultValue !== undefined ? ` with value "${defaultValue}"` : ''}. Here's a preview of the updated data:`,
         data: modifiedData,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1032,7 +1050,7 @@ export async function executeDataOperation(
         };
       }
       
-      // Save modified data
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         result.data,
@@ -1041,13 +1059,13 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview
-      const preview = await getDataPreview(result.data, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, result.data);
       
       return {
         answer: `✅ Successfully created column "${newColumnName}" with expression: ${expression}\n\nHere's a preview of the updated data:`,
         data: result.data,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1092,6 +1110,7 @@ export async function executeDataOperation(
         return newRow;
       });
 
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
@@ -1100,12 +1119,13 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      const preview = await getDataPreview(modifiedData, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
 
       return {
         answer: `✅ Normalized column "${intent.column}" using min-max scaling (0-1). Here's a preview:`,
         data: modifiedData,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1155,6 +1175,7 @@ export async function executeDataOperation(
         return newRow;
       });
 
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
@@ -1163,12 +1184,13 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      const preview = await getDataPreview(modifiedData, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
 
       return {
         answer: `✅ Updated column "${intent.column}" by ${intent.transformType === 'add' ? 'adding' : intent.transformType === 'subtract' ? 'subtracting' : intent.transformType === 'multiply' ? 'multiplying by' : 'dividing by'} ${intent.transformValue}. Here's a preview of the updated data:`,
         data: modifiedData,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1193,6 +1215,7 @@ export async function executeDataOperation(
 
       const modifiedData = data.filter((_, idx) => idx !== targetIndex);
 
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
@@ -1201,12 +1224,13 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      const preview = await getDataPreview(modifiedData, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
 
       return {
         answer: `✅ Removed row ${targetIndex + 1}. Here's a preview of the updated data:`,
         data: modifiedData,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1220,6 +1244,7 @@ export async function executeDataOperation(
 
       const modifiedData = [...data, newRow];
 
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
@@ -1228,12 +1253,13 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      const preview = await getDataPreview(modifiedData, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
 
       return {
         answer: `✅ Added a new empty row at the bottom. Here's a preview:`,
         data: modifiedData,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1259,7 +1285,7 @@ export async function executeDataOperation(
         return newRow;
       });
       
-      // Save modified data
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
@@ -1268,13 +1294,13 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview
-      const preview = await getDataPreview(modifiedData, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
       
       return {
         answer: `✅ Successfully removed column "${intent.column}". Here's a preview of the updated data:`,
         data: modifiedData,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }
@@ -1288,7 +1314,7 @@ export async function executeDataOperation(
       
       const result = await convertDataType(data, intent.column, intent.targetType);
       
-      // Save modified data
+      // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         result.data,
@@ -1297,8 +1323,8 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview
-      const preview = await getDataPreview(result.data, 50);
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, result.data);
       
       const errorMsg = result.conversion_info.errors.length > 0
         ? ` Note: ${result.conversion_info.errors.join(', ')}`
@@ -1307,7 +1333,7 @@ export async function executeDataOperation(
       return {
         answer: `✅ Converted "${intent.column}" to ${intent.targetType}.${errorMsg} Here's a preview:`,
         data: result.data,
-        preview: preview.data,
+        preview: previewData,
         saved: true
       };
     }

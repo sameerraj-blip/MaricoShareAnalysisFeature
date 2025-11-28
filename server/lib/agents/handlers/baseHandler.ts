@@ -1,5 +1,5 @@
 import { AnalysisIntent } from '../intentClassifier.js';
-import { ChartSpec, Insight, DataSummary, Message } from '../../../../shared/schema.js';
+import { ChartSpec, Insight, DataSummary, Message } from '../../../shared/schema.js';
 import { createErrorResponse, ErrorResponse } from '../utils/errorRecovery.js';
 
 /**

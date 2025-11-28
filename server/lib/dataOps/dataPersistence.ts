@@ -3,9 +3,9 @@
  * Handles saving modified data to blob storage and updating CosmosDB
  */
 import { updateProcessedDataBlob } from '../blobStorage.js';
-import { getChatBySessionIdEfficient, updateChatDocument, ChatDocument } from '../cosmosDB.js';
+import { getChatBySessionIdEfficient, updateChatDocument, ChatDocument } from '../../models/chat.model.js';
 import { createDataSummary } from '../fileParser.js';
-import { generateColumnStatistics } from '../cosmosDB.js';
+import { generateColumnStatistics } from '../../models/chat.model.js';
 
 export interface SaveDataResult {
   version: number;
@@ -14,6 +14,8 @@ export interface SaveDataResult {
   blobUrl: string;
   blobName: string;
 }
+
+// Removed SaveDataOptions - we'll generate preview from rawData instead
 
 /**
  * Save modified data to blob storage and update CosmosDB metadata

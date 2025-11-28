@@ -27,9 +27,9 @@ export function DataPreviewTable({ data, title, maxRows = 100 }: DataPreviewTabl
       {title && (
         <h4 className="text-sm font-semibold mb-3 text-gray-900">{title}</h4>
       )}
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto max-h-[500px] overflow-y-auto border border-gray-200 rounded-md">
         <table className="w-full border-collapse text-sm">
-          <thead>
+          <thead className="sticky top-0 bg-gray-50 z-10">
             <tr className="border-b border-gray-200">
               {columns.map((col) => (
                 <th
@@ -96,9 +96,9 @@ export function DataSummaryTable({ summary }: DataSummaryTableProps) {
   return (
     <Card className="p-4 mt-2">
       <h4 className="text-sm font-semibold mb-3 text-gray-900">Data Summary</h4>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto max-h-[500px] overflow-y-auto border border-gray-200 rounded-md">
         <table className="w-full border-collapse text-sm">
-          <thead>
+          <thead className="sticky top-0 bg-gray-50 z-10">
             <tr className="border-b border-gray-200">
               <th className="px-3 py-2 text-left font-semibold text-gray-700 bg-gray-50">Variable</th>
               <th className="px-3 py-2 text-left font-semibold text-gray-700 bg-gray-50">Datatype</th>

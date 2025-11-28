@@ -8,7 +8,7 @@ import {
   deleteSessionBySessionId,
   updateSessionFileName,
   ChatDocument 
-} from "../lib/cosmosDB.js";
+} from "../models/chat.model.js";
 
 // Get all sessions
 export const getAllSessionsEndpoint = async (req: Request, res: Response) => {

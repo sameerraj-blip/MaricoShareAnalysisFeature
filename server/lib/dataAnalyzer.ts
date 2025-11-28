@@ -1,4 +1,4 @@
-import { ChartSpec, Insight, DataSummary, Message } from '../../shared/schema.js';
+import { ChartSpec, Insight, DataSummary, Message } from '../shared/schema.js';
 import { openai, MODEL } from './openai.js';
 import { processChartData } from './chartGenerator.js';
 import { analyzeCorrelations } from './correlationAnalyzer.js';
@@ -6,7 +6,7 @@ import { generateChartInsights } from './insightGenerator.js';
 import { retrieveRelevantContext, retrieveSimilarPastQA, chunkData, generateChunkEmbeddings, clearVectorStore } from './ragService.js';
 import { parseUserQuery } from './queryParser.js';
 import { applyQueryTransformations } from './dataTransform.js';
-import type { ParsedQuery } from '../../shared/queryTypes.js';
+import type { ParsedQuery } from '../shared/queryTypes.js';
 
 export async function analyzeUpload(
   data: Record<string, any>[],

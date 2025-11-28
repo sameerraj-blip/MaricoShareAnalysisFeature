@@ -2,7 +2,7 @@ import { AnalysisIntent, classifyIntent } from './intentClassifier.js';
 import { resolveContextReferences } from './contextResolver.js';
 import { retrieveContext } from './contextRetriever.js';
 import { BaseHandler, HandlerContext, HandlerResponse } from './handlers/baseHandler.js';
-import { DataSummary, Message, ChartSpec, Insight, ThinkingStep } from '../../../shared/schema.js';
+import { DataSummary, Message, ChartSpec, Insight, ThinkingStep } from '../../shared/schema.js';
 import { createErrorResponse, getFallbackSuggestions } from './utils/errorRecovery.js';
 import { askClarifyingQuestion } from './utils/clarification.js';
 import { DataOpsHandler } from './handlers/dataOpsHandler.js';
@@ -234,8 +234,23 @@ export class AgentOrchestrator {
       this.emitThinkingStep(onThinkingStep, "Figuring out the best way to answer", "completed");
 
       // Step 3: Check if clarification needed
+      // For correlation queries, try to proceed even with low confidence if we can extract target from question
       if (intent.type === 'conversational') {
         console.log(`💬 Conversational query detected, skipping clarification check`);
+      } else if (intent.type === 'correlation') {
+        // For correlation queries, check if we can extract target from question
+        // If yes, proceed even with low confidence
+        const question = intent.originalQuestion || intent.customRequest || '';
+        const hasTargetInQuestion = /(?:what\s+(?:impacts?|affects?|influences?)|correlation\s+of)\s+[\w\s]+/i.test(question);
+        
+        if (hasTargetInQuestion && (intent.requiresClarification || intent.confidence < 0.5)) {
+          console.log(`⚠️ Low confidence correlation query, but target may be extractable from question - proceeding to handler`);
+          // Don't return early - let the handler try to extract and process
+        } else if (intent.requiresClarification || intent.confidence < 0.5) {
+          console.log(`❓ Low confidence (${intent.confidence.toFixed(2)}) or clarification required, asking for clarification`);
+          this.emitThinkingStep(onThinkingStep, "Checking if I need more details", "active");
+          return askClarifyingQuestion(intent, summary);
+        }
       } else if (intent.requiresClarification || intent.confidence < 0.5) {
         console.log(`❓ Low confidence (${intent.confidence.toFixed(2)}) or clarification required, asking for clarification`);
         this.emitThinkingStep(onThinkingStep, "Checking if I need more details", "active");

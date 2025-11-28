@@ -1,4 +1,4 @@
-import { SessionData } from "../shared/schema.js";
+import { SessionData } from "./shared/schema.js";
 import { randomUUID } from "crypto";
 
 // Update the storage interface for our application

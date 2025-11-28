@@ -1,7 +1,7 @@
 import { BaseHandler, HandlerContext, HandlerResponse } from './baseHandler.js';
 import { AnalysisIntent } from '../intentClassifier.js';
 import { generateGeneralAnswer } from '../../dataAnalyzer.js';
-import type { ChartSpec } from '../../../../shared/schema.js';
+import type { ChartSpec } from '../../../shared/schema.js';
 
 /**
  * General Handler
