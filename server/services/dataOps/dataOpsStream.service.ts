@@ -43,8 +43,22 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
   setSSEHeaders(res);
 
   try {
-    // Get chat document
-    const chatDocument = await getChatBySessionIdForUser(sessionId, username);
+    // Get chat document - handle CosmosDB initialization errors gracefully
+    let chatDocument: ChatDocument | null = null;
+    try {
+      chatDocument = await getChatBySessionIdForUser(sessionId, username);
+    } catch (error: any) {
+      // If CosmosDB isn't initialized, we can't get the document
+      if (error?.message?.includes('CosmosDB container not initialized')) {
+        console.warn('⚠️ CosmosDB not initialized, cannot proceed without session document.');
+        sendSSE(res, 'error', { message: 'Database is initializing. Please wait a moment and try again.' });
+        res.end();
+        return;
+      }
+      // Re-throw other errors
+      throw error;
+    }
+    
     if (!chatDocument) {
       sendSSE(res, 'error', { message: 'Session not found. Please upload a file first.' });
       res.end();
@@ -83,6 +97,28 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       timestamp: Date.now(),
     });
 
+    // Get full chat history - always use database messages as source of truth
+    // Merge frontend chatHistory with database messages to ensure we have the latest
+    let fullChatHistory: Message[] = [];
+    try {
+      // Always prefer database messages as they're the source of truth
+      const dbMessages = chatDocument.messages || [];
+      const frontendMessages = chatHistory || [];
+      
+      // Merge: use database messages if available, otherwise use frontend
+      // Database messages are more complete as they include the latest assistant responses
+      if (dbMessages.length > 0) {
+        fullChatHistory = dbMessages;
+        console.log(`📚 Using ${dbMessages.length} messages from database for context`);
+      } else if (frontendMessages.length > 0) {
+        fullChatHistory = frontendMessages;
+        console.log(`📱 Using ${frontendMessages.length} messages from frontend for context`);
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not access chat history, using frontend history:', error);
+      fullChatHistory = chatHistory || [];
+    }
+
     // Execute operation
     sendSSE(res, 'thinking', {
       step: 'Executing data operation',
@@ -90,7 +126,7 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       timestamp: Date.now(),
     });
 
-    const result = await executeDataOperation(intent, fullData, sessionId, chatDocument, message);
+    const result = await executeDataOperation(intent, fullData, sessionId, chatDocument, message, fullChatHistory);
 
     sendSSE(res, 'thinking', {
       step: 'Executing data operation',

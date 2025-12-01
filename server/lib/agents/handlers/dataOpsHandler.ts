@@ -64,12 +64,16 @@ export class DataOpsHandler extends BaseHandler {
     }
 
     try {
+      // Get chat history from context or session document
+      const chatHistory = context.chatHistory || sessionDoc?.messages || [];
+      
       const result = await executeDataOperation(
         dataOpsIntent,
         dataset,
         context.sessionId,
         sessionDoc,
-        requestText
+        requestText,
+        chatHistory
       );
 
       return {

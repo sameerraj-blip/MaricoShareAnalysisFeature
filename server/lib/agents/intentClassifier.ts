@@ -8,7 +8,7 @@ import { DataSummary, Message } from '../../shared/schema.js';
  * Defines the structure of an analyzed user intent
  */
 export const analysisIntentSchema = z.object({
-  type: z.enum(['correlation', 'chart', 'statistical', 'conversational', 'comparison', 'custom']),
+  type: z.enum(['correlation', 'chart', 'statistical', 'conversational', 'comparison', 'ml_model', 'custom']),
   confidence: z.number().min(0).max(1),
   targetVariable: z.string().optional(),
   variables: z.array(z.string()).optional(),
@@ -28,6 +28,7 @@ export const analysisIntentSchema = z.object({
   }).optional(),
   customRequest: z.string().optional(),
   requiresClarification: z.boolean().optional(),
+  modelType: z.enum(['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree']).optional(),
 });
 
 export type AnalysisIntent = z.infer<typeof analysisIntentSchema> & {
@@ -37,6 +38,8 @@ export type AnalysisIntent = z.infer<typeof analysisIntentSchema> & {
   column?: string;
   targetType?: string;
   limit?: number;
+  // Extended fields for ML model requests
+  modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree';
 };
 
 /**
@@ -113,21 +116,35 @@ AVAILABLE DATA:
 ${dateColumns ? `- Date columns: ${dateColumns}` : ''}
 
 CLASSIFICATION RULES:
-1. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
+1. "ml_model" - User wants to build/train/create a machine learning model
+   * HIGH PRIORITY: Questions like "build a linear model", "train a model", "create a [model type] model", "build a model choosing X as target and Y, Z as independent variables"
+   * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model"
+   * Model types: linear, logistic, ridge, lasso, random forest, decision tree
+   * Set confidence to 0.9+ for these patterns
+2. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
    * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
    * These are correlation queries even if the target variable (X) is not immediately recognizable
    * Set confidence to 0.9+ for these patterns
-2. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area)
-3. "statistical" - User asks for statistics (mean, median, average, sum, count, max, min, highest, lowest, best, worst) OR asks "which month/row/period has the [highest/lowest/best/worst] [variable]" - these are statistical queries, NOT comparison queries
-4. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
-5. "conversational" - Greetings, thanks, casual chat, questions about the bot
-6. "custom" - Doesn't fit other categories
+3. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area)
+4. "statistical" - User asks for statistics (mean, median, average, sum, count, max, min, highest, lowest, best, worst) OR asks "which month/row/period has the [highest/lowest/best/worst] [variable]" - these are statistical queries, NOT comparison queries
+5. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
+6. "conversational" - Greetings, thanks, casual chat, questions about the bot
+7. "custom" - Doesn't fit other categories
 
 IMPORTANT: Questions like "what is the best competitor to X?" or "which product is best for Y?" should be classified as "comparison", NOT "correlation" or "custom".
 
 IMPORTANT: Questions like "which month had the highest X?", "which was the best month for X?", "what is the maximum value of X?", or "which month had the best X?" should be classified as "statistical", NOT "correlation" or "comparison". The word "best" in the context of "which month/row/period" means highest/maximum value, which is a statistical query.
 
 EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
+- For ML_MODEL intent type:
+  * Extract modelType: "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree" from phrases like "linear model", "logistic regression", "ridge model", "lasso model", "random forest", "decision tree"
+  * If no model type specified, default to "linear"
+  * Extract targetVariable: The variable to predict (from phrases like "X as target", "predicting X", "target variable X", "dependent variable X")
+  * Extract variables array: Independent variables/features (from phrases like "a, b, c as independent variables", "using X, Y, Z as features", "predictors: X, Y, Z")
+  * Look for patterns:
+    - "build a [MODEL_TYPE] model choosing [TARGET] as target variable and [FEATURES] as independent variables"
+    - "train a [MODEL_TYPE] model to predict [TARGET] using [FEATURES]"
+    - "create a [MODEL_TYPE] model with [TARGET] as target and [FEATURES] as features"
 - Extract targetVariable: Any entity/variable the user wants to analyze (extract from natural language, don't assume domain)
   * For questions like "what impacts X" or "what affects X", extract X as the targetVariable
   * For questions like "what influences Y", extract Y as the targetVariable
@@ -170,7 +187,7 @@ CRITICAL: Do NOT assume domain-specific terminology. Extract relationships and c
 
 OUTPUT FORMAT (JSON only, no markdown):
 {
-  "type": "correlation" | "chart" | "statistical" | "conversational" | "comparison" | "custom",
+  "type": "correlation" | "chart" | "statistical" | "conversational" | "comparison" | "ml_model" | "custom",
   "confidence": 0.0-1.0,
   "targetVariable": "column_name" | null,
   "variables": ["col1", "col2"] | null,
@@ -189,7 +206,8 @@ OUTPUT FORMAT (JSON only, no markdown):
     "y2": "col3" | null  // Secondary Y-axis (right axis) - extract from "add X on secondary Y axis", "X on secondary axis", etc.
   } | null,
   "customRequest": "original question" | null,
-  "requiresClarification": true | false
+  "requiresClarification": true | false,
+  "modelType": "linear" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree" | null  // Only for ml_model type
 }`;
 
   let lastError: Error | null = null;
@@ -282,6 +300,8 @@ OUTPUT FORMAT (JSON only, no markdown):
   
   if (questionLower.match(/\b(hi|hello|hey|thanks|thank you|bye)\b/)) {
     fallbackType = 'conversational';
+  } else if (questionLower.match(/\b(build|train|create).*model\b/)) {
+    fallbackType = 'ml_model';
   } else if (questionLower.match(/\b(what affects|correlation|relationship|influence)\b/)) {
     fallbackType = 'correlation';
   } else if (questionLower.match(/\b(chart|graph|plot|visualize|show)\b/)) {

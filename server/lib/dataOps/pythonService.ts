@@ -15,9 +15,9 @@ if (typeof fetch !== 'undefined') {
     throw new Error('fetch is not available. Please use Node.js 18+ or install node-fetch');
   }
 }
-
 const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8001';
 const REQUEST_TIMEOUT = 300000; // 5 minutes
+
 
 interface RemoveNullsRequest {
   data: Record<string, any>[];
@@ -88,6 +88,42 @@ interface ConvertTypeResponse {
     errors: string[];
     note?: string;
   };
+}
+
+interface TrainModelRequest {
+  data: Record<string, any>[];
+  model_type: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree';
+  target_variable: string;
+  features: string[];
+  test_size?: number;
+  random_state?: number;
+  alpha?: number;
+  n_estimators?: number;
+  max_depth?: number;
+}
+
+interface TrainModelResponse {
+  model_type: string;
+  task_type: 'regression' | 'classification';
+  target_variable: string;
+  features: string[];
+  coefficients?: {
+    intercept: number | number[];
+    features: Record<string, number | number[]>;
+  } | null;
+  metrics: {
+    train: Record<string, number>;
+    test: Record<string, number>;
+    cross_validation: Record<string, number>;
+  };
+  predictions: number[];
+  feature_importance?: Record<string, number> | null;
+  n_samples: number;
+  n_train: number;
+  n_test: number;
+  alpha?: number;
+  n_estimators?: number;
+  max_depth?: number;
 }
 
 /**
@@ -296,6 +332,78 @@ export async function convertDataType(
     return await response.json() as ConvertTypeResponse;
   } catch (error) {
     console.error('Error calling Python service convert-type:', error);
+    throw error;
+  }
+}
+
+/**
+ * Train a machine learning model
+ */
+export async function trainMLModel(
+  data: Record<string, any>[],
+  modelType: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree',
+  targetVariable: string,
+  features: string[],
+  options?: {
+    testSize?: number;
+    randomState?: number;
+    alpha?: number;
+    nEstimators?: number;
+    maxDepth?: number;
+  }
+): Promise<TrainModelResponse> {
+  try {
+    const request: TrainModelRequest = {
+      data,
+      model_type: modelType,
+      target_variable: targetVariable,
+      features,
+      test_size: options?.testSize ?? 0.2,
+      random_state: options?.randomState ?? 42,
+    };
+    
+    // Add optional parameters based on model type
+    if (modelType === 'ridge' || modelType === 'lasso') {
+      if (options?.alpha !== undefined) {
+        request.alpha = options.alpha;
+      }
+    }
+    
+    if (modelType === 'random_forest') {
+      if (options?.nEstimators !== undefined) {
+        request.n_estimators = options.nEstimators;
+      }
+      if (options?.maxDepth !== undefined) {
+        request.max_depth = options.maxDepth;
+      }
+    }
+    
+    if (modelType === 'decision_tree') {
+      if (options?.maxDepth !== undefined) {
+        request.max_depth = options.maxDepth;
+      }
+    }
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetchFn(`${PYTHON_SERVICE_URL}/train-model`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    return await response.json() as TrainModelResponse;
+  } catch (error) {
+    console.error('Error calling Python service train-model:', error);
     throw error;
   }
 }

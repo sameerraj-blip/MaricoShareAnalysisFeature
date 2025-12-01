@@ -7,6 +7,14 @@ from typing import List, Dict, Any, Optional, Literal
 import uvicorn
 from config import config
 from data_operations import remove_nulls, get_preview, get_summary, convert_type, create_derived_column
+from ml_models import (
+    train_linear_regression,
+    train_logistic_regression,
+    train_ridge_regression,
+    train_lasso_regression,
+    train_random_forest,
+    train_decision_tree
+)
 import traceback
 
 app = FastAPI(title="Data Operations Service", version="1.0.0")
@@ -44,6 +52,18 @@ class ConvertTypeRequest(BaseModel):
     data: List[Dict[str, Any]]
     column: str
     target_type: Literal["numeric", "string", "date", "percentage", "boolean"]
+
+
+class TrainModelRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    model_type: Literal["linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree"]
+    target_variable: str
+    features: List[str]
+    test_size: float = Field(default=0.2, ge=0.1, le=0.5)
+    random_state: int = Field(default=42)
+    alpha: Optional[float] = Field(default=None, ge=0.0)  # For Ridge/Lasso
+    n_estimators: Optional[int] = Field(default=None, ge=1)  # For Random Forest
+    max_depth: Optional[int] = Field(default=None, ge=1)  # For Random Forest/Decision Tree
 
 
 @app.get("/health")
@@ -168,6 +188,127 @@ async def convert_type_endpoint(request: ConvertTypeRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"Error in convert_type: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/train-model")
+async def train_model_endpoint(request: TrainModelRequest):
+    """Train a machine learning model"""
+    try:
+        # Validate data
+        if not request.data or len(request.data) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Data is empty or not provided"
+            )
+        
+        if len(request.data) > config.MAX_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Data exceeds maximum rows limit of {config.MAX_ROWS}"
+            )
+        
+        # Validate target variable
+        if not request.target_variable or not request.target_variable.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Target variable is required"
+            )
+        
+        # Validate features list
+        if not request.features or len(request.features) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one feature must be specified"
+            )
+        
+        # Check for duplicate features
+        if len(request.features) != len(set(request.features)):
+            raise HTTPException(
+                status_code=400,
+                detail="Duplicate features found in features list"
+            )
+        
+        # Validate that target is not in features
+        if request.target_variable in request.features:
+            raise HTTPException(
+                status_code=400,
+                detail="Target variable cannot be in the features list"
+            )
+        
+        # Train model based on type
+        if request.model_type == "linear":
+            result = train_linear_regression(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        elif request.model_type == "logistic":
+            result = train_logistic_regression(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        elif request.model_type == "ridge":
+            alpha = request.alpha if request.alpha is not None else 1.0
+            result = train_ridge_regression(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                alpha=alpha,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        elif request.model_type == "lasso":
+            alpha = request.alpha if request.alpha is not None else 1.0
+            result = train_lasso_regression(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                alpha=alpha,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        elif request.model_type == "random_forest":
+            n_estimators = request.n_estimators if request.n_estimators is not None else 100
+            result = train_random_forest(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                n_estimators=n_estimators,
+                max_depth=request.max_depth,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        elif request.model_type == "decision_tree":
+            result = train_decision_tree(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                max_depth=request.max_depth,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported model type: {request.model_type}"
+            )
+        
+        return result
+    except ValueError as e:
+        print(f"ValueError in train_model: {str(e)}")
+        print(f"Request details: model_type={request.model_type}, target_variable={request.target_variable}, features={request.features}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in train_model: {traceback.format_exc()}")
+        print(f"Request details: model_type={request.model_type}, target_variable={request.target_variable}, features={request.features}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 

@@ -3,9 +3,9 @@
  * Handles intent parsing, clarification flow, and coordinates data operations
  */
 import { Message, DataSummary } from '../../shared/schema.js';
-import { removeNulls, getDataPreview, getDataSummary, convertDataType, createDerivedColumn } from './pythonService.js';
+import { removeNulls, getDataPreview, getDataSummary, convertDataType, createDerivedColumn, trainMLModel } from './pythonService.js';
 import { saveModifiedData } from './dataPersistence.js';
-import { getChatBySessionIdEfficient, ChatDocument } from '../../models/chat.model.js';
+import { getChatBySessionIdEfficient, updateChatDocument, ChatDocument } from '../../models/chat.model.js';
 import { openai } from '../openai.js';
 
 /**
@@ -26,7 +26,7 @@ async function getPreviewFromSavedData(sessionId: string, fallbackData: Record<s
 }
 
 export interface DataOpsIntent {
-  operation: 'remove_nulls' | 'preview' | 'summary' | 'convert_type' | 'count_nulls' | 'describe' | 'create_derived_column' | 'create_column' | 'modify_column' | 'normalize_column' | 'remove_column' | 'remove_rows' | 'add_row' | 'unknown';
+  operation: 'remove_nulls' | 'preview' | 'summary' | 'convert_type' | 'count_nulls' | 'describe' | 'create_derived_column' | 'create_column' | 'modify_column' | 'normalize_column' | 'remove_column' | 'remove_rows' | 'add_row' | 'train_model' | 'unknown';
   column?: string;
   method?: 'delete' | 'mean' | 'median' | 'mode' | 'custom';
   customValue?: any;
@@ -42,6 +42,10 @@ export interface DataOpsIntent {
   requiresClarification: boolean;
   clarificationType?: 'column' | 'method' | 'target_type';
   clarificationMessage?: string;
+  // ML model fields
+  modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree';
+  targetVariable?: string;
+  features?: string[];
 }
 
 export interface DataOpsContext {
@@ -65,6 +69,63 @@ export async function parseDataOpsIntent(
 ): Promise<DataOpsIntent> {
   const lowerMessage = message.toLowerCase().trim();
   const availableColumns = dataSummary.columns.map(c => c.name);
+  
+  // ---------------------------------------------------------------------------
+  // ML Model training intent (handled BEFORE clarification so new model
+  // requests are not mistaken for follow-ups to other operations)
+  // ---------------------------------------------------------------------------
+  // Explicit model building verbs
+  if (lowerMessage.includes('build') && (lowerMessage.includes('model') || lowerMessage.includes('linear') || lowerMessage.includes('regression'))) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
+  
+  if (lowerMessage.includes('train') && lowerMessage.includes('model')) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
+  
+  if (lowerMessage.includes('create') && lowerMessage.includes('model')) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
+  
+  // Follow-up / conversational model requests that reference an existing model
+  // Examples:
+  // - "for the above can you choose a model with less variance"
+  // - "can you give me a model with the lowest variance"
+  // - "try a different model type for that"
+  if (
+    lowerMessage.includes('model') &&
+    (
+      lowerMessage.includes('less variance') ||
+      lowerMessage.includes('lowest variance') ||
+      lowerMessage.includes('reduce variance') ||
+      lowerMessage.includes('lower variance') ||
+      lowerMessage.includes('different model') ||
+      lowerMessage.includes('another model') ||
+      lowerMessage.includes('better fit') ||
+      lowerMessage.includes('improve fit') ||
+      lowerMessage.includes('for above') ||
+      lowerMessage.includes('the above') ||
+      lowerMessage.includes('previous model') ||
+      lowerMessage.includes('random forest') ||
+      lowerMessage.includes('randomforest') ||
+      lowerMessage.includes('decision tree') ||
+      lowerMessage.includes('decisiontree')
+    )
+  ) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
   
   // Check for pending operation from context
   const dataOpsContext = sessionDoc?.dataOpsContext as DataOpsContext | undefined;
@@ -369,7 +430,7 @@ Available columns: ${columnsList}
 
 Determine the intent and return JSON with this structure:
 {
-  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "unknown",
+    "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "train_model" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
   "newColumnName": "NewColumnName" (if creating new column, null otherwise),
   "expression": "[Column1] + [Column2]" (if creating derived column, use [ColumnName] format, null otherwise),
@@ -383,6 +444,10 @@ Determine the intent and return JSON with this structure:
 }
 
 Operations:
+- "train_model": User wants to build/train/create a machine learning model (e.g., "build a linear model", "train a model", "create a model")
+  * Extract modelType: "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree" (default: "linear")
+  * Extract targetVariable: the target/dependent variable to predict
+  * Extract features: array of independent variables/features
 - "create_column": User wants to create new column with static/default value (e.g., "create column status with value active", "add column Notes", "create column Price with default 100")
   * Extract newColumnName: the name of the new column to create
   * Extract defaultValue: the static value to put in all rows (string, number, boolean, or null)
@@ -439,6 +504,9 @@ Return ONLY valid JSON, no other text.`;
       newColumnName: parsed.newColumnName,
       expression: parsed.expression,
       defaultValue: parsed.defaultValue,
+      modelType: parsed.modelType,
+      targetVariable: parsed.targetVariable,
+      features: parsed.features,
       requiresClarification: parsed.requiresClarification || false,
       clarificationMessage: parsed.clarificationMessage,
     } as DataOpsIntent;
@@ -682,6 +750,297 @@ Return JSON:
 }
 
 /**
+ * Extract previous model parameters from chat history
+ */
+function extractPreviousModelParams(chatHistory: Message[]): { targetVariable?: string; features?: string[]; modelType?: string } | null {
+  if (!chatHistory || chatHistory.length === 0) {
+    console.log('📋 No chat history provided for context extraction');
+    return null;
+  }
+  
+  console.log(`📋 Searching through ${chatHistory.length} messages for previous model context`);
+  
+  // Look backwards through chat history for the most recent model result
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const msg = chatHistory[i];
+    if (msg.role === 'assistant' && msg.content) {
+      const content = msg.content;
+      
+      // Check if this is a model result (contains "Model Summary" and "Target Variable")
+      if (content.includes('Model Summary') && content.includes('Target Variable')) {
+        console.log(`📋 Found potential model result at message index ${i}`);
+        
+        // Try multiple patterns for target variable
+        const targetMatch = content.match(/Target Variable:\s*([^\n]+)/i) || 
+                           content.match(/target[:\s]+([^\n]+)/i);
+        
+        // Try multiple patterns for features
+        const featuresMatch = content.match(/Features:\s*([^\n]+)/i) ||
+                             content.match(/features[:\s]+([^\n]+)/i);
+        
+        // Try multiple patterns for model type
+        const modelTypeMatch = content.match(/trained a (\w+(?:\s+\w+)?)\s+model/i) ||
+                              content.match(/(\w+(?:\s+\w+)?)\s+model/i) ||
+                              content.match(/model type[:\s]+(\w+(?:\s+\w+)?)/i);
+        
+        if (targetMatch && featuresMatch) {
+          const targetVariable = targetMatch[1].trim();
+          const featuresStr = featuresMatch[1].trim();
+          // Parse features (comma-separated list, handle "&" and "and")
+          const features = featuresStr
+            .split(/[,&]| and /i)
+            .map(f => f.trim())
+            .filter(f => f.length > 0);
+          
+          let modelType: string | undefined;
+          if (modelTypeMatch) {
+            let modelTypeStr = modelTypeMatch[1].trim().toLowerCase();
+            // Normalize model type names
+            modelTypeStr = modelTypeStr.replace(/\s+/g, '_');
+            // Handle variations
+            if (modelTypeStr.includes('random') && modelTypeStr.includes('forest')) {
+              modelTypeStr = 'random_forest';
+            } else if (modelTypeStr.includes('decision') && modelTypeStr.includes('tree')) {
+              modelTypeStr = 'decision_tree';
+            }
+            
+            if (['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree'].includes(modelTypeStr)) {
+              modelType = modelTypeStr;
+            }
+          }
+          
+          console.log(`✅ Found previous model in chat history: target="${targetVariable}", features=[${features.join(', ')}], type=${modelType || 'unknown'}`);
+          return { targetVariable, features, modelType };
+        } else {
+          console.log(`⚠️ Found model result but couldn't parse: targetMatch=${!!targetMatch}, featuresMatch=${!!featuresMatch}`);
+        }
+      }
+    }
+  }
+  
+  console.log('📋 No previous model found in chat history');
+  return null;
+}
+
+/**
+ * Extract ML model details using AI
+ */
+async function extractMLModelDetails(
+  message: string,
+  availableColumns: string[],
+  chatHistory?: Message[],
+  previousModelParams?: { targetVariable?: string; features?: string[]; modelType?: string }
+): Promise<{ modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree'; targetVariable?: string; features?: string[] } | null> {
+  try {
+    const columnsList = availableColumns.slice(0, 30).join(', ');
+    
+    // Build context about previous model if available
+    let previousModelContext = '';
+    if (previousModelParams && previousModelParams.targetVariable) {
+      previousModelContext = `\n\nPREVIOUS MODEL CONTEXT (if user references "for above", "that model", etc., use these parameters):\n`;
+      previousModelContext += `- Target Variable: ${previousModelParams.targetVariable}\n`;
+      previousModelContext += `- Features: ${previousModelParams.features?.join(', ') || 'N/A'}\n`;
+      if (previousModelParams.modelType) {
+        previousModelContext += `- Previous Model Type: ${previousModelParams.modelType}\n`;
+      }
+    }
+    
+    // Check if user is referencing previous model
+    const messageLower = message.toLowerCase();
+    const referencesPrevious = messageLower.includes('for above') || 
+                               messageLower.includes('that model') || 
+                               messageLower.includes('previous model') ||
+                               messageLower.includes('the above') ||
+                               messageLower.includes('same') && messageLower.includes('model');
+    
+    // Determine model type based on user request
+    let suggestedModelType = 'linear';
+    if (messageLower.includes('less variance') || messageLower.includes('reduce variance') || messageLower.includes('lower variance')) {
+      // Ridge or Lasso for variance reduction
+      suggestedModelType = 'ridge'; // Default to Ridge for variance reduction
+    } else if (messageLower.includes('ridge')) {
+      suggestedModelType = 'ridge';
+    } else if (messageLower.includes('lasso')) {
+      suggestedModelType = 'lasso';
+    } else if (messageLower.includes('random forest') || messageLower.includes('randomforest')) {
+      suggestedModelType = 'random_forest';
+    } else if (messageLower.includes('decision tree') || messageLower.includes('decisiontree')) {
+      suggestedModelType = 'decision_tree';
+    } else if (messageLower.includes('logistic')) {
+      suggestedModelType = 'logistic';
+    }
+    
+    const prompt = `Extract ML model parameters from the user's query.${previousModelContext}
+
+User query: "${message}"
+
+Available columns: ${columnsList}
+
+${referencesPrevious && previousModelParams ? 'IMPORTANT: The user is referencing a previous model. Use the previous model parameters (target variable and features) from the context above unless they explicitly specify different ones.' : ''}
+
+Extract:
+1. modelType: "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree"
+   ${messageLower.includes('less variance') || messageLower.includes('reduce variance') ? '   → If user wants "less variance", use "ridge" or "lasso" (prefer "ridge")' : ''}
+   ${suggestedModelType !== 'linear' ? `   → Suggested: "${suggestedModelType}" based on user query` : ''}
+2. targetVariable: The target/dependent variable to predict
+   ${referencesPrevious && previousModelParams?.targetVariable ? `   → If referencing previous model, use: "${previousModelParams.targetVariable}"` : ''}
+3. features: Array of independent variables/features
+   ${referencesPrevious && previousModelParams?.features ? `   → If referencing previous model, use: [${previousModelParams.features.map(f => `"${f}"`).join(', ')}]` : ''}
+
+Examples:
+- "Build a linear model choosing Sales as target variable and Price, Marketing as independent variables"
+  → modelType: "linear", targetVariable: "Sales", features: ["Price", "Marketing"]
+- "for above can you choose a model with less variance" (when previous model had Target: Sales, Features: Price, Marketing)
+  → modelType: "ridge", targetVariable: "Sales", features: ["Price", "Marketing"]
+- "Create a linear model with PA TOM as target and PA nGRP Adstocked, PAB nGRP Adstocked as features"
+  → modelType: "linear", targetVariable: "PA TOM", features: ["PA nGRP Adstocked", "PAB nGRP Adstocked"]
+- "Train a random forest model to predict Revenue using Price, Marketing, Season"
+  → modelType: "random_forest", targetVariable: "Revenue", features: ["Price", "Marketing", "Season"]
+
+Return JSON:
+{
+  "modelType": "linear" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree",
+  "targetVariable": "ColumnName",
+  "features": ["Column1", "Column2", "Column3"]
+}`;
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You extract ML model parameters from natural language. Return only valid JSON.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.2,
+      max_tokens: 300,
+    });
+
+    const content = response.choices[0]?.message?.content?.trim();
+    if (!content) return null;
+
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    
+    if (parsed.targetVariable && parsed.features && Array.isArray(parsed.features)) {
+      return {
+        modelType: parsed.modelType || 'linear',
+        targetVariable: parsed.targetVariable.trim(),
+        features: parsed.features.map((f: string) => f.trim()).filter((f: string) => f.length > 0),
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error extracting ML model details:', error);
+    return null;
+  }
+}
+
+/**
+ * Format ML model response
+ */
+function formatMLModelResponse(
+  result: any,
+  modelType: string,
+  targetCol: string,
+  features: string[]
+): string {
+  let answer = `I've successfully trained a ${modelType.replace('_', ' ')} model.\n\n`;
+  
+  answer += `**Model Summary:**\n`;
+  answer += `- Target Variable: ${targetCol}\n`;
+  answer += `- Features: ${features.join(', ')}\n`;
+  answer += `- Training Samples: ${result.n_train}\n`;
+  answer += `- Test Samples: ${result.n_test}\n\n`;
+
+  // Add metrics
+  answer += `**Model Performance:**\n`;
+  
+  if (result.task_type === 'regression') {
+    const testMetrics = result.metrics.test;
+    answer += `- R² Score: ${testMetrics.r2_score?.toFixed(4) || 'N/A'}\n`;
+    answer += `- RMSE: ${testMetrics.rmse?.toFixed(4) || 'N/A'}\n`;
+    answer += `- MAE: ${testMetrics.mae?.toFixed(4) || 'N/A'}\n`;
+    
+    if (result.metrics.cross_validation?.mean_r2) {
+      answer += `- Cross-Validation R² (mean): ${result.metrics.cross_validation.mean_r2.toFixed(4)}\n`;
+    }
+  } else {
+    const testMetrics = result.metrics.test;
+    answer += `- Accuracy: ${(testMetrics.accuracy * 100)?.toFixed(2) || 'N/A'}%\n`;
+    answer += `- Precision: ${(testMetrics.precision * 100)?.toFixed(2) || 'N/A'}%\n`;
+    answer += `- Recall: ${(testMetrics.recall * 100)?.toFixed(2) || 'N/A'}%\n`;
+    answer += `- F1 Score: ${(testMetrics.f1_score * 100)?.toFixed(2) || 'N/A'}%\n`;
+    
+    if (result.metrics.cross_validation?.mean_accuracy) {
+      answer += `- Cross-Validation Accuracy (mean): ${(result.metrics.cross_validation.mean_accuracy * 100).toFixed(2)}%\n`;
+    }
+  }
+
+  answer += `\n`;
+
+  // Add coefficients for linear models
+  if (result.coefficients) {
+    answer += `**Model Coefficients:**\n`;
+    answer += `- Intercept: ${typeof result.coefficients.intercept === 'number' ? result.coefficients.intercept.toFixed(4) : 'N/A'}\n`;
+    
+    if (result.coefficients.features) {
+      const featureCoefs = Object.entries(result.coefficients.features)
+        .sort((a, b) => {
+          const aVal = typeof a[1] === 'number' ? Math.abs(a[1]) : 0;
+          const bVal = typeof b[1] === 'number' ? Math.abs(b[1]) : 0;
+          return bVal - aVal;
+        });
+      
+      for (const [feature, coef] of featureCoefs) {
+        const coefValue = typeof coef === 'number' ? coef.toFixed(4) : 'N/A';
+        answer += `- ${feature}: ${coefValue}\n`;
+      }
+    }
+    answer += `\n`;
+  }
+
+  // Add feature importance for tree-based models
+  if (result.feature_importance) {
+    answer += `**Feature Importance:**\n`;
+    const importanceEntries = Object.entries(result.feature_importance)
+      .sort((a, b) => (b[1] as number) - (a[1] as number));
+    
+    for (const [feature, importance] of importanceEntries) {
+      answer += `- ${feature}: ${(importance as number).toFixed(4)}\n`;
+    }
+    answer += `\n`;
+  }
+
+  // Add insights
+  answer += `**Key Insights:**\n`;
+  if (result.task_type === 'regression') {
+    const r2 = result.metrics.test.r2_score;
+    if (r2 > 0.8) {
+      answer += `- The model explains ${(r2 * 100).toFixed(1)}% of the variance, indicating excellent fit.\n`;
+    } else if (r2 > 0.6) {
+      answer += `- The model explains ${(r2 * 100).toFixed(1)}% of the variance, indicating good fit.\n`;
+    } else if (r2 > 0.4) {
+      answer += `- The model explains ${(r2 * 100).toFixed(1)}% of the variance, indicating moderate fit.\n`;
+    } else {
+      answer += `- The model explains ${(r2 * 100).toFixed(1)}% of the variance, indicating poor fit. Consider feature engineering or different model types.\n`;
+    }
+  } else {
+    const accuracy = result.metrics.test.accuracy;
+    if (accuracy > 0.9) {
+      answer += `- The model achieves ${(accuracy * 100).toFixed(1)}% accuracy, indicating excellent performance.\n`;
+    } else if (accuracy > 0.7) {
+      answer += `- The model achieves ${(accuracy * 100).toFixed(1)}% accuracy, indicating good performance.\n`;
+    } else {
+      answer += `- The model achieves ${(accuracy * 100).toFixed(1)}% accuracy. Consider feature engineering or different model types.\n`;
+    }
+  }
+
+  return answer;
+}
+
+/**
  * Extract derived column details using AI
  */
 async function extractDerivedColumnDetails(
@@ -773,7 +1132,8 @@ export async function executeDataOperation(
   data: Record<string, any>[],
   sessionId: string,
   sessionDoc?: ChatDocument,
-  originalMessage?: string
+  originalMessage?: string,
+  chatHistory?: Message[]
 ): Promise<{
   answer: string;
   data?: Record<string, any>[];
@@ -794,7 +1154,8 @@ export async function executeDataOperation(
         timestamp: Date.now()
       };
       sessionDoc.dataOpsContext = context as any;
-      await import('../cosmosDB.js').then(m => m.updateChatDocument(sessionDoc));
+      // Persist updated Data Ops context using shared chat model helper
+      await updateChatDocument(sessionDoc);
     }
     
     return {
@@ -1336,6 +1697,155 @@ export async function executeDataOperation(
         preview: previewData,
         saved: true
       };
+    }
+    
+    case 'train_model': {
+      // Extract model parameters from intent or use AI to extract from message
+      let modelType: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' = intent.modelType || 'linear';
+      let targetVariable = intent.targetVariable;
+      let features = intent.features || [];
+      
+      // Get chat history to look for previous model parameters
+      // Use passed chatHistory first, fallback to sessionDoc messages if available
+      let chatHistoryForContext: Message[] = [];
+      try {
+        chatHistoryForContext = chatHistory || sessionDoc?.messages || [];
+      } catch (error) {
+        // If accessing sessionDoc.messages fails (e.g., CosmosDB not initialized), use empty array
+        console.warn('⚠️ Could not access chat history, continuing without context:', error);
+        chatHistoryForContext = chatHistory || [];
+      }
+      
+      const previousModelParams = extractPreviousModelParams(chatHistoryForContext);
+      
+      // Check if user wants less variance (Ridge/Lasso)
+      const messageText = originalMessage || sessionDoc?.messages?.slice().reverse().find(m => m.role === 'user')?.content || '';
+      const messageLower = messageText.toLowerCase();
+      const wantsLessVariance = messageLower.includes('less variance') || 
+                                messageLower.includes('reduce variance') || 
+                                messageLower.includes('lower variance');
+      
+      // If user wants less variance and we have previous model, default to Ridge
+      if (wantsLessVariance && previousModelParams && !intent.modelType) {
+        modelType = 'ridge';
+        console.log(`🎯 User wants less variance, using Ridge model`);
+      }
+      
+      // If not provided, try to extract from message using AI
+      if (!targetVariable || features.length === 0) {
+        const availableColumns = sessionDoc?.dataSummary?.columns?.map(c => c.name) || Object.keys(data[0] || {});
+        
+        // Use AI to extract ML model parameters with context
+        const extraction = await extractMLModelDetails(messageText, availableColumns, chatHistoryForContext, previousModelParams || undefined);
+        if (extraction) {
+          modelType = extraction.modelType || modelType;
+          targetVariable = targetVariable || extraction.targetVariable;
+          features = features.length > 0 ? features : (extraction.features || []);
+        }
+        
+        // If still missing and we have previous model params, use them
+        if ((!targetVariable || features.length === 0) && previousModelParams) {
+          console.log(`📋 Using previous model parameters from chat history`);
+          targetVariable = targetVariable || previousModelParams.targetVariable;
+          features = features.length > 0 ? features : (previousModelParams.features || []);
+        }
+      }
+      
+      if (!targetVariable) {
+        return {
+          answer: 'Please specify the target variable (dependent variable) for the model. For example: "Build a linear model choosing Sales as target variable and Price, Marketing as independent variables"'
+        };
+      }
+      
+      if (features.length === 0) {
+        return {
+          answer: 'Please specify the features (independent variables) for the model. For example: "Build a linear model choosing Sales as target variable and Price, Marketing as independent variables"'
+        };
+      }
+      
+      // Find matching columns
+      const allColumns = sessionDoc?.dataSummary?.columns?.map(c => c.name) || Object.keys(data[0] || {});
+      const { findMatchingColumn } = await import('../agents/utils/columnMatcher.js');
+      
+      const targetCol = findMatchingColumn(targetVariable, allColumns);
+      if (!targetCol) {
+        return {
+          answer: `Could not find column matching "${targetVariable}". Available columns: ${allColumns.slice(0, 10).join(', ')}${allColumns.length > 10 ? '...' : ''}`
+        };
+      }
+      
+      const matchedFeatures = features
+        .map(f => findMatchingColumn(f, allColumns))
+        .filter((f): f is string => f !== null && f !== targetCol);
+      
+      if (matchedFeatures.length === 0) {
+        return {
+          answer: `Could not match any features to columns. Available columns: ${allColumns.slice(0, 10).join(', ')}${allColumns.length > 10 ? '...' : ''}`
+        };
+      }
+      
+      // Diagnostic: Check data quality before training
+      if (data.length === 0) {
+        return {
+          answer: 'No data available for model training. Please ensure your dataset has been loaded correctly.'
+        };
+      }
+      
+      // Check for null values in target and features
+      const targetNulls = data.filter(row => row[targetCol] === null || row[targetCol] === undefined || row[targetCol] === '').length;
+      const featureNulls = matchedFeatures.map(f => ({
+        feature: f,
+        nulls: data.filter(row => row[f] === null || row[f] === undefined || row[f] === '').length
+      }));
+      
+      console.log(`📊 Data quality check: Total rows=${data.length}, Target nulls=${targetNulls}, Feature nulls:`, featureNulls);
+      
+      if (targetNulls === data.length) {
+        return {
+          answer: `Cannot train model: Target variable "${targetCol}" has no valid values (all ${data.length} rows are null/empty). Please check your data.`
+        };
+      }
+      
+      const allFeaturesNull = featureNulls.every(f => f.nulls === data.length);
+      if (allFeaturesNull) {
+        return {
+          answer: `Cannot train model: All features have no valid values (all ${data.length} rows are null/empty). Please check your data.`
+        };
+      }
+      
+      try {
+        // Train the model
+        const modelResult = await trainMLModel(
+          data,
+          modelType,
+          targetCol,
+          matchedFeatures
+        );
+        
+        // Format response
+        const answer = formatMLModelResponse(modelResult, modelType, targetCol, matchedFeatures);
+        
+        return {
+          answer,
+          saved: false // ML models don't modify data
+        };
+      } catch (error) {
+        console.error('ML model training error:', error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        // Provide helpful error message
+        let helpfulMessage = `Error training model: ${errorMessage}`;
+        if (errorMessage.includes('No valid data rows')) {
+          helpfulMessage += `\n\nThis usually means:\n` +
+            `- The target variable "${targetCol}" or features have too many null values\n` +
+            `- After removing rows with null targets, no rows remain with valid feature values\n` +
+            `- Try checking your data: "Count nulls in ${targetCol}" or "Show me the data"`;
+        }
+        
+        return {
+          answer: helpfulMessage
+        };
+      }
     }
     
     default:
