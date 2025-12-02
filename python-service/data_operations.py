@@ -50,7 +50,22 @@ def remove_nulls(
         for col in columns_to_process:
             if col not in df.columns:
                 continue
+            
+            # When using mean/median, try to coerce string numbers and "-" placeholders to NaN/numeric
+            if method in ("mean", "median") and df[col].dtype == "object":
+                # Treat strings like "-", " -  ", empty strings as NaN
+                coerced = df[col].replace(r"^\s*-\s*$", np.nan, regex=True)
+                # Try to convert to numeric, coercing errors to NaN
+                numeric_converted = pd.to_numeric(coerced, errors="coerce")
                 
+                # If we successfully converted a good portion of the data, use numeric column
+                non_null_original = df[col].notna().sum()
+                if non_null_original > 0:
+                    successful_conversions = numeric_converted.notna().sum()
+                    conversion_rate = successful_conversions / non_null_original
+                    if conversion_rate >= 0.7:
+                        df[col] = numeric_converted
+            
             null_count = df[col].isna().sum()
             if null_count == 0:
                 continue
@@ -59,7 +74,7 @@ def remove_nulls(
                 if pd.api.types.is_numeric_dtype(df[col]):
                     df[col] = df[col].fillna(df[col].mean())
                 else:
-                    # For non-numeric, use mode
+                    # For non-numeric, fall back to mode
                     mode_value = df[col].mode()
                     df[col] = df[col].fillna(mode_value[0] if len(mode_value) > 0 else "")
             elif method == "median":
@@ -74,7 +89,7 @@ def remove_nulls(
             elif method == "custom":
                 df[col] = df[col].fillna(custom_value)
             
-            nulls_removed += null_count
+            nulls_removed += int(null_count)
     
     rows_after = len(df)
     
@@ -93,11 +108,16 @@ def remove_nulls(
             elif isinstance(value, datetime):
                 row[key] = value.isoformat()
     
+    # Ensure scalar fields are plain Python types (not numpy types) for JSON serialization
+    rows_before_py = int(rows_before)
+    rows_after_py = int(rows_after)
+    nulls_removed_py = int(nulls_removed)
+    
     return {
         "data": result_data,
-        "rows_before": rows_before,
-        "rows_after": rows_after,
-        "nulls_removed": nulls_removed
+        "rows_before": rows_before_py,
+        "rows_after": rows_after_py,
+        "nulls_removed": nulls_removed_py
     }
 
 
@@ -155,7 +175,42 @@ def get_summary(data: List[Dict[str, Any]], column: Optional[str] = None) -> Dic
     
     for col in columns_to_process:
         col_data = df[col]
-        dtype = str(col_data.dtype)
+        
+        # Normalize placeholder values and empty strings to NaN so "null" logic
+        # is consistent across summary and count_nulls:
+        # - Empty strings: "", "   "
+        # - Dash placeholders: "-", " - ", etc.
+        if col_data.dtype == 'object':
+            col_data = col_data.replace(r'^\s*$', np.nan, regex=True)
+            col_data = col_data.replace(r'^\s*-\s*$', np.nan, regex=True)
+        
+        # Try to convert string numbers to numeric before type detection.
+        # This handles cases where numeric data is stored as strings.
+        if col_data.dtype == 'object':
+            # Try to convert to numeric, coercing errors to NaN
+            numeric_converted = pd.to_numeric(col_data, errors='coerce')
+            # If more than 70% of non-null values converted successfully, use numeric type
+            non_null_count_for_type = col_data.notna().sum()
+            if non_null_count_for_type > 0:
+                successful_conversions = numeric_converted.notna().sum()
+                conversion_rate = successful_conversions / non_null_count_for_type
+                if conversion_rate >= 0.7:
+                    # Column is numeric, use converted version
+                    col_data = numeric_converted
+                    # Determine if it's int or float based on the converted data
+                    if pd.api.types.is_integer_dtype(numeric_converted):
+                        dtype = 'int64'
+                    elif pd.api.types.is_float_dtype(numeric_converted):
+                        dtype = 'float64'
+                    else:
+                        dtype = 'float64'  # Default to float64 for numeric
+                else:
+                    dtype = 'object'
+            else:
+                # All values are NaN/None after normalization
+                dtype = 'float64'
+        else:
+            dtype = str(col_data.dtype)
         
         # Basic counts
         total_values = len(col_data)

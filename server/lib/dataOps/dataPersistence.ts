@@ -77,6 +77,11 @@ export async function saveModifiedData(
     return serializedRow;
   });
 
+  // Validate data before creating summary
+  if (!modifiedData || modifiedData.length === 0) {
+    throw new Error('Cannot save empty dataset. The data operation resulted in no data.');
+  }
+  
   // Update data summary
   doc.dataSummary = createDataSummary(modifiedData);
 

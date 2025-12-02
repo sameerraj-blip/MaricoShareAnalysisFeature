@@ -35,6 +35,32 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
   // Set SSE headers
   setSSEHeaders(res);
 
+  // Track if client disconnected
+  let clientDisconnected = false;
+
+  // Handle client disconnect/abort
+  const checkConnection = (): boolean => {
+    if (res.writableEnded || res.destroyed || !res.writable) {
+      clientDisconnected = true;
+      return false;
+    }
+    return true;
+  };
+
+  // Set up connection close handlers
+  res.on('close', () => {
+    clientDisconnected = true;
+    console.log('🚫 Client disconnected from chat stream');
+  });
+
+  res.on('error', (error: any) => {
+    // ECONNRESET, EPIPE, ECONNABORTED are expected when client disconnects
+    if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
+      console.error('SSE connection error:', error);
+    }
+    clientDisconnected = true;
+  });
+
   try {
     // If targetTimestamp is provided, this is an edit operation
     if (targetTimestamp) {
@@ -78,6 +104,11 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       sendSSE(res, 'thinking', step);
     };
 
+    // Check connection before processing
+    if (!checkConnection()) {
+      return;
+    }
+
     // Answer the question with streaming using the latest data
     const result = await answerQuestion(
       latestData,
@@ -89,13 +120,28 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       onThinkingStep
     );
 
+    // Check connection after processing
+    if (!checkConnection()) {
+      return;
+    }
+
     // Enrich charts
     if (result.charts && Array.isArray(result.charts)) {
       result.charts = await enrichCharts(result.charts, chatDocument, chatLevelInsights);
     }
 
+    // Check connection after enriching charts
+    if (!checkConnection()) {
+      return;
+    }
+
     // Validate and enrich response
     const validated = validateAndEnrichResponse(result, chatDocument, chatLevelInsights);
+
+    // Check connection before generating suggestions
+    if (!checkConnection()) {
+      return;
+    }
 
     // Generate AI suggestions
     let suggestions: string[] = [];
@@ -114,7 +160,13 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       console.error('Failed to generate suggestions:', error);
     }
 
-    // Save messages
+    // Check connection before saving messages
+    if (!checkConnection()) {
+      console.log('🚫 Client disconnected, skipping message save');
+      return;
+    }
+
+    // Save messages only if client is still connected
     try {
       const userEmail = username?.toLowerCase();
       await addMessagesBySessionId(sessionId, [
@@ -137,19 +189,36 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       console.error("⚠️ Failed to save messages to CosmosDB:", cosmosError);
     }
 
+    // Check connection before sending response
+    if (!checkConnection()) {
+      return;
+    }
+
     // Send final response
-    sendSSE(res, 'response', {
+    if (!sendSSE(res, 'response', {
       ...validated,
       suggestions,
-    });
-    sendSSE(res, 'done', {});
-    res.end();
+    })) {
+      return; // Client disconnected
+    }
+
+    if (!sendSSE(res, 'done', {})) {
+      return; // Client disconnected
+    }
+
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
     console.log('✅ Stream completed successfully');
   } catch (error) {
     console.error('Chat stream error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Failed to process message';
-    sendSSE(res, 'error', { message: errorMessage });
-    res.end();
+    if (checkConnection()) {
+      sendSSE(res, 'error', { message: errorMessage });
+    }
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
   }
 }
 

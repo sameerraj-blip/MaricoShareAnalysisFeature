@@ -39,6 +39,7 @@ export interface DataOpsIntent {
   transformValue?: number;
   rowPosition?: 'first' | 'last';
   rowIndex?: number;
+  rowCount?: number; // For removing multiple rows from start/end
   requiresClarification: boolean;
   clarificationType?: 'column' | 'method' | 'target_type';
   clarificationMessage?: string;
@@ -71,75 +72,200 @@ export async function parseDataOpsIntent(
   const availableColumns = dataSummary.columns.map(c => c.name);
   
   // ---------------------------------------------------------------------------
-  // ML Model training intent (handled BEFORE clarification so new model
-  // requests are not mistaken for follow-ups to other operations)
+  // STEP 0: Strong explicit patterns that should ALWAYS create a new intent
   // ---------------------------------------------------------------------------
-  // Explicit model building verbs
-  if (lowerMessage.includes('build') && (lowerMessage.includes('model') || lowerMessage.includes('linear') || lowerMessage.includes('regression'))) {
-    return {
-      operation: 'train_model',
-      requiresClarification: false
-    };
-  }
-  
-  if (lowerMessage.includes('train') && lowerMessage.includes('model')) {
-    return {
-      operation: 'train_model',
-      requiresClarification: false
-    };
-  }
-  
-  if (lowerMessage.includes('create') && lowerMessage.includes('model')) {
-    return {
-      operation: 'train_model',
-      requiresClarification: false
-    };
-  }
-  
-  // Follow-up / conversational model requests that reference an existing model
-  // Examples:
-  // - "for the above can you choose a model with less variance"
-  // - "can you give me a model with the lowest variance"
-  // - "try a different model type for that"
-  if (
-    lowerMessage.includes('model') &&
-    (
-      lowerMessage.includes('less variance') ||
-      lowerMessage.includes('lowest variance') ||
-      lowerMessage.includes('reduce variance') ||
-      lowerMessage.includes('lower variance') ||
-      lowerMessage.includes('different model') ||
-      lowerMessage.includes('another model') ||
-      lowerMessage.includes('better fit') ||
-      lowerMessage.includes('improve fit') ||
-      lowerMessage.includes('for above') ||
-      lowerMessage.includes('the above') ||
-      lowerMessage.includes('previous model') ||
-      lowerMessage.includes('random forest') ||
-      lowerMessage.includes('randomforest') ||
-      lowerMessage.includes('decision tree') ||
-      lowerMessage.includes('decisiontree')
-    )
-  ) {
-    return {
-      operation: 'train_model',
-      requiresClarification: false
-    };
-  }
-  
-  // Check for pending operation from context
-  const dataOpsContext = sessionDoc?.dataOpsContext as DataOpsContext | undefined;
-  const pendingOp = dataOpsContext?.pendingOperation;
-  
-  // Handle clarification responses
-  if (pendingOp) {
-    const age = Date.now() - pendingOp.timestamp;
-    if (age < 5 * 60 * 1000) { // 5 minutes TTL
-      return handleClarificationResponse(message, pendingOp, availableColumns, dataSummary);
+  // High-confidence "remove column" pattern – this should not be treated as
+  // a clarification response even if we were previously asking about nulls.
+  // Allow common typos like "remover"/"removing" by matching "remov*"
+  const removeColumnRegex = /\b(remove|remov\w*|delete|drop)\s+(the\s+)?(column|col)\b/i;
+  if (removeColumnRegex.test(message)) {
+    const mentionedColumn = findMentionedColumn(message, availableColumns);
+    
+    if (mentionedColumn) {
+      return {
+        operation: 'remove_column',
+        column: mentionedColumn,
+        requiresClarification: false,
+      };
+    } else {
+      return {
+        operation: 'remove_column',
+        requiresClarification: true,
+        clarificationType: 'column',
+        clarificationMessage: 'Which column would you like to remove? Please specify the column name.'
+      };
     }
   }
   
-  // Remove nulls intent
+  // High-confidence "remove row" patterns – handle explicit first/last/index
+  // directly before any clarification / AI logic so simple requests like
+  // "remove the first row" just work.
+  const lower = lowerMessage;
+  // Pattern: remove/delete/drop the first/last row
+  const firstLastRowRegex = /\b(remove|remov\w*|delete|drop)\s+(the\s+)?(first|last)\s+row\b/i;
+  const rowIndexRegex = /\b(remove|remov\w*|delete|drop)\s+row\s+(\d+)\b/i;
+  const firstNRowsRegex = /\b(remove|remov\w*|delete|drop)\s+(the\s+)?first\s+(\d+)\s+rows?\b/i;
+  const lastNRowsRegex = /\b(remove|remov\w*|delete|drop)\s+(the\s+)?last\s+(\d+)\s+rows?\b/i;
+  
+  // Explicit "first N rows"
+  const firstNMatch = firstNRowsRegex.exec(message);
+  if (firstNMatch) {
+    const count = parseInt(firstNMatch[3], 10);
+    if (!Number.isNaN(count) && count > 0) {
+      return {
+        operation: 'remove_rows',
+        rowPosition: 'first',
+        rowCount: count,
+        requiresClarification: false,
+      };
+    }
+  }
+
+  // Explicit "last N rows"
+  const lastNMatch = lastNRowsRegex.exec(message);
+  if (lastNMatch) {
+    const count = parseInt(lastNMatch[3], 10);
+    if (!Number.isNaN(count) && count > 0) {
+      return {
+        operation: 'remove_rows',
+        rowPosition: 'last',
+        rowCount: count,
+        requiresClarification: false,
+      };
+    }
+  }
+
+  const firstLastMatch = firstLastRowRegex.exec(message);
+  if (firstLastMatch) {
+    const which = firstLastMatch[3].toLowerCase();
+    return {
+      operation: 'remove_rows',
+      rowPosition: which === 'last' ? 'last' : 'first',
+      requiresClarification: false,
+    };
+  }
+  
+  const rowIndexMatch = rowIndexRegex.exec(message);
+  if (rowIndexMatch) {
+    const index = parseInt(rowIndexMatch[2], 10);
+    if (!Number.isNaN(index) && index > 0) {
+      return {
+        operation: 'remove_rows',
+        rowIndex: index,
+        requiresClarification: false,
+      };
+    }
+  }
+  
+  // ---------------------------------------------------------------------------
+  // STEP 1: Handle clarification responses FIRST (highest priority)
+  // This must come before AI detection to handle follow-up responses
+  // ---------------------------------------------------------------------------
+  const dataOpsContext = sessionDoc?.dataOpsContext as DataOpsContext | undefined;
+  const pendingOp = dataOpsContext?.pendingOperation;
+  
+  if (pendingOp) {
+    const age = Date.now() - pendingOp.timestamp;
+    if (age < 5 * 60 * 1000) { // 5 minutes TTL
+      // Detect if the user is clearly starting a NEW operation rather than
+      // answering the previous clarification question.
+      //
+      // Example: After being asked how to handle nulls, the user says
+      // "remove the column Maya TOM" – this should be treated as a
+      // remove_column operation, not a clarification for remove_nulls.
+      const mentionsColumn = lowerMessage.includes('column') || lowerMessage.includes('col ');
+      const removalVerbs = lowerMessage.includes('remove') ||
+        lowerMessage.includes('delete') ||
+        lowerMessage.includes('drop');
+      const mentionsNullLikeTerms =
+        lowerMessage.includes('null') ||
+        lowerMessage.includes('missing') ||
+        lowerMessage.includes('nan');
+
+      const looksLikeNewRemoveColumnRequest =
+        pendingOp.operation === 'remove_nulls' &&
+        mentionsColumn &&
+        removalVerbs &&
+        !mentionsNullLikeTerms;
+
+      if (!looksLikeNewRemoveColumnRequest) {
+        return handleClarificationResponse(message, pendingOp, availableColumns, dataSummary);
+      }
+      // If it looks like a new remove-column style request, we intentionally
+      // skip clarification handling and let AI/regex logic below treat it
+      // as a fresh intent.
+    }
+  }
+  
+  // ---------------------------------------------------------------------------
+  // STEP 2: Try AI-based intent detection FIRST
+  // ---------------------------------------------------------------------------
+  try {
+    const aiIntent = await detectDataOpsIntentWithAI(message, availableColumns);
+    if (aiIntent && aiIntent.operation !== 'unknown') {
+      console.log(`✅ AI detected intent: ${aiIntent.operation}`);
+      return aiIntent;
+    }
+  } catch (error) {
+    console.error('⚠️ AI intent detection failed, falling back to regex:', error);
+  }
+  
+  // ---------------------------------------------------------------------------
+  // STEP 3: Fallback to regex-based pattern matching
+  // ---------------------------------------------------------------------------
+  
+  // Fill/Impute nulls intent (check this BEFORE remove/delete to prioritize imputation)
+  if (lowerMessage.includes('fill null') || lowerMessage.includes('fill nulls') || 
+      lowerMessage.includes('impute null') || lowerMessage.includes('replace null') ||
+      (lowerMessage.includes('null') && (lowerMessage.includes('fill') || lowerMessage.includes('impute') || lowerMessage.includes('replace')))) {
+    // Check if method is mentioned
+    const mentionedColumn = findMentionedColumn(message, availableColumns);
+    let method: 'mean' | 'median' | 'mode' | 'custom' | undefined;
+    let customValue: any;
+    
+    if (lowerMessage.includes('mean') || lowerMessage.includes('average')) {
+      method = 'mean';
+    } else if (lowerMessage.includes('median')) {
+      method = 'median';
+    } else if (lowerMessage.includes('mode') || lowerMessage.includes('most frequent')) {
+      method = 'mode';
+    } else if (lowerMessage.includes('custom') || lowerMessage.match(/\d+/)) {
+      method = 'custom';
+      const numberMatch = lowerMessage.match(/(-?\d+\.?\d*)/);
+      customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
+    }
+    
+    // If method is specified, execute directly
+    if (method) {
+      return {
+        operation: 'remove_nulls',
+        column: mentionedColumn,
+        method,
+        customValue,
+        requiresClarification: false
+      };
+    }
+    
+    // Method not specified, need clarification
+    if (mentionedColumn) {
+      return {
+        operation: 'remove_nulls',
+        column: mentionedColumn,
+        requiresClarification: true,
+        clarificationType: 'method',
+        clarificationMessage: `How do you want to fill null values in "${mentionedColumn}"?\n\nOption A: Delete Row\nOption B: Impute with mean/median/mode/custom value`
+      };
+    } else {
+      return {
+        operation: 'remove_nulls',
+        requiresClarification: true,
+        clarificationType: 'method',
+        clarificationMessage: 'How do you want to fill null values?\n\nOption A: Delete Row\nOption B: Impute with mean/median/mode/custom value'
+      };
+    }
+  }
+  
+  // Remove nulls intent (deletion-focused)
   if (lowerMessage.includes('remove null') || lowerMessage.includes('delete null') || lowerMessage.includes('handle null')) {
     // Check if column is mentioned
     const mentionedColumn = findMentionedColumn(message, availableColumns);
@@ -396,16 +522,56 @@ export async function parseDataOpsIntent(
     }
   }
   
-  // Try AI-based intent detection for conversational queries
-  try {
-    const aiIntent = await detectDataOpsIntentWithAI(message, availableColumns);
-    if (aiIntent && aiIntent.operation !== 'unknown') {
-      return aiIntent;
-    }
-  } catch (error) {
-    console.error('AI intent detection failed, using fallback:', error);
+  // ML Model training intent (regex fallback)
+  if (lowerMessage.includes('build') && (lowerMessage.includes('model') || lowerMessage.includes('linear') || lowerMessage.includes('regression'))) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
   }
   
+  if (lowerMessage.includes('train') && lowerMessage.includes('model')) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
+  
+  if (lowerMessage.includes('create') && lowerMessage.includes('model')) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
+  
+  // Follow-up / conversational model requests (regex fallback)
+  if (
+    lowerMessage.includes('model') &&
+    (
+      lowerMessage.includes('less variance') ||
+      lowerMessage.includes('lowest variance') ||
+      lowerMessage.includes('reduce variance') ||
+      lowerMessage.includes('lower variance') ||
+      lowerMessage.includes('different model') ||
+      lowerMessage.includes('another model') ||
+      lowerMessage.includes('better fit') ||
+      lowerMessage.includes('improve fit') ||
+      lowerMessage.includes('for above') ||
+      lowerMessage.includes('the above') ||
+      lowerMessage.includes('previous model') ||
+      lowerMessage.includes('random forest') ||
+      lowerMessage.includes('randomforest') ||
+      lowerMessage.includes('decision tree') ||
+      lowerMessage.includes('decisiontree')
+    )
+  ) {
+    return {
+      operation: 'train_model',
+      requiresClarification: false
+    };
+  }
+  
+  // If no pattern matched, return unknown
   return {
     operation: 'unknown',
     requiresClarification: false
@@ -432,6 +598,8 @@ Determine the intent and return JSON with this structure:
 {
     "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "train_model" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
+  "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
+  "customValue": any (if method is "custom", the value to use for imputation),
   "newColumnName": "NewColumnName" (if creating new column, null otherwise),
   "expression": "[Column1] + [Column2]" (if creating derived column, use [ColumnName] format, null otherwise),
   "defaultValue": any (if creating static column),
@@ -467,7 +635,7 @@ Operations:
 - "describe": User wants general info about data (e.g., "how many rows", "describe the data", "what's in the dataset")
 - "preview": User wants to see data (e.g., "show data", "display rows")
 - "summary": User wants statistics summary
-- "remove_nulls": User wants to remove/handle nulls
+- "remove_nulls": User wants to remove/handle nulls. IMPORTANT: If user says "fill null with mean/median/mode" or "impute null", set method to "mean"/"median"/"mode" and requiresClarification to false. If user says "remove null" or "delete null" without specifying fill/impute, default to asking for clarification.
 - "convert_type": User wants to convert column type
 - "unknown": Cannot determine intent
 
@@ -498,16 +666,42 @@ Return ONLY valid JSON, no other text.`;
       parsed.column = matchedColumn || parsed.column;
     }
 
+    // Extract method for remove_nulls operation if not explicitly provided
+    let method: 'delete' | 'mean' | 'median' | 'mode' | 'custom' | undefined;
+    let customValue: any;
+    
+    if (parsed.operation === 'remove_nulls') {
+      const lowerMsg = message.toLowerCase();
+      if (lowerMsg.includes('fill') || lowerMsg.includes('impute') || lowerMsg.includes('replace')) {
+        // This is an imputation request, not deletion
+        if (lowerMsg.includes('mean') || lowerMsg.includes('average')) {
+          method = 'mean';
+        } else if (lowerMsg.includes('median')) {
+          method = 'median';
+        } else if (lowerMsg.includes('mode') || lowerMsg.includes('most frequent')) {
+          method = 'mode';
+        } else if (lowerMsg.includes('custom') || lowerMsg.match(/\d+/)) {
+          method = 'custom';
+          const numberMatch = lowerMsg.match(/(-?\d+\.?\d*)/);
+          customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
+        }
+      } else if (lowerMsg.includes('delete') || lowerMsg.includes('remove')) {
+        method = 'delete';
+      }
+    }
+    
     return {
       operation: parsed.operation || 'unknown',
       column: parsed.column,
+      method: method || parsed.method,
+      customValue: customValue !== undefined ? customValue : parsed.customValue,
       newColumnName: parsed.newColumnName,
       expression: parsed.expression,
       defaultValue: parsed.defaultValue,
       modelType: parsed.modelType,
       targetVariable: parsed.targetVariable,
       features: parsed.features,
-      requiresClarification: parsed.requiresClarification || false,
+      requiresClarification: method ? false : (parsed.requiresClarification || false),
       clarificationMessage: parsed.clarificationMessage,
     } as DataOpsIntent;
   } catch (error) {
@@ -556,6 +750,43 @@ function handleClarificationResponse(
   if (pendingOp.operation === 'remove_nulls') {
     // Check if this is a column specification
     if (!pendingOp.column) {
+      // Check if user is specifying a method (for entire dataset)
+      // This handles the case where user said "entire dataset" and now responds with method
+      if (lowerMessage.includes('delete') || lowerMessage.includes('remove') || lowerMessage.includes('option a')) {
+        return {
+          operation: 'remove_nulls',
+          method: 'delete',
+          requiresClarification: false
+        };
+      } else if (lowerMessage.includes('mean') || lowerMessage.includes('average') || lowerMessage.includes('impute with mean')) {
+        return {
+          operation: 'remove_nulls',
+          method: 'mean',
+          requiresClarification: false
+        };
+      } else if (lowerMessage.includes('median') || lowerMessage.includes('impute with median')) {
+        return {
+          operation: 'remove_nulls',
+          method: 'median',
+          requiresClarification: false
+        };
+      } else if (lowerMessage.includes('mode') || lowerMessage.includes('most frequent') || lowerMessage.includes('impute with mode')) {
+        return {
+          operation: 'remove_nulls',
+          method: 'mode',
+          requiresClarification: false
+        };
+      } else if (lowerMessage.includes('custom') || lowerMessage.match(/\d+/)) {
+        const numberMatch = lowerMessage.match(/(-?\d+\.?\d*)/);
+        const customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
+        return {
+          operation: 'remove_nulls',
+          method: 'custom',
+          customValue,
+          requiresClarification: false
+        };
+      }
+      
       // User is specifying column
       const mentionedColumn = findMentionedColumn(message, availableColumns);
       if (mentionedColumn) {
@@ -575,7 +806,7 @@ function handleClarificationResponse(
         };
       }
     } else {
-      // User is specifying method
+      // User is specifying method for a specific column
       if (lowerMessage.includes('delete') || lowerMessage.includes('remove') || lowerMessage.includes('option a')) {
         return {
           operation: 'remove_nulls',
@@ -583,21 +814,21 @@ function handleClarificationResponse(
           method: 'delete',
           requiresClarification: false
         };
-      } else if (lowerMessage.includes('mean') || lowerMessage.includes('average')) {
+      } else if (lowerMessage.includes('mean') || lowerMessage.includes('average') || lowerMessage.includes('impute with mean')) {
         return {
           operation: 'remove_nulls',
           column: pendingOp.column,
           method: 'mean',
           requiresClarification: false
         };
-      } else if (lowerMessage.includes('median')) {
+      } else if (lowerMessage.includes('median') || lowerMessage.includes('impute with median')) {
         return {
           operation: 'remove_nulls',
           column: pendingOp.column,
           method: 'median',
           requiresClarification: false
         };
-      } else if (lowerMessage.includes('mode') || lowerMessage.includes('most frequent')) {
+      } else if (lowerMessage.includes('mode') || lowerMessage.includes('most frequent') || lowerMessage.includes('impute with mode')) {
         return {
           operation: 'remove_nulls',
           column: pendingOp.column,
@@ -1165,12 +1396,26 @@ export async function executeDataOperation(
   
   switch (intent.operation) {
     case 'remove_nulls': {
+      // Validate input data
+      if (!data || data.length === 0) {
+        return {
+          answer: '❌ No data available to process. Please ensure your dataset has been loaded correctly.',
+        };
+      }
+      
       const result = await removeNulls(
         data,
         intent.column,
         intent.method || 'delete',
         intent.customValue
       );
+      
+      // Validate result data
+      if (!result.data || result.data.length === 0) {
+        return {
+          answer: '⚠️ The operation resulted in an empty dataset. This can happen if all rows were deleted. Please try a different approach, such as imputing values instead of deleting rows.',
+        };
+      }
       
       // Save modified data first
       const saveResult = await saveModifiedData(
@@ -1561,27 +1806,50 @@ export async function executeDataOperation(
         return { answer: 'There are no rows to remove.' };
       }
 
-      let targetIndex: number | null = null;
+      // Determine which row(s) to remove
+      const indicesToRemove = new Set<number>();
+      const rowCount = intent.rowCount && intent.rowCount > 0 ? intent.rowCount : 1;
+
       if (intent.rowIndex && intent.rowIndex > 0 && intent.rowIndex <= data.length) {
-        targetIndex = intent.rowIndex - 1;
+        // Remove a specific row index (1-based)
+        indicesToRemove.add(intent.rowIndex - 1);
       } else if (intent.rowPosition === 'first') {
-        targetIndex = 0;
+        const count = Math.min(rowCount, data.length);
+        for (let i = 0; i < count; i++) {
+          indicesToRemove.add(i);
+        }
       } else if (intent.rowPosition === 'last') {
-        targetIndex = data.length - 1;
+        const count = Math.min(rowCount, data.length);
+        for (let i = 0; i < count; i++) {
+          indicesToRemove.add(data.length - 1 - i);
+        }
       }
 
-      if (targetIndex === null) {
+      if (indicesToRemove.size === 0) {
         return { answer: 'Please specify which row to remove (first, last, or row number).' };
       }
 
-      const modifiedData = data.filter((_, idx) => idx !== targetIndex);
+      const modifiedData = data.filter((_, idx) => !indicesToRemove.has(idx));
+
+      // Build a human-readable description
+      const sortedIndices = Array.from(indicesToRemove).sort((a, b) => a - b);
+      const removedCount = sortedIndices.length;
+      let description: string;
+      if (removedCount === 1) {
+        description = `row ${sortedIndices[0] + 1}`;
+      } else if (removedCount > 1 && sortedIndices[sortedIndices.length - 1] - sortedIndices[0] + 1 === removedCount) {
+        // Consecutive range
+        description = `rows ${sortedIndices[0] + 1}-${sortedIndices[sortedIndices.length - 1] + 1}`;
+      } else {
+        description = `rows ${sortedIndices.map(i => i + 1).join(', ')}`;
+      }
 
       // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         modifiedData,
         'remove_rows',
-        `Removed row ${targetIndex + 1}`,
+        `Removed ${description}`,
         sessionDoc
       );
 
@@ -1589,7 +1857,7 @@ export async function executeDataOperation(
       const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
 
       return {
-        answer: `✅ Removed row ${targetIndex + 1}. Here's a preview of the updated data:`,
+        answer: `✅ Removed ${description}. Here's a preview of the updated data:`,
         data: modifiedData,
         preview: previewData,
         saved: true

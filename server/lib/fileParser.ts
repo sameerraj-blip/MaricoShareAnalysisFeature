@@ -52,7 +52,40 @@ function parseCsv(buffer: Buffer): Record<string, any>[] {
   });
   
   // Normalize column names: trim whitespace from all column names
-  return normalizeColumnNames(records as Record<string, any>[]);
+  const normalized = normalizeColumnNames(records as Record<string, any>[]);
+  
+  // Post-process: Convert string numbers to actual numbers
+  // This handles cases where CSV parser didn't convert formatted numbers (with %, commas, etc.)
+  return normalized.map(row => {
+    const processedRow: Record<string, any> = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (value === null || value === undefined || value === '') {
+        processedRow[key] = value;
+        continue;
+      }
+      
+      // If already a number, keep it
+      if (typeof value === 'number' && !isNaN(value) && isFinite(value)) {
+        processedRow[key] = value;
+        continue;
+      }
+      
+      // Try to convert string numbers
+      if (typeof value === 'string') {
+        const cleaned = value.replace(/[%,$€£¥₹\s]/g, '').trim();
+        const num = Number(cleaned);
+        // Only convert if it's a valid number and the cleaned string is not empty
+        if (cleaned !== '' && !isNaN(num) && isFinite(num)) {
+          processedRow[key] = num;
+        } else {
+          processedRow[key] = value; // Keep as string if not numeric
+        }
+      } else {
+        processedRow[key] = value;
+      }
+    }
+    return processedRow;
+  });
 }
 
 function parseExcel(buffer: Buffer): Record<string, any>[] {
@@ -62,7 +95,40 @@ function parseExcel(buffer: Buffer): Record<string, any>[] {
   const data = XLSX.utils.sheet_to_json(worksheet, { raw: false, defval: null });
   
   // Normalize column names: trim whitespace from all column names
-  return normalizeColumnNames(data as Record<string, any>[]);
+  const normalized = normalizeColumnNames(data as Record<string, any>[]);
+  
+  // Post-process: Convert string numbers to actual numbers
+  // This handles cases where Excel parser didn't convert formatted numbers (with %, commas, etc.)
+  return normalized.map(row => {
+    const processedRow: Record<string, any> = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (value === null || value === undefined || value === '') {
+        processedRow[key] = value;
+        continue;
+      }
+      
+      // If already a number, keep it
+      if (typeof value === 'number' && !isNaN(value) && isFinite(value)) {
+        processedRow[key] = value;
+        continue;
+      }
+      
+      // Try to convert string numbers
+      if (typeof value === 'string') {
+        const cleaned = value.replace(/[%,$€£¥₹\s]/g, '').trim();
+        const num = Number(cleaned);
+        // Only convert if it's a valid number and the cleaned string is not empty
+        if (cleaned !== '' && !isNaN(num) && isFinite(num)) {
+          processedRow[key] = num;
+        } else {
+          processedRow[key] = value; // Keep as string if not numeric
+        }
+      } else {
+        processedRow[key] = value;
+      }
+    }
+    return processedRow;
+  });
 }
 
 /**
@@ -232,14 +298,54 @@ export function createDataSummary(data: Record<string, any>[]): DataSummary {
     // Determine column type
     let type = 'string';
     
-    // Check if numeric (handle percentages by stripping % symbol)
-    // Only consider numeric if we have values and all are numeric
-    const isNumeric = nonNullValues.length > 0 && nonNullValues.every((v) => {
-      if (v === '') return false;
-      // Strip % symbol and commas for numeric check
-      const cleaned = String(v).replace(/[%,]/g, '').trim();
-      return !isNaN(Number(cleaned)) && cleaned !== '';
-    });
+    // Check if numeric (handle percentages, commas, and string representations)
+    // Use threshold approach: if most values (>=70%) are numeric, treat column as numeric
+    // This handles cases where some values might be null, empty, or edge cases
+    let numericMatches = 0;
+    if (nonNullValues.length > 0) {
+      numericMatches = nonNullValues.filter((v) => {
+        if (v === '' || v === null || v === undefined) return false;
+        
+        // If already a number, it's numeric
+        if (typeof v === 'number' && !isNaN(v) && isFinite(v)) return true;
+        
+        // Convert to string and clean
+        const str = String(v).trim();
+        if (str === '' || str === 'null' || str === 'undefined' || str.toLowerCase() === 'nan') return false;
+        
+        // Handle special characters that might indicate non-numeric (but allow in certain contexts)
+        // Skip if it looks like a date string (has month names or date separators in date-like patterns)
+        const lowerStr = str.toLowerCase();
+        const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+                           'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 
+                           'september', 'october', 'november', 'december'];
+        const hasMonthName = monthNames.some(month => lowerStr.includes(month));
+        const hasDateSeparators = /[\/\-]/.test(str) && /\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(str);
+        
+        // If it looks like a date, don't treat as numeric
+        if (hasMonthName || hasDateSeparators) return false;
+        
+        // Strip common formatting: %, commas, spaces, currency symbols, em-dash, en-dash
+        const cleaned = str.replace(/[%,$€£¥₹\s\u2013\u2014\u2015]/g, '').trim();
+        
+        // Skip if empty after cleaning
+        if (cleaned === '') return false;
+        
+        // Check if it's a valid number (including scientific notation and negative numbers)
+        const num = Number(cleaned);
+        if (isNaN(num) || !isFinite(num)) return false;
+        
+        // Additional validation: if cleaned string is just digits (with optional decimal point and minus),
+        // it's definitely numeric
+        if (/^-?\d+\.?\d*$/.test(cleaned)) return true;
+        
+        // For other formats, if Number() successfully parsed it, accept it
+        return cleaned !== '';
+      }).length;
+    }
+    
+    const numericThreshold = Math.max(1, Math.ceil(nonNullValues.length * 0.7)); // 70% threshold
+    const isNumeric = nonNullValues.length > 0 && numericMatches >= numericThreshold;
     
     // Use comprehensive date detection
     // Consider it a date column if at least 50% of non-null values are dates

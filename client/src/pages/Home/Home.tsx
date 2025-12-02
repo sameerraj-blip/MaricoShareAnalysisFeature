@@ -8,9 +8,11 @@ import { useChatMessagesStream } from '@/hooks/useChatMessagesStream';
 interface HomeProps {
   resetTrigger?: number;
   loadedSessionData?: any;
+  initialMode?: 'analysis' | 'dataOps' | 'modeling';
+  onModeChange?: (mode: 'analysis' | 'dataOps' | 'modeling') => void;
 }
 
-export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps) {
+export default function Home({ resetTrigger = 0, loadedSessionData, initialMode, onModeChange }: HomeProps) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [collaborators, setCollaborators] = useState<string[]>([]);
@@ -25,7 +27,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     dateColumns,
     totalRows,
     totalColumns,
-    dataOpsMode,
+    mode,
     setSessionId,
     setMessages,
     setInitialCharts,
@@ -36,14 +38,14 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     setDateColumns,
     setTotalRows,
     setTotalColumns,
-    setDataOpsMode,
+    setMode,
     resetState,
   } = useHomeState();
 
   const { uploadMutation, chatMutation, cancelChatRequest, thinkingSteps, thinkingTargetTimestamp } = useHomeMutations({
     sessionId,
     messages,
-    dataOpsMode,
+    mode,
     setSessionId,
     setInitialCharts,
     setInitialInsights,
@@ -120,6 +122,13 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     },
   });
 
+  // Sync mode with initialMode prop (from URL) - only when initialMode changes
+  useEffect(() => {
+    if (initialMode && initialMode !== mode) {
+      setMode(initialMode);
+    }
+  }, [initialMode]); // Only depend on initialMode, not mode
+
   // Reset state only when resetTrigger changes (upload new file)
   useEffect(() => {
     if (resetTrigger > 0) {
@@ -163,13 +172,27 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     fetchCollaborators();
   }, [sessionId]);
 
-  if (!sessionId) {
+  // Don't show file upload if we're loading a session (even if sessionId isn't set yet)
+  // Only show file upload if there's no session data being loaded AND no sessionId
+  if (!sessionId && !loadedSessionData) {
     return (
       <FileUpload
         onFileSelect={handleFileSelect}
         isUploading={uploadMutation.isPending}
         autoOpenTrigger={resetTrigger}
       />
+    );
+  }
+
+  // If we're loading a session but sessionId isn't set yet, show loading state
+  if (!sessionId && loadedSessionData) {
+    return (
+      <div className="h-[calc(100vh-80px)] bg-gradient-to-br from-slate-50 to-white flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading analysis...</p>
+        </div>
+      </div>
     );
   }
 
@@ -194,8 +217,14 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
       thinkingTargetTimestamp={thinkingTargetTimestamp}
       aiSuggestions={suggestions}
       collaborators={collaborators}
-      dataOpsMode={dataOpsMode}
-      onDataOpsModeChange={setDataOpsMode}
+      mode={mode}
+      onModeChange={(newMode) => {
+        setMode(newMode);
+        // onModeChange will update the URL, which will update initialMode prop
+        if (onModeChange) {
+          onModeChange(newMode);
+        }
+      }}
     />
   );
 }

@@ -8,7 +8,7 @@ import { useRef, useEffect, useState } from 'react';
 interface UseHomeMutationsProps {
   sessionId: string | null;
   messages: Message[];
-  dataOpsMode?: boolean;
+  mode?: 'analysis' | 'dataOps' | 'modeling';
   setSessionId: (id: string | null) => void;
   setInitialCharts: (charts: UploadResponse['charts']) => void;
   setInitialInsights: (insights: UploadResponse['insights']) => void;
@@ -25,7 +25,7 @@ interface UseHomeMutationsProps {
 export const useHomeMutations = ({
   sessionId,
   messages,
-  dataOpsMode = false,
+  mode = 'analysis',
   setSessionId,
   setInitialCharts,
   setInitialInsights,
@@ -42,6 +42,7 @@ export const useHomeMutations = ({
   const queryClient = useQueryClient();
   const userEmail = getUserEmail();
   const abortControllerRef = useRef<AbortController | null>(null);
+  const pendingUserMessageRef = useRef<{ content: string; timestamp: number } | null>(null);
   const messagesRef = useRef<Message[]>(messages);
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
   const [thinkingTargetTimestamp, setThinkingTargetTimestamp] = useState<number | null>(null);
@@ -114,10 +115,42 @@ export const useHomeMutations = ({
       // Cancel previous request if any
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+        // Remove the previous pending user message if it exists
+        if (pendingUserMessageRef.current) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const indexToRemove = updated.findIndex(
+              m => m.role === 'user' && 
+              m.content === pendingUserMessageRef.current!.content &&
+              m.timestamp === pendingUserMessageRef.current!.timestamp
+            );
+            if (indexToRemove >= 0) {
+              updated.splice(indexToRemove, 1);
+            }
+            return updated;
+          });
+          pendingUserMessageRef.current = null;
+        }
       }
       
       // Create new abort controller
       abortControllerRef.current = new AbortController();
+      
+      // Track the current pending message - use the targetTimestamp if provided (from handleSendMessage)
+      // or find the matching message in state by content
+      const currentTimestamp = targetTimestamp || Date.now();
+      // Find the actual message in state to get the exact timestamp
+      const actualMessage = messagesRef.current
+        .slice()
+        .reverse()
+        .find(m => m.role === 'user' && m.content === message);
+      
+      pendingUserMessageRef.current = { 
+        content: message, 
+        timestamp: actualMessage?.timestamp || currentTimestamp 
+      };
+      
+      console.log('📌 Tracking pending message:', pendingUserMessageRef.current);
       
       // Clear previous thinking steps
       setThinkingSteps([]);
@@ -155,8 +188,8 @@ export const useHomeMutations = ({
         chatHistoryLength: chatHistory.length,
       });
       
-      // Route to Data Ops or regular chat based on mode
-      if (dataOpsMode) {
+      // Route to Data Ops, Modeling, or regular chat based on mode
+      if (mode === 'dataOps') {
         return new Promise<ChatResponse>((resolve, reject) => {
           let responseData: DataOpsResponse | null = null;
           
@@ -213,7 +246,7 @@ export const useHomeMutations = ({
             },
             abortControllerRef.current.signal,
             targetTimestamp,
-            dataOpsMode
+            true // dataOpsMode flag for backward compatibility
           ).catch((error: any) => {
             if (error?.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
               console.log('🚫 Data Ops request was cancelled by user');
@@ -228,7 +261,9 @@ export const useHomeMutations = ({
           });
         });
       } else {
-      return new Promise<ChatResponse>((resolve, reject) => {
+        // For 'analysis' and 'modeling' modes, use regular chat
+        // TODO: Add separate modeling endpoint if needed
+        return new Promise<ChatResponse>((resolve, reject) => {
         let responseData: ChatResponse | null = null;
         
         streamChatRequest(
@@ -289,12 +324,15 @@ export const useHomeMutations = ({
       });
       }
     },
-    onSuccess: (data, message) => {
+    onSuccess: (data, variables) => {
       console.log('✅ Chat response received:', data);
       console.log('📝 Answer:', data.answer);
       console.log('📊 Charts:', data.charts?.length || 0);
       console.log('💡 Insights:', data.insights?.length || 0);
       console.log('💬 Suggestions:', data.suggestions?.length || 0);
+      
+      // Clear pending message ref since request completed successfully
+      pendingUserMessageRef.current = null;
       
       if (!data.answer || data.answer.trim().length === 0) {
         console.error('❌ Empty answer received from server!');
@@ -328,9 +366,30 @@ export const useHomeMutations = ({
         setSuggestions(data.suggestions);
       }
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      // Clear pending message ref
+      const pendingMessage = pendingUserMessageRef.current;
+      pendingUserMessageRef.current = null;
+      
       // Don't show toast for cancelled requests
       if (error instanceof Error && error.message === 'Request cancelled') {
+        // Remove the user message that was added when the request was sent
+        // since the request was cancelled and won't be saved
+        if (pendingMessage) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            // Find and remove the user message that matches the cancelled request
+            const indexToRemove = updated.findIndex(
+              m => m.role === 'user' && 
+              m.content === pendingMessage.content &&
+              m.timestamp === pendingMessage.timestamp
+            );
+            if (indexToRemove >= 0) {
+              updated.splice(indexToRemove, 1);
+            }
+            return updated;
+          });
+        }
         return;
       }
       toast({
@@ -344,10 +403,63 @@ export const useHomeMutations = ({
   // Function to cancel ongoing chat request
   const cancelChatRequest = () => {
     if (abortControllerRef.current) {
+      // Get the pending message before aborting
+      const pendingMessage = pendingUserMessageRef.current;
+      
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
       setThinkingSteps([]);
       setThinkingTargetTimestamp(null);
+      
+      // Remove the user message that was added when the request was sent
+      // since the request was cancelled and won't be saved
+      setMessages((prev) => {
+        const updated = [...prev];
+        
+        if (pendingMessage) {
+          // Try to find by exact match (content + timestamp)
+          let indexToRemove = updated.findIndex(
+            m => m.role === 'user' && 
+            m.content === pendingMessage.content &&
+            m.timestamp === pendingMessage.timestamp
+          );
+          
+          // If not found by exact match, try to find by content only (in case timestamp doesn't match)
+          if (indexToRemove < 0) {
+            // Find the last user message that matches the content
+            for (let i = updated.length - 1; i >= 0; i--) {
+              if (updated[i].role === 'user' && updated[i].content === pendingMessage.content) {
+                indexToRemove = i;
+                break;
+              }
+            }
+          }
+          
+          if (indexToRemove >= 0) {
+            updated.splice(indexToRemove, 1);
+            console.log('🗑️ Removed cancelled user message:', pendingMessage.content);
+          }
+        } else {
+          // If no pending message tracked, remove the last user message (most recent)
+          // This handles the case where stop is clicked very quickly before tracking is set
+          for (let i = updated.length - 1; i >= 0; i--) {
+            if (updated[i].role === 'user') {
+              // Only remove if there's no assistant response after it
+              if (i === updated.length - 1 || updated[i + 1].role !== 'assistant') {
+                console.log('🗑️ Removed last user message (no response yet):', updated[i].content);
+                updated.splice(i, 1);
+              }
+              break;
+            }
+          }
+        }
+        
+        return updated;
+      });
+      
+      pendingUserMessageRef.current = null;
+      
+      // Reset mutation state to clear loading state
       chatMutation.reset();
     }
   };

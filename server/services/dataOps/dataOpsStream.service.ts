@@ -42,6 +42,32 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
   // Set SSE headers
   setSSEHeaders(res);
 
+  // Track if client disconnected
+  let clientDisconnected = false;
+
+  // Handle client disconnect/abort
+  const checkConnection = (): boolean => {
+    if (res.writableEnded || res.destroyed || !res.writable) {
+      clientDisconnected = true;
+      return false;
+    }
+    return true;
+  };
+
+  // Set up connection close handlers
+  res.on('close', () => {
+    clientDisconnected = true;
+    console.log('🚫 Client disconnected from data ops stream');
+  });
+
+  res.on('error', (error: any) => {
+    // ECONNRESET, EPIPE, ECONNABORTED are expected when client disconnects
+    if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
+      console.error('SSE connection error:', error);
+    }
+    clientDisconnected = true;
+  });
+
   try {
     // Get chat document - handle CosmosDB initialization errors gracefully
     let chatDocument: ChatDocument | null = null;
@@ -71,31 +97,72 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       await updateChatDocument(chatDocument);
     }
 
+    // Check connection before sending
+    if (!checkConnection()) {
+      return;
+    }
+
     // Send thinking step
-    sendSSE(res, 'thinking', {
+    if (!sendSSE(res, 'thinking', {
       step: 'Processing data operation',
       status: 'active',
       timestamp: Date.now(),
-    });
+    })) {
+      return; // Client disconnected
+    }
 
     // Load data
-    const fullData = await loadDataForOperation(chatDocument);
+    let fullData: Record<string, any>[];
+    try {
+      fullData = await loadDataForOperation(chatDocument);
+    } catch (error: any) {
+      console.error('❌ Failed to load data:', error);
+      const errorMessage = error?.message || 'Failed to load data';
+      sendSSE(res, 'error', { 
+        message: errorMessage.includes('No data found') 
+          ? 'No data found. Please ensure your file was uploaded correctly and try uploading again.' 
+          : errorMessage 
+      });
+      res.end();
+      return;
+    }
+    
+    if (!fullData || fullData.length === 0) {
+      sendSSE(res, 'error', { message: 'No data found. Please ensure your file was uploaded correctly and try again.' });
+      res.end();
+      return;
+    }
+    
     console.log(`✅ Using ${fullData.length} rows for data operation`);
 
+    // Check connection before parsing
+    if (!checkConnection()) {
+      return;
+    }
+
     // Parse intent
-    sendSSE(res, 'thinking', {
+    if (!sendSSE(res, 'thinking', {
       step: 'Understanding your request',
       status: 'active',
       timestamp: Date.now(),
-    });
+    })) {
+      return; // Client disconnected
+    }
 
     const intent = await parseDataOpsIntent(message, chatHistory || [], chatDocument.dataSummary, chatDocument);
 
-    sendSSE(res, 'thinking', {
+    // Check connection after parsing
+    if (!checkConnection()) {
+      return;
+    }
+
+    if (!sendSSE(res, 'thinking', {
       step: 'Understanding your request',
       status: 'completed',
       timestamp: Date.now(),
-    });
+    })) {
+      return; // Client disconnected
+    }
 
     // Get full chat history - always use database messages as source of truth
     // Merge frontend chatHistory with database messages to ensure we have the latest
@@ -119,22 +186,42 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       fullChatHistory = chatHistory || [];
     }
 
+    // Check connection before executing
+    if (!checkConnection()) {
+      return;
+    }
+
     // Execute operation
-    sendSSE(res, 'thinking', {
+    if (!sendSSE(res, 'thinking', {
       step: 'Executing data operation',
       status: 'active',
       timestamp: Date.now(),
-    });
+    })) {
+      return; // Client disconnected
+    }
 
     const result = await executeDataOperation(intent, fullData, sessionId, chatDocument, message, fullChatHistory);
 
-    sendSSE(res, 'thinking', {
+    // Check connection after execution
+    if (!checkConnection()) {
+      return;
+    }
+
+    if (!sendSSE(res, 'thinking', {
       step: 'Executing data operation',
       status: 'completed',
       timestamp: Date.now(),
-    });
+    })) {
+      return; // Client disconnected
+    }
 
-    // Save messages
+    // Check connection before saving messages
+    if (!checkConnection()) {
+      console.log('🚫 Client disconnected, skipping message save');
+      return;
+    }
+
+    // Save messages only if client is still connected
     try {
       await addMessagesBySessionId(sessionId, [
         {
@@ -153,16 +240,28 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       console.error("⚠️ Failed to save messages:", error);
     }
 
+    // Check connection before sending response
+    if (!checkConnection()) {
+      return;
+    }
+
     // Send response
-    sendSSE(res, 'response', {
+    if (!sendSSE(res, 'response', {
       answer: result.answer,
       preview: result.preview,
       summary: result.summary,
       saved: result.saved,
-    });
+    })) {
+      return; // Client disconnected
+    }
 
-    sendSSE(res, 'done', {});
-    res.end();
+    if (!sendSSE(res, 'done', {})) {
+      return; // Client disconnected
+    }
+
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
     console.log('✅ Data Ops stream completed successfully');
   } catch (error) {
     console.error('Data Ops stream error:', error);
