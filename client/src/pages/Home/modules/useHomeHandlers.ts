@@ -55,9 +55,10 @@ export const useHomeHandlers = ({
           content: newContent,
         };
         
-        // Remove the assistant response that followed (if exists)
-        if (updated[messageIndex + 1] && updated[messageIndex + 1].role === 'assistant') {
-          updated.splice(messageIndex + 1, 1);
+        // Remove ALL messages below the edited message (not just the immediate assistant response)
+        // This includes all subsequent user and assistant messages
+        if (updated.length > messageIndex + 1) {
+          updated.splice(messageIndex + 1);
         }
       }
       

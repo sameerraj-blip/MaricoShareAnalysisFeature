@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import {
   sharedAnalysesResponseSchema,
   AnalysisSessionSummary,
-} from "../../shared/schema.js";
+} from "../shared/schema.js";
 import {
   acceptSharedAnalysisInvite,
   createSharedAnalysisInvite,
@@ -10,8 +10,8 @@ import {
   getSharedAnalysisInviteById,
   listSharedAnalysesForOwner,
   listSharedAnalysesForUser,
-  type ChatDocument,
-} from "../lib/cosmosDB.js";
+} from "../models/sharedAnalysis.model.js";
+import type { ChatDocument } from "../models/chat.model.js";
 
 const getUserEmailFromRequest = (req: Request): string | undefined => {
   const headerEmail = req.headers["x-user-email"];

@@ -2,7 +2,7 @@ import { BaseHandler, HandlerContext, HandlerResponse } from './baseHandler.js';
 import { AnalysisIntent } from '../intentClassifier.js';
 import { findMatchingColumn } from '../utils/columnMatcher.js';
 import { analyzeCorrelations } from '../../correlationAnalyzer.js';
-import { ChartSpec, Insight } from '../../../../shared/schema.js';
+import { ChartSpec, Insight } from '../../../shared/schema.js';
 
 /**
  * Comparison Handler

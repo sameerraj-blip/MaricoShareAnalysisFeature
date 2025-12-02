@@ -4,6 +4,7 @@ import { User, Bot, Edit2, Check, X as XIcon } from 'lucide-react';
 import { ChartRenderer } from './ChartRenderer';
 import { InsightCard } from './InsightCard';
 import { DataPreview } from './DataPreview';
+import { DataPreviewTable, DataSummaryTable } from './DataPreviewTable';
 import { ThinkingDisplay } from './ThinkingDisplay';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
@@ -192,6 +193,20 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
         {!isUser && message.insights && message.insights.length > 0 && (
           <div className="mt-3">
             <InsightCard insights={message.insights} />
+          </div>
+        )}
+
+        {/* Display data preview for Data Ops responses */}
+        {!isUser && (message as any).preview && Array.isArray((message as any).preview) && (message as any).preview.length > 0 && (
+          <div className="mt-3">
+            <DataPreviewTable data={(message as any).preview} />
+          </div>
+        )}
+
+        {/* Display data summary for Data Ops responses */}
+        {!isUser && (message as any).summary && Array.isArray((message as any).summary) && (message as any).summary.length > 0 && (
+          <div className="mt-3">
+            <DataSummaryTable summary={(message as any).summary} />
           </div>
         )}
       </div>

@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Message, UploadResponse, ChatResponse, ThinkingStep } from '@/shared/schema';
-import { uploadFile, streamChatRequest } from '@/lib/api';
+import { uploadFile, streamChatRequest, streamDataOpsChatRequest, DataOpsResponse } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { getUserEmail } from '@/utils/userStorage';
 import { useRef, useEffect, useState } from 'react';
@@ -8,6 +8,7 @@ import { useRef, useEffect, useState } from 'react';
 interface UseHomeMutationsProps {
   sessionId: string | null;
   messages: Message[];
+  dataOpsMode?: boolean;
   setSessionId: (id: string | null) => void;
   setInitialCharts: (charts: UploadResponse['charts']) => void;
   setInitialInsights: (insights: UploadResponse['insights']) => void;
@@ -24,6 +25,7 @@ interface UseHomeMutationsProps {
 export const useHomeMutations = ({
   sessionId,
   messages,
+  dataOpsMode = false,
   setSessionId,
   setInitialCharts,
   setInitialInsights,
@@ -153,6 +155,79 @@ export const useHomeMutations = ({
         chatHistoryLength: chatHistory.length,
       });
       
+      // Route to Data Ops or regular chat based on mode
+      if (dataOpsMode) {
+        return new Promise<ChatResponse>((resolve, reject) => {
+          let responseData: DataOpsResponse | null = null;
+          
+          streamDataOpsChatRequest(
+            sessionId,
+            message,
+            chatHistory,
+            {
+              onThinkingStep: (step: ThinkingStep) => {
+                console.log('🧠 Data Ops thinking step received:', step);
+                setThinkingSteps((prev) => {
+                  const existingIndex = prev.findIndex(s => s.step === step.step);
+                  if (existingIndex >= 0) {
+                    const updated = [...prev];
+                    updated[existingIndex] = step;
+                    return updated;
+                  }
+                  return [...prev, step];
+                });
+              },
+              onResponse: (response: DataOpsResponse) => {
+                console.log('✅ Data Ops API response received:', response);
+                responseData = response;
+                // Store preview/summary in a way that can be accessed by MessageBubble
+                // We'll add these as custom properties to the response
+                (responseData as any).preview = response.preview;
+                (responseData as any).summary = response.summary;
+              },
+              onError: (error: Error) => {
+                console.error('❌ Data Ops API request failed:', error);
+                setThinkingSteps([]);
+                setThinkingTargetTimestamp(null);
+                reject(error);
+              },
+              onDone: () => {
+                console.log('✅ Data Ops stream completed');
+                setThinkingSteps([]);
+                setThinkingTargetTimestamp(null);
+                if (responseData) {
+                  // Convert DataOpsResponse to ChatResponse format
+                  const chatResponse: ChatResponse & { preview?: any[]; summary?: any[] } = {
+                    answer: responseData.answer,
+                    charts: [],
+                    insights: [],
+                    suggestions: [],
+                    preview: responseData.preview,
+                    summary: responseData.summary,
+                  };
+                  resolve(chatResponse as ChatResponse);
+                } else {
+                  reject(new Error('No response received'));
+                }
+              },
+            },
+            abortControllerRef.current.signal,
+            targetTimestamp,
+            dataOpsMode
+          ).catch((error: any) => {
+            if (error?.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
+              console.log('🚫 Data Ops request was cancelled by user');
+              setThinkingSteps([]);
+              setThinkingTargetTimestamp(null);
+              reject(new Error('Request cancelled'));
+            } else {
+              setThinkingSteps([]);
+              setThinkingTargetTimestamp(null);
+              reject(error);
+            }
+          });
+        });
+      } else {
       return new Promise<ChatResponse>((resolve, reject) => {
         let responseData: ChatResponse | null = null;
         
@@ -164,7 +239,6 @@ export const useHomeMutations = ({
             onThinkingStep: (step: ThinkingStep) => {
               console.log('🧠 Thinking step received:', step);
               setThinkingSteps((prev) => {
-                // Update or add the step
                 const existingIndex = prev.findIndex(s => s.step === step.step);
                 if (existingIndex >= 0) {
                   const updated = [...prev];
@@ -198,9 +272,9 @@ export const useHomeMutations = ({
               }
             },
           },
-          abortControllerRef.current.signal
+          abortControllerRef.current.signal,
+          targetTimestamp
         ).catch((error: any) => {
-          // Check if request was cancelled
             if (error?.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
             console.log('🚫 Request was cancelled by user');
               setThinkingSteps([]);
@@ -213,6 +287,7 @@ export const useHomeMutations = ({
           }
         });
       });
+      }
     },
     onSuccess: (data, message) => {
       console.log('✅ Chat response received:', data);
@@ -231,12 +306,14 @@ export const useHomeMutations = ({
         return;
       }
       
-      const assistantMessage: Message = {
+      const assistantMessage: Message & { preview?: any[]; summary?: any[] } = {
         role: 'assistant',
         content: sanitizeMarkdown(data.answer),
         charts: data.charts,
         insights: data.insights,
         timestamp: Date.now(),
+        preview: (data as any).preview,
+        summary: (data as any).summary,
       };
       
       console.log('💬 Adding assistant message to chat:', assistantMessage.content.substring(0, 50));

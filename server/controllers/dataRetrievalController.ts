@@ -3,7 +3,7 @@ import {
   getUserChats, 
   getChatDocument, 
   getChatBySessionIdForUser,
-} from "../lib/cosmosDB.js";
+} from "../models/chat.model.js";
 
 // Get all analysis sessions for a user
 export const getUserAnalysisSessions = async (req: Request, res: Response) => {
@@ -73,6 +73,7 @@ export const getAnalysisData = async (req: Request, res: Response) => {
       dataSummary: chatDocument.dataSummary,
       rawData: chatDocument.rawData,
       sampleRows: chatDocument.sampleRows,
+      // Preview can be generated from rawData.slice(0, 50) on the frontend
       columnStatistics: chatDocument.columnStatistics,
       charts: chatDocument.charts,
       insights: chatDocument.insights || [],
@@ -117,6 +118,7 @@ export const getAnalysisDataBySession = async (req: Request, res: Response) => {
       dataSummary: chatDocument.dataSummary,
       rawData: chatDocument.rawData,
       sampleRows: chatDocument.sampleRows,
+      // Preview can be generated from rawData.slice(0, 50) on the frontend
       columnStatistics: chatDocument.columnStatistics,
       charts: chatDocument.charts,
       insights: chatDocument.insights || [],

@@ -8,6 +8,7 @@ import { ConversationalHandler } from './handlers/conversationalHandler.js';
 import { StatisticalHandler } from './handlers/statisticalHandler.js';
 import { ComparisonHandler } from './handlers/comparisonHandler.js';
 import { CorrelationHandler } from './handlers/correlationHandler.js';
+import { MLModelHandler } from './handlers/mlModelHandler.js';
 import { GeneralHandler } from './handlers/generalHandler.js';
 
 /**
@@ -19,6 +20,7 @@ export function initializeAgents() {
   // Register handlers in priority order
   // More specific handlers should be registered first
   orchestrator.registerHandler(new ConversationalHandler());
+  orchestrator.registerHandler(new MLModelHandler()); // ML model handler before other analysis handlers
   orchestrator.registerHandler(new StatisticalHandler()); // Statistical before correlation (for "which month" queries)
   orchestrator.registerHandler(new ComparisonHandler()); // Comparison before correlation (for "best competitor" queries)
   orchestrator.registerHandler(new CorrelationHandler());

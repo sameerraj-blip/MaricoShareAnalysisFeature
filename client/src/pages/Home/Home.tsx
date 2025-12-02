@@ -25,6 +25,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     dateColumns,
     totalRows,
     totalColumns,
+    dataOpsMode,
     setSessionId,
     setMessages,
     setInitialCharts,
@@ -35,12 +36,14 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
     setDateColumns,
     setTotalRows,
     setTotalColumns,
+    setDataOpsMode,
     resetState,
   } = useHomeState();
 
   const { uploadMutation, chatMutation, cancelChatRequest, thinkingSteps, thinkingTargetTimestamp } = useHomeMutations({
     sessionId,
     messages,
+    dataOpsMode,
     setSessionId,
     setInitialCharts,
     setInitialInsights,
@@ -191,6 +194,8 @@ export default function Home({ resetTrigger = 0, loadedSessionData }: HomeProps)
       thinkingTargetTimestamp={thinkingTargetTimestamp}
       aiSuggestions={suggestions}
       collaborators={collaborators}
+      dataOpsMode={dataOpsMode}
+      onDataOpsModeChange={setDataOpsMode}
     />
   );
 }

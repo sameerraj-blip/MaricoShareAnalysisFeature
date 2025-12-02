@@ -1,6 +1,6 @@
 import { openai, MODEL } from './openai.js';
-import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest } from '../../shared/queryTypes.js';
-import { DataSummary, Message } from '../../shared/schema.js';
+import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest } from '../shared/queryTypes.js';
+import { DataSummary, Message } from '../shared/schema.js';
 import { detectPeriodFromQuery, DatePeriod, extractDatesFromQuery, ExtractedDate } from './dateUtils.js';
 
 interface QueryParserResult extends ParsedQuery {

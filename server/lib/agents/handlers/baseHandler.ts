@@ -1,5 +1,5 @@
 import { AnalysisIntent } from '../intentClassifier.js';
-import { ChartSpec, Insight, DataSummary, Message } from '../../../../shared/schema.js';
+import { ChartSpec, Insight, DataSummary, Message } from '../../../shared/schema.js';
 import { createErrorResponse, ErrorResponse } from '../utils/errorRecovery.js';
 
 /**
@@ -35,6 +35,8 @@ export interface HandlerResponse {
   requiresClarification?: boolean;
   error?: string;
   suggestions?: string[];
+  table?: any;
+  operationResult?: any;
 }
 
 /**

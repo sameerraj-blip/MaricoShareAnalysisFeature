@@ -1,5 +1,5 @@
 import { retrieveRelevantContext, retrieveSimilarPastQA } from '../ragService.js';
-import { DataSummary, Message } from '../../../shared/schema.js';
+import { DataSummary, Message } from '../../shared/schema.js';
 import { RetrievedContext } from './handlers/baseHandler.js';
 
 /**

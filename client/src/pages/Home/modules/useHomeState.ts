@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Message, UploadResponse } from '@/shared/schema';
 
 export interface HomeState {
@@ -12,6 +12,7 @@ export interface HomeState {
   dateColumns: string[];
   totalRows: number;
   totalColumns: number;
+  dataOpsMode: boolean;
 }
 
 export const useHomeState = () => {
@@ -25,6 +26,26 @@ export const useHomeState = () => {
   const [dateColumns, setDateColumns] = useState<string[]>([]);
   const [totalRows, setTotalRows] = useState<number>(0);
   const [totalColumns, setTotalColumns] = useState<number>(0);
+  const [dataOpsMode, setDataOpsMode] = useState<boolean>(false);
+
+  // Load dataOpsMode from localStorage when sessionId changes
+  useEffect(() => {
+    if (sessionId) {
+      const stored = localStorage.getItem(`dataOpsMode_${sessionId}`);
+      if (stored !== null) {
+        setDataOpsMode(stored === 'true');
+      }
+    } else {
+      setDataOpsMode(false);
+    }
+  }, [sessionId]);
+
+  // Save dataOpsMode to localStorage when it changes
+  useEffect(() => {
+    if (sessionId) {
+      localStorage.setItem(`dataOpsMode_${sessionId}`, String(dataOpsMode));
+    }
+  }, [dataOpsMode, sessionId]);
 
   const resetState = useCallback(() => {
     setSessionId(null);
@@ -37,6 +58,7 @@ export const useHomeState = () => {
     setDateColumns([]);
     setTotalRows(0);
     setTotalColumns(0);
+    setDataOpsMode(false);
   }, []);
 
   return {
@@ -51,6 +73,7 @@ export const useHomeState = () => {
     dateColumns,
     totalRows,
     totalColumns,
+    dataOpsMode,
     
     // State setters
     setSessionId,
@@ -63,6 +86,7 @@ export const useHomeState = () => {
     setDateColumns,
     setTotalRows,
     setTotalColumns,
+    setDataOpsMode,
     
     // Helper functions
     resetState,

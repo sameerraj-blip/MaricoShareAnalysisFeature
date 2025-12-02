@@ -55,6 +55,8 @@ export function findMatchingColumn(searchName: string, availableColumns: string[
     const colLower = colTrimmed.toLowerCase();
     let allWordsMatch = true;
     for (const word of searchWords) {
+      // Skip very short words (1-2 chars) unless they're important (like "PA", "nGRP")
+      if (word.length < 2) continue;
       const wordRegex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
       if (!wordRegex.test(colLower)) {
         allWordsMatch = false;
@@ -62,6 +64,18 @@ export function findMatchingColumn(searchName: string, availableColumns: string[
       }
     }
     if (allWordsMatch && searchWords.length > 0) {
+      return colTrimmed;
+    }
+  }
+  
+  // Try phrase matching (exact phrase appears in column name, case-insensitive)
+  // This handles cases like "PAB nGRP" matching "PAB nGRP Adstocked"
+  const searchPhrase = trimmedSearch.toLowerCase();
+  for (const col of availableColumns) {
+    const colTrimmed = col.trim();
+    const colLower = colTrimmed.toLowerCase();
+    // Check if the search phrase appears as a contiguous substring
+    if (colLower.includes(searchPhrase) && searchPhrase.length >= 3) {
       return colTrimmed;
     }
   }

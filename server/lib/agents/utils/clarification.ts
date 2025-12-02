@@ -1,5 +1,5 @@
 import { AnalysisIntent } from '../intentClassifier.js';
-import { DataSummary } from '../../../../shared/schema.js';
+import { DataSummary } from '../../../shared/schema.js';
 import { openai } from '../../openai.js';
 import { getModelForTask } from '../models.js';
 

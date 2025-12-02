@@ -1,4 +1,4 @@
-import { ChartSpec, DataSummary, Insight } from '../../shared/schema.js';
+import { ChartSpec, DataSummary, Insight } from '../shared/schema.js';
 import { openai, MODEL } from './openai.js';
 
 const KEY_INSIGHT_MAX_CHARS = 220;

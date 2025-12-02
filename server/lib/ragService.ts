@@ -1,5 +1,5 @@
 import { openai } from './openai.js';
-import { DataSummary, Message } from '../../shared/schema.js';
+import { DataSummary, Message } from '../shared/schema.js';
 
 // Embedding model (Azure OpenAI supports text-embedding-ada-002 or text-embedding-3-small)
 const EMBEDDING_MODEL = 'text-embedding-ada-002';

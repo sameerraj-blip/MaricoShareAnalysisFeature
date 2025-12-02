@@ -29,9 +29,10 @@ export function createApp() {
   // These are optional, so we don't wait for them
   // Use dynamic imports to avoid breaking if packages aren't available
   Promise.all([
-    import("./lib/cosmosDB.js").then(m => m.initializeCosmosDB()).catch((error) => {
+    import("./models/index.js").then(m => m.initializeCosmosDB()).catch((error) => {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn("⚠️ CosmosDB initialization failed, continuing without it:", errorMessage);
+      console.warn("⚠️ CosmosDB initialization failed on startup, will retry on first use:", errorMessage);
+      console.warn("   Make sure COSMOS_ENDPOINT and COSMOS_KEY are set in your environment variables");
     }),
     import("./lib/blobStorage.js").then(m => m.initializeBlobStorage()).catch((error) => {
       const errorMessage = error instanceof Error ? error.message : String(error);

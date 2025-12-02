@@ -1,4 +1,4 @@
-import { Message, ChartSpec } from '../../../shared/schema.js';
+import { Message, ChartSpec } from '../../shared/schema.js';
 
 /**
  * Resolved Reference

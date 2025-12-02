@@ -1,5 +1,5 @@
 import { openai, MODEL } from './openai.js';
-import { Message, DataSummary } from '../../shared/schema.js';
+import { Message, DataSummary } from '../shared/schema.js';
 
 export async function generateAISuggestions(
   chatHistory: Message[],

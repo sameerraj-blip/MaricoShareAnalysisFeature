@@ -4,7 +4,7 @@ import {
   getChatDocument, 
   deleteChatDocument,
   ChatDocument 
-} from "../lib/cosmosDB.js";
+} from "../models/chat.model.js";
 
 // Get all chats for a user
 export const getUserChatHistory = async (req: Request, res: Response) => {

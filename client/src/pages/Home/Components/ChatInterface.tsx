@@ -3,7 +3,9 @@ import { Message, ThinkingStep } from '@/shared/schema';
 import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Upload as UploadIcon, Square, Filter } from 'lucide-react';
+import { Send, Upload as UploadIcon, Square, Filter, Database } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import { Card } from '@/components/ui/card';
 import {
   Select,
@@ -35,6 +37,8 @@ interface ChatInterfaceProps {
   thinkingTargetTimestamp?: number | null;
   aiSuggestions?: string[]; // AI-generated suggestions
   collaborators?: string[]; // List of all collaborators in the session
+  dataOpsMode?: boolean; // Data Ops mode toggle state
+  onDataOpsModeChange?: (enabled: boolean) => void; // Callback for mode change
 }
 
 // Dynamic suggestions based on conversation context
@@ -98,6 +102,8 @@ export function ChatInterface({
   thinkingTargetTimestamp,
   aiSuggestions,
   collaborators: propCollaborators,
+  dataOpsMode = false,
+  onDataOpsModeChange,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
@@ -443,6 +449,25 @@ export function ChatInterface({
       {/* Input Area */}
       <div className="sticky bottom-0 bg-white/95 backdrop-blur-sm border-t border-gray-100">
         <div className="max-w-6xl mx-auto px-4 py-4">
+          {/* Data Ops Mode Toggle */}
+          {onDataOpsModeChange && (
+            <div className="mb-3 flex items-center justify-center gap-2">
+              <Label htmlFor="data-ops-toggle" className="text-sm font-medium text-gray-700 cursor-pointer flex items-center gap-2">
+                <Database className="w-4 h-4" />
+                <span>Analysis</span>
+              </Label>
+              <Switch
+                id="data-ops-toggle"
+                checked={dataOpsMode}
+                onCheckedChange={onDataOpsModeChange}
+                className="data-[state=checked]:bg-primary"
+              />
+              <Label htmlFor="data-ops-toggle" className="text-sm font-medium text-gray-700 cursor-pointer flex items-center gap-2">
+                <span>Data Ops</span>
+                <Database className="w-4 h-4" />
+              </Label>
+            </div>
+          )}
           {filteredMessages.length === 0 && messages.length > 0 && (
             <div className="mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">

@@ -1,4 +1,4 @@
-import { ChartSpec } from '../../shared/schema.js';
+import { ChartSpec } from '../shared/schema.js';
 import { findMatchingColumn } from './agents/utils/columnMatcher.js';
 import { normalizeDateToPeriod, parseFlexibleDate, DatePeriod, isDateColumnName } from './dateUtils.js';
 

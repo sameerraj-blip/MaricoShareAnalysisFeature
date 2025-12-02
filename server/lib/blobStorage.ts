@@ -201,3 +201,55 @@ export const generateSasUrl = async (
     throw error;
   }
 };
+
+// Update processed data blob (for data operations)
+export const updateProcessedDataBlob = async (
+  sessionId: string,
+  data: Record<string, any>[],
+  version: number,
+  username: string
+): Promise<{ blobUrl: string; blobName: string }> => {
+  try {
+    // Convert data to JSON buffer
+    const jsonData = JSON.stringify(data);
+    const buffer = Buffer.from(jsonData, 'utf-8');
+    
+    // Create blob name for processed data
+    const sanitizedUsername = username.replace(/[^a-zA-Z0-9]/g, '_');
+    const blobName = `${sanitizedUsername}/processed/${sessionId}/v${version}.json`;
+    
+    // Get block blob client
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+    
+    // Upload options
+    const uploadOptions = {
+      blobHTTPHeaders: {
+        blobContentType: 'application/json',
+      },
+      metadata: {
+        sessionId,
+        version: version.toString(),
+        processedBy: username,
+        processedAt: new Date().toISOString(),
+        rowCount: data.length.toString(),
+      },
+    };
+    
+    // Upload the data
+    await blockBlobClient.upload(buffer, buffer.length, uploadOptions);
+    
+    // Generate the blob URL
+    const blobUrl = blockBlobClient.url;
+    
+    console.log(`✅ Processed data uploaded to blob storage: ${blobName}`);
+    console.log(`🔗 Blob URL: ${blobUrl}`);
+    
+    return {
+      blobUrl,
+      blobName,
+    };
+  } catch (error) {
+    console.error("❌ Failed to update processed data blob:", error);
+    throw error;
+  }
+};

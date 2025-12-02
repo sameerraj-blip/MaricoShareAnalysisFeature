@@ -1,4 +1,4 @@
-import { ChartSpec, Insight, DataSummary } from '../../shared/schema.js';
+import { ChartSpec, Insight, DataSummary } from '../shared/schema.js';
 import { openai, MODEL } from './openai.js';
 import { generateChartInsights } from './insightGenerator.js';
 
@@ -453,6 +453,13 @@ Write exactly ${insightCount} insights (one for each variable listed above). Eac
 
 IMPORTANT: Generate exactly ${insightCount} insights - one for each of the ${insightCount} variables listed above, in order of correlation strength (strongest first).
 
+CRITICAL OUTPUT FORMAT REQUIREMENTS:
+- You MUST return valid JSON with this EXACT structure: {"insights": [{"text": "..."}, {"text": "..."}, ...]}
+- Each insight MUST be an object with a "text" field containing the full insight text
+- DO NOT return boolean values, numbers, or strings directly - only objects with "text" fields
+- The "text" field must contain the complete insight including headline, interpretation, suggestions, and reminder
+- Return exactly ${insightCount} insight objects in the array
+
 Output JSON only: {"insights":[{"text":"..."}]}`;
 
   const response = await openai.chat.completions.create({
@@ -460,7 +467,18 @@ Output JSON only: {"insights":[{"text":"..."}]}`;
     messages: [
       {
         role: 'system',
-        content: 'You are a senior data analyst providing detailed correlation insights. Be specific, use correlation values, and provide actionable suggestions. Format "Current suggestion" and "Quantified Action" as separate bullet points (using * or -). Always end correlation insights with exactly: "Reminder: Correlation does not imply causation." (never use "correlation != causation" or variations). Output valid JSON.',
+        content: `You are a senior data analyst providing detailed correlation insights. Be specific, use correlation values, and provide actionable suggestions. Format "Current suggestion" and "Quantified Action" as separate bullet points (using * or -). Always end correlation insights with exactly: "Reminder: Correlation does not imply causation." (never use "correlation != causation" or variations).
+
+CRITICAL: You MUST return valid JSON with this EXACT structure:
+{
+  "insights": [
+    {"text": "Full insight text here for variable 1"},
+    {"text": "Full insight text here for variable 2"},
+    ...
+  ]
+}
+
+Each item in the insights array MUST be an object with a "text" field. DO NOT return boolean values, numbers, or strings directly. The "text" field must contain the complete insight text including all bullet points and the reminder.`,
       },
       {
         role: 'user',
@@ -475,19 +493,71 @@ Output JSON only: {"insights":[{"text":"..."}]}`;
   });
 
   const content = response.choices[0].message.content || '{}';
+  console.log('📝 Raw AI response for correlation insights (first 1000 chars):', content.substring(0, 1000));
+  console.log('📊 Expected insight count:', insightCount);
+  console.log('📋 Variables to analyze:', correlations.map(c => c.variable).join(', '));
 
   try {
     const parsed = JSON.parse(content);
-    const insightArray = parsed.insights || [];
+    console.log('✅ Parsed JSON successfully');
     
-    // Return all insights up to the expected count (no hard limit)
-    // If AI generated fewer, return what we got; if more, cap at expected count
-    return insightArray.slice(0, insightCount).map((item: any, index: number) => ({
-      id: index + 1,
-      text: item.text || item.insight || String(item),
-    }));
+    // Validate that insights is an array
+    if (!parsed.insights || !Array.isArray(parsed.insights)) {
+      console.error('❌ Invalid response format: insights is not an array', parsed);
+      // Try to recover - check if there's a different structure
+      if (parsed.insight && Array.isArray(parsed.insight)) {
+        console.log('⚠️ Found "insight" instead of "insights", using that');
+        parsed.insights = parsed.insight;
+      } else {
+        console.error('❌ No valid insights array found in response');
+        return [];
+      }
+    }
+    
+    const insightArray = parsed.insights || [];
+    console.log(`📊 Found ${insightArray.length} insights in response (expected ${insightCount})`);
+    
+    // Validate and clean insights
+    const validInsights = insightArray
+      .slice(0, insightCount)
+      .map((item: any, index: number) => {
+        // Handle different response formats
+        if (typeof item === 'string') {
+          // If item is a string, use it directly
+          return {
+            id: index + 1,
+            text: item,
+          };
+        } else if (typeof item === 'object' && item !== null) {
+          // If item is an object, extract text field
+          const text = item.text || item.insight || item.content || item.description || '';
+          if (!text || text.trim().length === 0) {
+            console.warn(`⚠️ Insight ${index + 1} has no text field, skipping`);
+            return null;
+          }
+          return {
+            id: index + 1,
+            text: text.trim(),
+          };
+        } else {
+          // Skip invalid items (booleans, numbers, null, etc.)
+          console.warn(`⚠️ Insight ${index + 1} is invalid type (${typeof item}), skipping`);
+          return null;
+        }
+      })
+      .filter((insight): insight is { id: number; text: string } => insight !== null);
+    
+    console.log(`✅ Returning ${validInsights.length} valid insights`);
+    
+    // If we got fewer insights than expected, log a warning
+    if (validInsights.length < insightCount) {
+      console.warn(`⚠️ Generated ${validInsights.length} insights but expected ${insightCount}`);
+    }
+    
+    return validInsights;
   } catch (error) {
-    console.error('Error parsing correlation insights:', error);
+    console.error('❌ Error parsing correlation insights:', error);
+    console.error('Raw content that failed to parse:', content.substring(0, 1000));
     return [];
   }
 }
