@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import multer from "multer";
-import { parseFile, createDataSummary } from "../lib/fileParser.js";
+import { parseFile, createDataSummary, convertDashToZeroForNumericColumns } from "../lib/fileParser.js";
 import { analyzeUpload } from "../lib/dataAnalyzer.js";
 import { uploadResponseSchema } from "../shared/schema.js";
 import { createChatDocument, generateColumnStatistics } from "../models/chat.model.js";
@@ -37,14 +37,18 @@ export const uploadFile = async (
     }
 
     // Parse the file
-    const data = await parseFile(req.file.buffer, req.file.originalname);
+    let data = await parseFile(req.file.buffer, req.file.originalname);
     
     if (data.length === 0) {
       return res.status(400).json({ error: 'No data found in file' });
     }
 
-    // Create data summary
+    // Create data summary to determine column types
     const summary = createDataSummary(data);
+    
+    // Convert "-" values to 0 for numerical columns
+    // This ensures that dash placeholders in numeric columns are treated as 0, not null
+    data = convertDashToZeroForNumericColumns(data, summary.numericColumns);
 
     // Analyze data with AI
     console.log('🤖 Starting AI analysis...');

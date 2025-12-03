@@ -321,6 +321,43 @@ function isDateValue(value: any): boolean {
   return false;
 }
 
+/**
+ * Convert "-" values to 0 for numerical columns
+ * This ensures that dash placeholders in numeric columns are treated as 0, not null
+ */
+export function convertDashToZeroForNumericColumns(
+  data: Record<string, any>[],
+  numericColumns: string[]
+): Record<string, any>[] {
+  if (!data || data.length === 0 || !numericColumns || numericColumns.length === 0) {
+    return data;
+  }
+
+  return data.map(row => {
+    const processedRow: Record<string, any> = { ...row };
+    
+    for (const col of numericColumns) {
+      if (col in processedRow) {
+        const value = processedRow[col];
+        
+        // Check if value is "-" (with or without whitespace)
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          // Match exactly "-" or variations with whitespace
+          if (trimmed === '-' || trimmed === '—' || trimmed === '–') {
+            processedRow[col] = 0;
+          }
+        } else if (value === null || value === undefined) {
+          // Keep null/undefined as is - only convert "-" to 0
+          processedRow[col] = value;
+        }
+      }
+    }
+    
+    return processedRow;
+  });
+}
+
 export function createDataSummary(data: Record<string, any>[]): DataSummary {
   if (data.length === 0) {
     throw new Error('No data found in file');

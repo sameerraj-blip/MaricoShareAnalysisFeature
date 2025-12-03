@@ -5,7 +5,7 @@
  */
 import { ChatDocument } from "../models/chat.model.js";
 import { getFileFromBlob } from "../lib/blobStorage.js";
-import { parseFile } from "../lib/fileParser.js";
+import { parseFile, createDataSummary, convertDashToZeroForNumericColumns } from "../lib/fileParser.js";
 
 /**
  * Normalize data by converting string numbers to actual numbers
@@ -104,6 +104,9 @@ export async function loadLatestData(chatDocument: ChatDocument): Promise<Record
         const blobData = JSON.parse(blobBuffer.toString('utf-8'));
         if (Array.isArray(blobData) && blobData.length > 0) {
           fullData = normalizeNumericColumns(blobData);
+          // Convert "-" to 0 for numeric columns
+          const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+          fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
           console.log(`✅ Loaded ${fullData.length} rows from currentDataBlob (modified data)`);
           return fullData;
         }
@@ -112,6 +115,9 @@ export async function loadLatestData(chatDocument: ChatDocument): Promise<Record
         const parsedData = await parseFile(blobBuffer, chatDocument.fileName);
         if (parsedData && parsedData.length > 0) {
           fullData = normalizeNumericColumns(parsedData);
+          // Convert "-" to 0 for numeric columns
+          const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+          fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
           console.log(`✅ Loaded ${fullData.length} rows from currentDataBlob (parsed file)`);
           return fullData;
         }
@@ -124,6 +130,9 @@ export async function loadLatestData(chatDocument: ChatDocument): Promise<Record
   // Priority 2: Use rawData from document (should be up-to-date after data operations)
   if (chatDocument.rawData && Array.isArray(chatDocument.rawData) && chatDocument.rawData.length > 0) {
     fullData = normalizeNumericColumns(chatDocument.rawData);
+    // Convert "-" to 0 for numeric columns
+    const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+    fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
     console.log(`✅ Using rawData from document: ${fullData.length} rows`);
     return fullData;
   }
@@ -139,6 +148,9 @@ export async function loadLatestData(chatDocument: ChatDocument): Promise<Record
         const blobData = JSON.parse(blobBuffer.toString('utf-8'));
         if (Array.isArray(blobData) && blobData.length > 0) {
           fullData = normalizeNumericColumns(blobData);
+          // Convert "-" to 0 for numeric columns
+          const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+          fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
           console.log(`✅ Loaded ${fullData.length} rows from original blob (JSON)`);
           return fullData;
         }
@@ -147,6 +159,9 @@ export async function loadLatestData(chatDocument: ChatDocument): Promise<Record
         const parsedData = await parseFile(blobBuffer, chatDocument.fileName);
         if (parsedData && parsedData.length > 0) {
           fullData = normalizeNumericColumns(parsedData);
+          // Convert "-" to 0 for numeric columns
+          const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+          fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
           console.log(`✅ Loaded ${fullData.length} rows from original blob (parsed file)`);
           return fullData;
         }
