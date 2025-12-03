@@ -50,6 +50,17 @@ export const uploadFile = async (
     console.log('🤖 Starting AI analysis...');
     const { charts, insights } = await analyzeUpload(data, summary, req.file.originalname);
     
+    // Generate AI suggestions based on the data (no conversation history yet)
+    console.log('💡 Generating AI suggestions based on data...');
+    let suggestions: string[] = [];
+    try {
+      suggestions = await generateAISuggestions([], summary); // Empty chat history for initial upload
+      console.log('✅ Generated suggestions:', suggestions);
+    } catch (suggestionError) {
+      console.error('Failed to generate AI suggestions:', suggestionError);
+      // Continue without suggestions - will use fallback
+    }
+    
     console.log('📊 === CHART GENERATION RESULTS ===');
     console.log(`Generated ${charts.length} charts:`);
     charts.forEach((chart, index) => {
@@ -146,34 +157,13 @@ export const uploadFile = async (
     
     console.log('✅ Chart processing complete');
 
-    // Generate AI suggestions based on the data summary
-    let suggestions: string[] = [];
-    try {
-      console.log('🤖 Generating AI suggestions based on data...');
-      // Create an initial message to provide context for suggestions
-      const initialMessage = {
-        role: 'assistant' as const,
-        content: `I've analyzed your dataset with ${summary.rowCount} rows and ${summary.columnCount} columns. The dataset contains ${summary.numericColumns.length} numeric columns and ${summary.dateColumns.length} date columns.`,
-        timestamp: Date.now(),
-      };
-      suggestions = await generateAISuggestions(
-        [initialMessage], // Empty chat history, just the initial message
-        summary,
-        initialMessage.content
-      );
-      console.log(`✅ Generated ${suggestions.length} AI suggestions:`, suggestions);
-    } catch (error) {
-      console.error('⚠️ Failed to generate AI suggestions:', error);
-      // Continue without suggestions - they're optional
-    }
-
     const response = {
       sessionId,
       summary,
       charts: sanitizedCharts,
       insights,
       sampleRows, // Use the sampleRows we already created
-      suggestions, // AI-generated suggestions based on the data
+      suggestions: suggestions.length > 0 ? suggestions : undefined, // Include AI-generated suggestions
       chatId: chatDocument?.id, // Include chat document ID if created
       blobInfo: blobInfo ? {
         blobUrl: blobInfo.blobUrl,
