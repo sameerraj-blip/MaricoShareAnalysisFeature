@@ -6,6 +6,7 @@ import { uploadResponseSchema } from "../shared/schema.js";
 import { createChatDocument, generateColumnStatistics } from "../models/chat.model.js";
 import { uploadFileToBlob } from "../lib/blobStorage.js";
 import { chunkData, generateChunkEmbeddings, clearVectorStore } from "../lib/ragService.js";
+import { generateAISuggestions } from "../lib/suggestionGenerator.js";
 
 export const uploadFile = async (
   req: Request & { file?: Express.Multer.File },
@@ -145,12 +146,34 @@ export const uploadFile = async (
     
     console.log('✅ Chart processing complete');
 
+    // Generate AI suggestions based on the data summary
+    let suggestions: string[] = [];
+    try {
+      console.log('🤖 Generating AI suggestions based on data...');
+      // Create an initial message to provide context for suggestions
+      const initialMessage = {
+        role: 'assistant' as const,
+        content: `I've analyzed your dataset with ${summary.rowCount} rows and ${summary.columnCount} columns. The dataset contains ${summary.numericColumns.length} numeric columns and ${summary.dateColumns.length} date columns.`,
+        timestamp: Date.now(),
+      };
+      suggestions = await generateAISuggestions(
+        [initialMessage], // Empty chat history, just the initial message
+        summary,
+        initialMessage.content
+      );
+      console.log(`✅ Generated ${suggestions.length} AI suggestions:`, suggestions);
+    } catch (error) {
+      console.error('⚠️ Failed to generate AI suggestions:', error);
+      // Continue without suggestions - they're optional
+    }
+
     const response = {
       sessionId,
       summary,
       charts: sanitizedCharts,
       insights,
       sampleRows, // Use the sampleRows we already created
+      suggestions, // AI-generated suggestions based on the data
       chatId: chatDocument?.id, // Include chat document ID if created
       blobInfo: blobInfo ? {
         blobUrl: blobInfo.blobUrl,

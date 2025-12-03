@@ -204,6 +204,7 @@ export const uploadResponseSchema = z.object({
   charts: z.array(chartSpecSchema),
   insights: z.array(insightSchema),
   sampleRows: z.array(z.record(z.union([z.string(), z.number(), z.null()]))).optional(),
+  suggestions: z.array(z.string()).optional(), // AI-generated suggestions based on the data
   chatId: z.string().optional(), // CosmosDB chat document ID
   blobInfo: z.object({
     blobUrl: z.string(),

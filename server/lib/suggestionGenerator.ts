@@ -14,22 +14,24 @@ export async function generateAISuggestions(
   const prompt = `You are a helpful data analyst assistant. Based on the conversation history and data context, generate 3-4 concise, actionable follow-up questions that would be natural next steps for the user to ask.
 
 CONVERSATION CONTEXT:
-${conversationContext}
+${conversationContext || 'This is the initial analysis of a newly uploaded dataset.'}
 
 ${lastAnswer ? `LAST ASSISTANT RESPONSE:\n${lastAnswer.substring(0, 500)}\n` : ''}
 
 AVAILABLE DATA COLUMNS:
-- Numeric columns: ${dataSummary.numericColumns.slice(0, 10).join(', ')}
-- Date columns: ${dataSummary.dateColumns.slice(0, 5).join(', ')}
-- Total columns: ${dataSummary.columns.length}
+- Numeric columns: ${dataSummary.numericColumns.slice(0, 15).join(', ')}${dataSummary.numericColumns.length > 15 ? ` (and ${dataSummary.numericColumns.length - 15} more)` : ''}
+- Date columns: ${dataSummary.dateColumns.slice(0, 5).join(', ')}${dataSummary.dateColumns.length > 5 ? ` (and ${dataSummary.dateColumns.length - 5} more)` : ''}
+- All columns: ${dataSummary.columns.map(c => c.name).slice(0, 20).join(', ')}${dataSummary.columns.length > 20 ? ` (and ${dataSummary.columns.length - 20} more)` : ''}
+- Total: ${dataSummary.rowCount} rows, ${dataSummary.columnCount} columns
 
 GUIDELINES:
-- Generate questions that are relevant to the current conversation
-- Make them specific and actionable (e.g., "What affects revenue?" not "Tell me more")
-- Vary the question types (correlation, trends, comparisons, etc.)
-- Keep each question under 10 words
-- If no conversation history, suggest general exploratory questions
-- Focus on the most interesting or relevant columns mentioned
+- Generate questions that are relevant to the current conversation OR the dataset structure
+- Make them specific and actionable using actual column names from the dataset (e.g., "What affects ${dataSummary.numericColumns[0] || 'sales'}?" not "What affects revenue?")
+- Vary the question types (correlation, trends, comparisons, top performers, etc.)
+- Keep each question under 12 words
+- If no conversation history (initial upload), suggest exploratory questions based on the actual column names
+- Use the actual column names from the dataset - be specific!
+- Focus on the most interesting or relevant columns from the dataset
 
 Output JSON only:
 {

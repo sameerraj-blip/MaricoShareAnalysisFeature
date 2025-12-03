@@ -90,6 +90,11 @@ export const useHomeMutations = ({
       
       setMessages([initialMessage]);
       
+      // Set AI-generated suggestions if provided
+      if (data.suggestions && data.suggestions.length > 0 && setSuggestions) {
+        setSuggestions(data.suggestions);
+      }
+      
       // Invalidate sessions query to refresh the analysis list
       if (userEmail) {
         queryClient.invalidateQueries({ queryKey: ['sessions', userEmail] });

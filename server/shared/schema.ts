@@ -194,6 +194,7 @@ export type SharedAnalysesResponse = z.infer<typeof sharedAnalysesResponseSchema
 
 // API Response Types
 export const uploadResponseSchema = z.object({
+  suggestions: z.array(z.string()).optional(), // AI-generated suggestions based on the data
   sessionId: z.string(),
   summary: dataSummarySchema,
   charts: z.array(chartSpecSchema),
