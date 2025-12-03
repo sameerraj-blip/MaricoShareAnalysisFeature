@@ -54,31 +54,40 @@ function parseCsv(buffer: Buffer): Record<string, any>[] {
   // Normalize column names: trim whitespace from all column names
   const normalized = normalizeColumnNames(records as Record<string, any>[]);
   
-  // Post-process: Convert string numbers to actual numbers
+  // Post-process: Convert empty values to null and string numbers to actual numbers
   // This handles cases where CSV parser didn't convert formatted numbers (with %, commas, etc.)
   return normalized.map(row => {
     const processedRow: Record<string, any> = {};
     for (const [key, value] of Object.entries(row)) {
-      if (value === null || value === undefined || value === '') {
-        processedRow[key] = value;
+      // Convert empty strings and whitespace-only strings to null
+      if (value === null || value === undefined) {
+        processedRow[key] = null;
         continue;
       }
       
-      // If already a number, keep it
-      if (typeof value === 'number' && !isNaN(value) && isFinite(value)) {
-        processedRow[key] = value;
-        continue;
-      }
-      
-      // Try to convert string numbers
       if (typeof value === 'string') {
-        const cleaned = value.replace(/[%,$€£¥₹\s]/g, '').trim();
+        const trimmed = value.trim();
+        // Convert empty strings or whitespace-only strings to null
+        if (trimmed === '' || trimmed.length === 0) {
+          processedRow[key] = null;
+          continue;
+        }
+        
+        // Try to convert string numbers
+        const cleaned = trimmed.replace(/[%,$€£¥₹\s]/g, '').trim();
         const num = Number(cleaned);
         // Only convert if it's a valid number and the cleaned string is not empty
         if (cleaned !== '' && !isNaN(num) && isFinite(num)) {
           processedRow[key] = num;
         } else {
-          processedRow[key] = value; // Keep as string if not numeric
+          processedRow[key] = trimmed; // Keep as string if not numeric
+        }
+      } else if (typeof value === 'number') {
+        // If already a number, keep it
+        if (!isNaN(value) && isFinite(value)) {
+          processedRow[key] = value;
+        } else {
+          processedRow[key] = null; // Convert NaN/Infinity to null
         }
       } else {
         processedRow[key] = value;
@@ -97,31 +106,40 @@ function parseExcel(buffer: Buffer): Record<string, any>[] {
   // Normalize column names: trim whitespace from all column names
   const normalized = normalizeColumnNames(data as Record<string, any>[]);
   
-  // Post-process: Convert string numbers to actual numbers
+  // Post-process: Convert empty values to null and string numbers to actual numbers
   // This handles cases where Excel parser didn't convert formatted numbers (with %, commas, etc.)
   return normalized.map(row => {
     const processedRow: Record<string, any> = {};
     for (const [key, value] of Object.entries(row)) {
-      if (value === null || value === undefined || value === '') {
-        processedRow[key] = value;
+      // Convert empty strings and whitespace-only strings to null
+      if (value === null || value === undefined) {
+        processedRow[key] = null;
         continue;
       }
       
-      // If already a number, keep it
-      if (typeof value === 'number' && !isNaN(value) && isFinite(value)) {
-        processedRow[key] = value;
-        continue;
-      }
-      
-      // Try to convert string numbers
       if (typeof value === 'string') {
-        const cleaned = value.replace(/[%,$€£¥₹\s]/g, '').trim();
+        const trimmed = value.trim();
+        // Convert empty strings or whitespace-only strings to null
+        if (trimmed === '' || trimmed.length === 0) {
+          processedRow[key] = null;
+          continue;
+        }
+        
+        // Try to convert string numbers
+        const cleaned = trimmed.replace(/[%,$€£¥₹\s]/g, '').trim();
         const num = Number(cleaned);
         // Only convert if it's a valid number and the cleaned string is not empty
         if (cleaned !== '' && !isNaN(num) && isFinite(num)) {
           processedRow[key] = num;
         } else {
-          processedRow[key] = value; // Keep as string if not numeric
+          processedRow[key] = trimmed; // Keep as string if not numeric
+        }
+      } else if (typeof value === 'number') {
+        // If already a number, keep it
+        if (!isNaN(value) && isFinite(value)) {
+          processedRow[key] = value;
+        } else {
+          processedRow[key] = null; // Convert NaN/Infinity to null
         }
       } else {
         processedRow[key] = value;
@@ -169,7 +187,7 @@ function normalizeColumnNames(data: Record<string, any>[]): Record<string, any>[
 
 /**
  * Comprehensive date detection function that handles multiple date formats:
- * - Month-Year: "Apr-24", "April 2024", "Jan-2024", "Mar/24"
+ * - Month-Year: "Apr-24", "April 2024", "Jan-2024", "Mar/24", "Apr-23", "Apr 23"
  * - Standard dates: "DD-MM-YYYY", "MM-DD-YYYY", "YYYY-MM-DD", "DD/MM/YYYY"
  * - Dot separators: "DD.MM.YYYY", "MM.DD.YYYY"
  * - Month names with day: "April 15, 2024", "15 April 2024"
@@ -184,14 +202,38 @@ function isDateValue(value: any): boolean {
   const str = String(value).trim();
   if (!str) return false;
   
-  // Check for month-year formats: "Apr-24", "April 2024", "Jan-2024", "Mar/24", etc.
-  const mmmYyMatch = str.match(/^([A-Za-z]{3,})[-\s/]?(\d{2,4})$/i);
+  // Check for month-year formats: "Apr-24", "Apr-23", "April 2024", "Jan-2024", "Mar/24", "Apr 23", etc.
+  // Pattern: Month name (3+ letters) followed by separator and 2-4 digit year
+  const mmmYyMatch = str.match(/^([A-Za-z]{3,})[-\s/](\d{2,4})$/i);
   if (mmmYyMatch) {
     const monthName = mmmYyMatch[1].toLowerCase().substring(0, 3);
     if (MONTH_MAP[monthName] !== undefined) {
-      const year = parseInt(mmmYyMatch[2], 10);
+      const yearStr = mmmYyMatch[2];
+      let year = parseInt(yearStr, 10);
+      
+      // Handle 2-digit years: assume 20xx if < 50, 19xx if >= 50
+      if (yearStr.length === 2) {
+        year = year < 50 ? 2000 + year : 1900 + year;
+      }
+      
       // Validate year is reasonable (1900-2100)
-      if (year >= 0 && year <= 2100) {
+      if (year >= 1900 && year <= 2100) {
+        return true;
+      }
+    }
+  }
+  
+  // Also check for formats like "Apr-23" without separator (though less common)
+  const mmmYyNoSepMatch = str.match(/^([A-Za-z]{3,})(\d{2,4})$/i);
+  if (mmmYyNoSepMatch) {
+    const monthName = mmmYyNoSepMatch[1].toLowerCase().substring(0, 3);
+    if (MONTH_MAP[monthName] !== undefined) {
+      const yearStr = mmmYyNoSepMatch[2];
+      let year = parseInt(yearStr, 10);
+      if (yearStr.length === 2) {
+        year = year < 50 ? 2000 + year : 1900 + year;
+      }
+      if (year >= 1900 && year <= 2100) {
         return true;
       }
     }

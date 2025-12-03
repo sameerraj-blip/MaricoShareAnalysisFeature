@@ -26,7 +26,7 @@ async function getPreviewFromSavedData(sessionId: string, fallbackData: Record<s
 }
 
 export interface DataOpsIntent {
-  operation: 'remove_nulls' | 'preview' | 'summary' | 'convert_type' | 'count_nulls' | 'describe' | 'create_derived_column' | 'create_column' | 'modify_column' | 'normalize_column' | 'remove_column' | 'remove_rows' | 'add_row' | 'train_model' | 'unknown';
+  operation: 'remove_nulls' | 'preview' | 'summary' | 'convert_type' | 'count_nulls' | 'describe' | 'create_derived_column' | 'create_column' | 'modify_column' | 'normalize_column' | 'remove_column' | 'remove_rows' | 'add_row' | 'train_model' | 'replace_value' | 'unknown';
   column?: string;
   method?: 'delete' | 'mean' | 'median' | 'mode' | 'custom';
   customValue?: any;
@@ -40,6 +40,8 @@ export interface DataOpsIntent {
   rowPosition?: 'first' | 'last';
   rowIndex?: number;
   rowCount?: number; // For removing multiple rows from start/end
+  oldValue?: any; // For replace_value operation - the value to replace
+  newValue?: any; // For replace_value operation - the value to replace with
   requiresClarification: boolean;
   clarificationType?: 'column' | 'method' | 'target_type';
   clarificationMessage?: string;
@@ -74,6 +76,151 @@ export async function parseDataOpsIntent(
   // ---------------------------------------------------------------------------
   // STEP 0: Strong explicit patterns that should ALWAYS create a new intent
   // ---------------------------------------------------------------------------
+  
+  // Replace value intent - Handle multiple phrasings and edge cases
+  // Examples: 
+  // - "replace - with 0"
+  // - "remove - and put 134.2 instead"
+  // - "remove - and replace with 134.2"
+  // - "change - to 134.2"
+  // - "substitute - for 134.2"
+  // - "remove - and add 134.2"
+  // - "remove - and use 134.2"
+  // - "remove the value - and put 0"
+  
+  // Helper function to normalize old value
+  function normalizeOldValue(val: string): any {
+    val = val.replace(/^['"]|['"]$/g, '').trim();
+    const lower = val.toLowerCase();
+    if (lower === 'null' || lower === 'empty' || lower === 'blank') {
+      return null;
+    } else if (val === '-') {
+      return '-';
+    }
+    return val;
+  }
+  
+  // Helper function to normalize new value
+  function normalizeNewValue(val: string): any {
+    val = val.trim();
+    // Remove trailing punctuation
+    val = val.replace(/[.,;:!?]+$/, '');
+    // Remove quotes
+    val = val.replace(/^['"]|['"]$/g, '');
+    
+    // Try to parse as number
+    if (/^-?\d+\.?\d*$/.test(val)) {
+      const num = parseFloat(val);
+      if (!isNaN(num) && isFinite(num)) {
+        return num;
+      }
+    }
+    
+    // Handle null
+    if (val.toLowerCase() === 'null') {
+      return null;
+    }
+    
+    // Try extractCustomValue as fallback
+    const customResult = extractCustomValue(`with ${val}`);
+    if (customResult.found) {
+      return customResult.value;
+    }
+    
+    return val;
+  }
+  
+  // Helper function to extract old and new values from various patterns
+  function extractReplaceValueIntent(msg: string): { oldValue: any; newValue: any; column?: string } | null {
+    // Pattern 1: "replace/remove/change X with/to/by Y"
+    // Group 1: verb, Group 2: "the" (optional), Group 3: "value" (optional), Group 4: quote (optional),
+    // Group 5: old value, Group 6: quote (optional), Group 7: "with/to/by", Group 8: new value
+    let match = msg.match(/\b(replace|remove|change|substitute)\s+(the\s+)?(value\s+)?(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s+(with|to|by)\s+(.+?)(?:\s|$|,|\.|;|in|for|instead)/i);
+    if (match) {
+      const oldVal = (match[5] || '').trim(); // Group 5 is the old value
+      const newVal = (match[8] || '').trim(); // Group 8 is the new value
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    // Pattern 2: "replace/remove X with Y" (simpler)
+    // Group 1: verb, Group 2: quote (optional), Group 3: old value, Group 4: quote (optional), Group 5: "with/to/by", Group 6: new value
+    match = msg.match(/\b(replace|remove|change|substitute)\s+(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s+(with|to|by)\s+(.+?)(?:\s|$|,|\.|;|in|for|instead)/i);
+    if (match) {
+      const oldVal = (match[3] || '').trim(); // Group 3 is the old value
+      const newVal = (match[6] || '').trim(); // Group 6 is the new value
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    // Pattern 3: "remove X and put Y instead" or "remove X and replace with Y"
+    match = msg.match(/\b(remove|delete)\s+(the\s+)?(value\s+)?(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s+and\s+(put|replace|add|use|set)\s+(.+?)(?:\s+instead|\s+in\s+place|$|,|\.|;)/i);
+    if (match) {
+      const oldVal = (match[4] || '').trim();
+      const newVal = (match[7] || '').trim();
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    // Pattern 4: "remove X and put Y instead" (simpler, no "the value")
+    // Group 1: verb, Group 2: quote (optional), Group 3: old value, Group 4: quote (optional), Group 5: "put/replace/add/use/set", Group 6: new value
+    match = msg.match(/\b(remove|delete)\s+(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s+and\s+(put|replace|add|use|set)\s+(.+?)(?:\s+instead|\s+in\s+place|$|,|\.|;)/i);
+    if (match) {
+      const oldVal = (match[3] || '').trim(); // Group 3 is the old value
+      const newVal = (match[6] || '').trim(); // Group 6 is the new value
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    // Pattern 5: "change X to Y" or "convert X to Y"
+    match = msg.match(/\b(change|convert|transform)\s+(the\s+)?(value\s+)?(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s+to\s+(.+?)(?:\s|$|,|\.|;)/i);
+    if (match) {
+      const oldVal = (match[4] || '').trim();
+      const newVal = (match[6] || '').trim();
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    // Pattern 6: "substitute X for Y" (note: "for" means replace X with Y)
+    match = msg.match(/\b(substitute|replace)\s+(the\s+)?(value\s+)?(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s+for\s+(.+?)(?:\s|$|,|\.|;)/i);
+    if (match) {
+      const oldVal = (match[4] || '').trim();
+      const newVal = (match[6] || '').trim();
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    // Pattern 7: "remove X, use Y" or "remove X, put Y"
+    match = msg.match(/\b(remove|delete)\s+(the\s+)?(value\s+)?(['"]?)(-|N\/A|NA|n\/a|na|empty|null|blank)(['"]?)\s*[,;]\s*(use|put|replace|add|set)\s+(.+?)(?:\s|$|,|\.|;)/i);
+    if (match) {
+      const oldVal = (match[4] || '').trim();
+      const newVal = (match[7] || '').trim();
+      if (oldVal && newVal) {
+        return { oldValue: normalizeOldValue(oldVal), newValue: normalizeNewValue(newVal), column: findMentionedColumn(msg, availableColumns) };
+      }
+    }
+    
+    return null;
+  }
+  
+  // Try to extract replace value intent
+  const replaceIntent = extractReplaceValueIntent(message);
+  if (replaceIntent) {
+    return {
+      operation: 'replace_value',
+      column: replaceIntent.column,
+      oldValue: replaceIntent.oldValue,
+      newValue: replaceIntent.newValue,
+      requiresClarification: false
+    };
+  }
+  
   // High-confidence "remove column" pattern – this should not be treated as
   // a clarification response even if we were previously asking about nulls.
   // Allow common typos like "remover"/"removing" by matching "remov*"
@@ -82,7 +229,7 @@ export async function parseDataOpsIntent(
     const mentionedColumn = findMentionedColumn(message, availableColumns);
     
     if (mentionedColumn) {
-      return {
+    return {
         operation: 'remove_column',
         column: mentionedColumn,
         requiresClarification: false,
@@ -112,7 +259,7 @@ export async function parseDataOpsIntent(
   if (firstNMatch) {
     const count = parseInt(firstNMatch[3], 10);
     if (!Number.isNaN(count) && count > 0) {
-      return {
+    return {
         operation: 'remove_rows',
         rowPosition: 'first',
         rowCount: count,
@@ -126,7 +273,7 @@ export async function parseDataOpsIntent(
   if (lastNMatch) {
     const count = parseInt(lastNMatch[3], 10);
     if (!Number.isNaN(count) && count > 0) {
-      return {
+    return {
         operation: 'remove_rows',
         rowPosition: 'last',
         rowCount: count,
@@ -189,7 +336,7 @@ export async function parseDataOpsIntent(
         !mentionsNullLikeTerms;
 
       if (!looksLikeNewRemoveColumnRequest) {
-        return handleClarificationResponse(message, pendingOp, availableColumns, dataSummary);
+      return handleClarificationResponse(message, pendingOp, availableColumns, dataSummary);
       }
       // If it looks like a new remove-column style request, we intentionally
       // skip clarification handling and let AI/regex logic below treat it
@@ -229,14 +376,36 @@ export async function parseDataOpsIntent(
       method = 'median';
     } else if (lowerMessage.includes('mode') || lowerMessage.includes('most frequent')) {
       method = 'mode';
-    } else if (lowerMessage.includes('custom') || lowerMessage.match(/\d+/)) {
-      method = 'custom';
-      const numberMatch = lowerMessage.match(/(-?\d+\.?\d*)/);
-      customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
+    } else {
+      // Check for custom value (number or string)
+      const customValueResult = extractCustomValue(message);
+      if (customValueResult.found) {
+        method = 'custom';
+        customValue = customValueResult.value;
+      } else if (lowerMessage.includes('custom')) {
+        // User mentioned "custom" but didn't specify value - need clarification
+        method = 'custom';
+        customValue = undefined;
+      }
     }
     
-    // If method is specified, execute directly
+    // If method is specified, check if custom value is needed
     if (method) {
+      // If method is 'custom' but no value specified, ask for clarification
+      if (method === 'custom' && customValue === undefined) {
+        return {
+          operation: 'remove_nulls',
+          column: mentionedColumn,
+          method: 'custom',
+          requiresClarification: true,
+          clarificationType: 'method',
+          clarificationMessage: mentionedColumn 
+            ? `What value would you like to use to fill null values in "${mentionedColumn}"? (e.g., 0, "N/A", "Unknown", etc.)`
+            : 'What value would you like to use to fill null values? (e.g., 0, "N/A", "Unknown", etc.)'
+        };
+      }
+      
+      // Method and value (if needed) are specified, execute directly
       return {
         operation: 'remove_nulls',
         column: mentionedColumn,
@@ -386,7 +555,84 @@ export async function parseDataOpsIntent(
   
   // Normalize column intent
   if (lowerMessage.includes('normalize') || lowerMessage.includes('normalise') || lowerMessage.includes('standardize')) {
-    const mentionedColumn = findMentionedColumn(message, availableColumns);
+    // First, try to extract column name using regex pattern
+    // Patterns: "normalize Emami 7 Oils TOM", "normalize the column X", "normalize column X"
+    let extractedColumnName: string | undefined;
+    
+    // Pattern 1: "normalize [column name]" - captures everything after "normalize" to end of message
+    // Then we'll clean it up by removing stop words
+    const normalizePattern1 = /\b(normalize|normalise|standardize)\s+(?:the\s+)?(?:column\s+)?(.+)/i;
+    const match1 = message.match(normalizePattern1);
+    if (match1 && match1[2]) {
+      extractedColumnName = match1[2].trim();
+      // Remove common stop words that might be at the end (but preserve column name words)
+      extractedColumnName = extractedColumnName.replace(/\s+(please|can|you|will|the|column|columns|for|to|with|by)$/i, '').trim();
+      // Remove trailing punctuation
+      extractedColumnName = extractedColumnName.replace(/[.,;:!?]+$/, '');
+    }
+    
+    // If we extracted a column name, try to match it against available columns
+    let mentionedColumn: string | undefined;
+    if (extractedColumnName) {
+      const normalizedExtracted = extractedColumnName.toLowerCase().replace(/\s+/g, ' ').trim();
+      const extractedWords = normalizedExtracted.split(/\s+/).filter(w => w.length > 0);
+      
+      // First try exact match (case-insensitive, normalized spaces)
+      for (const col of availableColumns) {
+        const normalizedCol = col.toLowerCase().replace(/\s+/g, ' ').trim();
+        if (normalizedCol === normalizedExtracted) {
+          mentionedColumn = col;
+          break;
+        }
+      }
+      
+      // If no exact match, try to find column where ALL words from extracted name match
+      // This ensures "Emami 7 Oils TOM" matches "Emami 7 Oils TOM" not "Emami 7 Oils nGRP"
+      if (!mentionedColumn && extractedWords.length > 0) {
+        // Sort columns by length (longest first) to prioritize more specific matches
+        const sortedColumns = [...availableColumns].sort((a, b) => b.length - a.length);
+        
+        for (const col of sortedColumns) {
+          const colLower = col.toLowerCase();
+          let allWordsMatch = true;
+          let matchCount = 0;
+          
+          for (const word of extractedWords) {
+            // Use word boundary regex to ensure we match complete words
+            const wordRegex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+            if (wordRegex.test(colLower)) {
+              matchCount++;
+            } else {
+              // If word doesn't match as a word boundary, check if it's a substring
+              // but only if the word is significant (length >= 2)
+              if (word.length >= 2 && colLower.includes(word)) {
+                matchCount++;
+              } else {
+                allWordsMatch = false;
+                break;
+              }
+            }
+          }
+          
+          // If all words match, return this column immediately
+          if (allWordsMatch && matchCount === extractedWords.length) {
+            mentionedColumn = col;
+            break;
+          }
+        }
+      }
+      
+      // If still no match, try word-boundary matching with the extracted name
+      if (!mentionedColumn) {
+        mentionedColumn = findMentionedColumn(extractedColumnName, availableColumns);
+      }
+    }
+    
+    // Fallback to original method if regex extraction didn't work
+    if (!mentionedColumn) {
+      mentionedColumn = findMentionedColumn(message, availableColumns);
+    }
+    
     if (mentionedColumn) {
       return {
         operation: 'normalize_column',
@@ -596,7 +842,7 @@ Available columns: ${columnsList}
 
 Determine the intent and return JSON with this structure:
 {
-    "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "train_model" | "unknown",
+    "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "train_model" | "replace_value" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
   "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
   "customValue": any (if method is "custom", the value to use for imputation),
@@ -607,6 +853,8 @@ Determine the intent and return JSON with this structure:
   "transformValue": number (if modifying existing column),
   "rowPosition": "first" | "last" (if removing rows),
   "rowIndex": number (if removing row by index),
+  "oldValue": any (if replace_value operation, the value to replace, null otherwise),
+  "newValue": any (if replace_value operation, the value to replace with, null otherwise),
   "requiresClarification": false,
   "clarificationMessage": null
 }
@@ -632,6 +880,15 @@ Operations:
   * Extract rowPosition (first/last) or rowIndex (1-based)
 - "add_row": User wants to add/append a row (e.g., "add a new row", "append row at bottom")
 - "count_nulls": User wants to count/null values (e.g., "how many nulls", "count missing values")
+- "replace_value": User wants to replace a specific value with another. Handle various phrasings:
+  * "replace - with 0" or "replace '-' with 0"
+  * "remove - and put 134.2 instead" or "remove - and replace with 134.2"
+  * "change - to 0" or "convert - to 0"
+  * "substitute - for 0" or "remove - and use 0"
+  * "remove the value - and put 0" or "remove -, use 0"
+  * Extract oldValue: the value to replace (e.g., "-", "N/A", "null", "empty")
+  * Extract newValue: the value to replace with (e.g., 0, 134.2, null, "N/A")
+  * Extract column: if a specific column is mentioned
 - "describe": User wants general info about data (e.g., "how many rows", "describe the data", "what's in the dataset")
 - "preview": User wants to see data (e.g., "show data", "display rows")
 - "summary": User wants statistics summary
@@ -680,16 +937,23 @@ Return ONLY valid JSON, no other text.`;
           method = 'median';
         } else if (lowerMsg.includes('mode') || lowerMsg.includes('most frequent')) {
           method = 'mode';
-        } else if (lowerMsg.includes('custom') || lowerMsg.match(/\d+/)) {
-          method = 'custom';
-          const numberMatch = lowerMsg.match(/(-?\d+\.?\d*)/);
-          customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
+        } else {
+          // Check for custom value (number or string)
+          const customValueResult = extractCustomValue(message);
+          if (customValueResult.found) {
+            method = 'custom';
+            customValue = customValueResult.value;
+          } else if (lowerMsg.includes('custom')) {
+            // User mentioned "custom" but didn't specify value
+            method = 'custom';
+            customValue = undefined;
+          }
         }
       } else if (lowerMsg.includes('delete') || lowerMsg.includes('remove')) {
         method = 'delete';
       }
     }
-    
+
     return {
       operation: parsed.operation || 'unknown',
       column: parsed.column,
@@ -698,6 +962,8 @@ Return ONLY valid JSON, no other text.`;
       newColumnName: parsed.newColumnName,
       expression: parsed.expression,
       defaultValue: parsed.defaultValue,
+      oldValue: parsed.oldValue,
+      newValue: parsed.newValue,
       modelType: parsed.modelType,
       targetVariable: parsed.targetVariable,
       features: parsed.features,
@@ -776,15 +1042,26 @@ function handleClarificationResponse(
           method: 'mode',
           requiresClarification: false
         };
-      } else if (lowerMessage.includes('custom') || lowerMessage.match(/\d+/)) {
-        const numberMatch = lowerMessage.match(/(-?\d+\.?\d*)/);
-        const customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
-        return {
-          operation: 'remove_nulls',
-          method: 'custom',
-          customValue,
-          requiresClarification: false
-        };
+      } else if (lowerMessage.includes('custom')) {
+        // Check if custom value is specified
+        const customValueResult = extractCustomValue(message);
+        if (customValueResult.found) {
+          return {
+            operation: 'remove_nulls',
+            method: 'custom',
+            customValue: customValueResult.value,
+            requiresClarification: false
+          };
+        } else {
+          // User said "custom" but didn't specify value
+          return {
+            operation: 'remove_nulls',
+            method: 'custom',
+            requiresClarification: true,
+            clarificationType: 'method',
+            clarificationMessage: 'What value would you like to use to fill null values? (e.g., 0, "N/A", "Unknown", etc.)'
+          };
+        }
       }
       
       // User is specifying column
@@ -835,17 +1112,51 @@ function handleClarificationResponse(
           method: 'mode',
           requiresClarification: false
         };
-      } else if (lowerMessage.includes('custom') || lowerMessage.match(/\d+/)) {
-        const numberMatch = lowerMessage.match(/(-?\d+\.?\d*)/);
-        const customValue = numberMatch ? parseFloat(numberMatch[1]) : undefined;
+      } else if (lowerMessage.includes('custom')) {
+        // Check if custom value is specified
+        const customValueResult = extractCustomValue(message);
+        if (customValueResult.found) {
         return {
           operation: 'remove_nulls',
           column: pendingOp.column,
           method: 'custom',
-          customValue,
+            customValue: customValueResult.value,
           requiresClarification: false
         };
+        } else {
+          // User said "custom" but didn't specify value
+          return {
+            operation: 'remove_nulls',
+            column: pendingOp.column,
+            method: 'custom',
+            requiresClarification: true,
+            clarificationType: 'method',
+            clarificationMessage: `What value would you like to use to fill null values in "${pendingOp.column}"? (e.g., 0, "N/A", "Unknown", etc.)`
+          };
+        }
       }
+    }
+  }
+  
+  // Check if user is providing a custom value (for when method was already set to 'custom' in a previous clarification)
+  // This handles cases where user said "custom" and we asked "what value?", and now they're providing the value
+  if (pendingOp.operation === 'remove_nulls') {
+    const customValueResult = extractCustomValue(message);
+    // Only treat as custom value if:
+    // 1. We found a value in the message, AND
+    // 2. The message doesn't look like they're choosing a different method (mean/median/mode/delete)
+    const looksLikeMethodChoice = lowerMessage.includes('mean') || lowerMessage.includes('median') || 
+                                   lowerMessage.includes('mode') || lowerMessage.includes('delete') ||
+                                   lowerMessage.includes('remove') || lowerMessage.includes('option');
+    
+    if (customValueResult.found && !looksLikeMethodChoice) {
+      return {
+        operation: 'remove_nulls',
+        column: pendingOp.column,
+        method: 'custom',
+        customValue: customValueResult.value,
+        requiresClarification: false
+      };
     }
   }
   
@@ -860,15 +1171,198 @@ function handleClarificationResponse(
 }
 
 /**
+ * Extract custom value from message (handles numbers and strings)
+ * Examples: "fill nulls with 0", "fill nulls with the 132.45", "fill nulls with 'N/A'", "fill nulls with N/A", "fill nulls with Unknown"
+ */
+function extractCustomValue(message: string): { value: any; found: boolean } {
+  const lowerMessage = message.toLowerCase();
+  
+  // Patterns to match custom value specifications
+  // "with 0", "with the 132.45", "with 'N/A'", "with N/A", "with Unknown", "as 0", "as 'N/A'", etc.
+  
+  // Try number pattern first - handle "with 0", "with the 132.45", "with value 123.45", etc.
+  // Pattern: (with|as|value|using|to) (optional: the|a|an) (number)
+  // Match both "with 132.45" and "with the 132.45"
+  // Use word boundaries to ensure we match the right "with"
+  const numberPatterns = [
+    /\b(?:with|as|value|using|to)\s+(?:the|a|an)\s+(-?\d+\.?\d*)/i,  // "with the 132.45"
+    /\b(?:with|as|value|using|to)\s+(-?\d+\.?\d*)/i,  // "with 132.45"
+  ];
+  
+  for (const pattern of numberPatterns) {
+    const numberMatch = message.match(pattern);
+    if (numberMatch && numberMatch[1]) {
+      const numStr = numberMatch[1].trim();
+      const num = parseFloat(numStr);
+      if (!isNaN(num) && isFinite(num)) {
+        return { value: num, found: true };
+      }
+    }
+  }
+  
+  // Try quoted string pattern - "with 'N/A'", "with \"Unknown\"", "with the 'value'"
+  const quotedMatch = message.match(/(?:with|as|value|using|to)\s+(?:the|a|an)?\s*['"]([^'"]+)['"]/i);
+  if (quotedMatch) {
+    return { value: quotedMatch[1], found: true };
+  }
+  
+  // Try unquoted string pattern (but exclude common method words and articles)
+  // This should come last to avoid matching "the" or "a" as values
+  // Match patterns like "with N/A", "with Unknown", but NOT "with the" or "with a"
+  const unquotedPatterns = [
+    /(?:with|as|value|using|to)\s+(?:the|a|an)\s+([A-Za-z][A-Za-z0-9\s_-]+?)(?:\s|$|,|\.|;|in|for|from)/i,  // "with the N/A"
+    /(?:with|as|value|using|to)\s+([A-Za-z][A-Za-z0-9\s_-]+?)(?:\s|$|,|\.|;|in|for|from)/i,  // "with N/A"
+  ];
+  
+  for (const pattern of unquotedPatterns) {
+    const unquotedMatch = message.match(pattern);
+    if (unquotedMatch) {
+      const potentialValue = unquotedMatch[1].trim();
+      // Exclude method keywords and articles
+      const methodKeywords = ['mean', 'median', 'mode', 'custom', 'delete', 'remove', 'fill', 'impute', 'replace', 'the', 'a', 'an', 'null', 'value', 'values'];
+      if (potentialValue && !methodKeywords.includes(potentialValue.toLowerCase())) {
+        return { value: potentialValue, found: true };
+      }
+    }
+  }
+  
+  return { value: undefined, found: false };
+}
+
+/**
  * Find mentioned column in message
+ * Improved to handle cases like "Emami 7 Oils TOM" matching "Emami 7 Oils TOM" instead of "Emami 7 Oils nGRP"
  */
 function findMentionedColumn(message: string, availableColumns: string[]): string | undefined {
   const lowerMessage = message.toLowerCase();
+  
+  // Extract potential column name from message by removing common operation words
+  // This helps isolate the column name better
+  const operationWords = ['normalize', 'normalise', 'standardize', 'remove', 'delete', 'drop', 
+                          'create', 'add', 'make', 'modify', 'change', 'update', 'convert', 
+                          'replace', 'fill', 'count', 'show', 'display', 'get', 'find'];
+  let cleanedMessage = lowerMessage;
+  for (const opWord of operationWords) {
+    cleanedMessage = cleanedMessage.replace(new RegExp(`\\b${opWord}\\b`, 'gi'), '').trim();
+  }
+  // Remove common words that might interfere, but preserve important words like "TOM", "nGRP", etc.
+  cleanedMessage = cleanedMessage.replace(/\b(the|a|an|column|columns|value|values|with|to|by|for|in|on|at)\b/gi, '').trim();
+  
+  // If cleaned message is too short or empty, use original message
+  if (cleanedMessage.length < 3) {
+    cleanedMessage = lowerMessage;
+  }
+  
+  // Try exact match first (case-insensitive, ignoring extra spaces)
+  for (const col of availableColumns) {
+    const colLower = col.toLowerCase().trim();
+    const colNormalized = colLower.replace(/\s+/g, ' ');
+    const msgNormalized = cleanedMessage.replace(/\s+/g, ' ');
+    
+    // Exact match (normalized)
+    if (colNormalized === msgNormalized) {
+      return col;
+    }
+    
+    // Exact match with original message (if column name appears as-is)
+    if (lowerMessage.includes(colLower) && colLower.length >= 3) {
+      // Check if it's a word-boundary match (not just substring)
+      const wordBoundaryRegex = new RegExp(`\\b${colLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (wordBoundaryRegex.test(message)) {
+        return col;
+      }
+    }
+  }
+  
+  // Try word-boundary matching - all words from search term must appear in column
+  const searchWords = cleanedMessage.split(/\s+/).filter(w => w.length >= 1); // Allow single char words like "7"
+  if (searchWords.length > 0) {
+    // Sort columns by length (longest first) to prioritize more specific matches
   const sortedColumns = [...availableColumns].sort((a, b) => b.length - a.length);
   
-  // Try exact/substring match, prioritizing longer column names first
+    // First, try to find columns where ALL words match (perfect match)
   for (const col of sortedColumns) {
-    if (lowerMessage.includes(col.toLowerCase())) {
+      const colLower = col.toLowerCase();
+      let allWordsMatch = true;
+      let matchCount = 0;
+      
+      for (const word of searchWords) {
+        // Use word boundary regex to ensure we match complete words
+        const wordRegex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (wordRegex.test(colLower)) {
+          matchCount++;
+        } else {
+          // If word doesn't match as a word boundary, check if it's a substring
+          // but only if the word is significant (length >= 2)
+          if (word.length >= 2 && colLower.includes(word)) {
+            matchCount++;
+          } else {
+            allWordsMatch = false;
+            break;
+          }
+        }
+      }
+      
+      // If all words match, return this column immediately
+      if (allWordsMatch && matchCount === searchWords.length) {
+        return col;
+      }
+    }
+    
+    // If no perfect match, try to find column with highest word match count
+    // Prioritize columns that match the LAST word (often the distinguishing part like "TOM" vs "nGRP")
+    const lastWord = searchWords[searchWords.length - 1];
+    let bestMatch: { col: string; score: number } | null = null;
+    
+    for (const col of sortedColumns) {
+      const colLower = col.toLowerCase();
+      let matchCount = 0;
+      let lastWordMatches = false;
+      
+      for (let i = 0; i < searchWords.length; i++) {
+        const word = searchWords[i];
+        const wordRegex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        const matches = wordRegex.test(colLower) || (word.length >= 2 && colLower.includes(word));
+        
+        if (matches) {
+          matchCount++;
+          // Check if this is the last word
+          if (i === searchWords.length - 1) {
+            lastWordMatches = true;
+          }
+        }
+      }
+      
+      // Calculate score: 
+      // - Base score: percentage of words matched
+      // - Bonus: if last word matches (critical for distinguishing "TOM" vs "nGRP")
+      // - Bonus: longer column names (more specific)
+      let score = (matchCount / searchWords.length) * 100;
+      if (lastWordMatches) {
+        score += 50; // Big bonus for matching the last word
+      }
+      score += (col.length / 100); // Small bonus for longer names
+      
+      if (matchCount > 0 && (!bestMatch || score > bestMatch.score)) {
+        bestMatch = { col, score };
+      }
+    }
+    
+    // Require at least 50% word match, or if last word matches, require at least 30%
+    const minScore = lastWord && bestMatch?.col.toLowerCase().includes(lastWord.toLowerCase()) ? 30 : 50;
+    if (bestMatch && bestMatch.score >= minScore) {
+      return bestMatch.col;
+    }
+  }
+  
+  // Fallback: Try substring match, but only for longer substrings (>= 5 chars)
+  // This prevents matching "Emami 7 Oils" when user says "Emami 7 Oils TOM"
+  const sortedColumns = [...availableColumns].sort((a, b) => b.length - a.length);
+  for (const col of sortedColumns) {
+    const colLower = col.toLowerCase();
+    // Only match if the substring is significant (>= 5 chars) or if it's an exact word match
+    if (lowerMessage.includes(colLower) && (colLower.length >= 5 || 
+        new RegExp(`\\b${colLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(message))) {
       return col;
     }
   }
@@ -1593,9 +2087,23 @@ export async function executeDataOperation(
       }
       
       // Create the column with default value
+      // Round numeric default values to 2 decimal places
+      let processedDefaultValue = defaultValue;
+      if (defaultValue !== undefined && defaultValue !== null) {
+        if (typeof defaultValue === 'number') {
+          processedDefaultValue = Math.round(defaultValue * 100) / 100; // Round to 2 decimal places
+        } else if (typeof defaultValue === 'string') {
+          // Try to parse as number and round if successful
+          const numValue = parseFloat(defaultValue);
+          if (!isNaN(numValue) && isFinite(numValue)) {
+            processedDefaultValue = Math.round(numValue * 100) / 100;
+          }
+        }
+      }
+      
       const modifiedData = data.map(row => ({
         ...row,
-        [newColumnName!]: defaultValue !== undefined ? defaultValue : null
+        [newColumnName!]: processedDefaultValue !== undefined ? processedDefaultValue : null
       }));
       
       // Save modified data first
@@ -1711,7 +2219,9 @@ export async function executeDataOperation(
         } else if (range === 0) {
           newRow[intent.column!] = 0;
         } else {
-          newRow[intent.column!] = (currentValue - min) / range;
+          // Round to 2 decimal places
+          const normalizedValue = (currentValue - min) / range;
+          newRow[intent.column!] = Math.round(normalizedValue * 100) / 100;
         }
         return newRow;
       });
@@ -1777,7 +2287,8 @@ export async function executeDataOperation(
             break;
         }
 
-        newRow[intent.column!] = updatedValue;
+        // Round to 2 decimal places
+        newRow[intent.column!] = Math.round(updatedValue * 100) / 100;
         return newRow;
       });
 
@@ -1887,6 +2398,78 @@ export async function executeDataOperation(
 
       return {
         answer: `✅ Added a new empty row at the bottom. Here's a preview:`,
+        data: modifiedData,
+        preview: previewData,
+        saved: true
+      };
+    }
+    
+    case 'replace_value': {
+      if (intent.oldValue === undefined) {
+        return {
+          answer: 'Please specify which value you want to replace. For example: "replace - with 0" or "remove the value -"'
+        };
+      }
+      
+      if (intent.newValue === undefined) {
+        return {
+          answer: 'Please specify what value to replace it with. For example: "replace - with 0" or "replace - with null"'
+        };
+      }
+      
+      // Replace values in the dataset
+      let replacedCount = 0;
+      const modifiedData = data.map(row => {
+        const newRow = { ...row };
+        const columnsToProcess = intent.column ? [intent.column] : Object.keys(row);
+        
+        for (const col of columnsToProcess) {
+          if (col in row) {
+            const currentValue = row[col];
+            // Compare values (handle null, strings, numbers)
+            let shouldReplace = false;
+            
+            if (intent.oldValue === null || intent.oldValue === 'null') {
+              shouldReplace = (currentValue === null || currentValue === undefined || currentValue === '');
+            } else if (intent.oldValue === '-') {
+              // Handle dash/placeholder values (including variations with spaces)
+              const currentStr = String(currentValue).trim();
+              shouldReplace = (currentStr === '-' || currentStr === ' - ' || currentStr === '—' || currentStr === '–');
+            } else {
+              // String or number comparison
+              shouldReplace = (String(currentValue).trim() === String(intent.oldValue).trim());
+            }
+            
+            if (shouldReplace) {
+              // Round numeric newValue to 2 decimal places
+              if (typeof intent.newValue === 'number') {
+                newRow[col] = Math.round(intent.newValue * 100) / 100;
+              } else if (intent.newValue === null || intent.newValue === 'null') {
+                newRow[col] = null;
+              } else {
+                newRow[col] = intent.newValue;
+              }
+              replacedCount++;
+            }
+          }
+        }
+        return newRow;
+      });
+      
+      // Save modified data
+      const saveResult = await saveModifiedData(
+        sessionId,
+        modifiedData,
+        'replace_value',
+        `Replaced ${replacedCount} occurrence(s) of "${intent.oldValue}" with "${intent.newValue}"${intent.column ? ` in column "${intent.column}"` : ' across all columns'}`,
+        sessionDoc
+      );
+      
+      // Get preview from saved rawData
+      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+      
+      return {
+        answer: `✅ Replaced ${replacedCount} occurrence(s) of "${intent.oldValue}" with "${intent.newValue}"${intent.column ? ` in column "${intent.column}"` : ' across all columns'}. Here's a preview of the updated data:`,
         data: modifiedData,
         preview: previewData,
         saved: true

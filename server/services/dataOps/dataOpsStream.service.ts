@@ -260,7 +260,7 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
     }
 
     if (!res.writableEnded && !res.destroyed) {
-      res.end();
+    res.end();
     }
     console.log('✅ Data Ops stream completed successfully');
   } catch (error) {

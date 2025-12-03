@@ -207,17 +207,17 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     }
 
     if (!res.writableEnded && !res.destroyed) {
-      res.end();
+    res.end();
     }
     console.log('✅ Stream completed successfully');
   } catch (error) {
     console.error('Chat stream error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Failed to process message';
     if (checkConnection()) {
-      sendSSE(res, 'error', { message: errorMessage });
+    sendSSE(res, 'error', { message: errorMessage });
     }
     if (!res.writableEnded && !res.destroyed) {
-      res.end();
+    res.end();
     }
   }
 }

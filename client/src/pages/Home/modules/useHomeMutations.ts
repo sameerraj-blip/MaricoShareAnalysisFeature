@@ -263,7 +263,7 @@ export const useHomeMutations = ({
       } else {
         // For 'analysis' and 'modeling' modes, use regular chat
         // TODO: Add separate modeling endpoint if needed
-        return new Promise<ChatResponse>((resolve, reject) => {
+      return new Promise<ChatResponse>((resolve, reject) => {
         let responseData: ChatResponse | null = null;
         
         streamChatRequest(
