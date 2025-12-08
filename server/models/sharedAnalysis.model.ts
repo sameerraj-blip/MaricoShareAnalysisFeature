@@ -49,6 +49,8 @@ export const createSharedAnalysisInvite = async ({
   note,
   dashboardId,
   dashboardEditable,
+  dashboardIds,
+  dashboardPermissions,
 }: {
   ownerEmail: string;
   targetEmail: string;
@@ -56,6 +58,8 @@ export const createSharedAnalysisInvite = async ({
   note?: string;
   dashboardId?: string;
   dashboardEditable?: boolean;
+  dashboardIds?: string[];
+  dashboardPermissions?: Record<string, 'view' | 'edit'>;
 }): Promise<SharedAnalysisInvite> => {
   if (!ownerEmail || !targetEmail) {
     const error = new Error("Both owner and target emails are required to share an analysis.");
@@ -93,6 +97,14 @@ export const createSharedAnalysisInvite = async ({
   }
 
   const timestamp = Date.now();
+  
+  // Use dashboardIds if provided, otherwise fall back to single dashboardId
+  const dashboardsToShare = dashboardIds && dashboardIds.length > 0 
+    ? dashboardIds 
+    : dashboardId 
+      ? [dashboardId] 
+      : [];
+
   const invite: SharedAnalysisInvite = {
     id: `shared_${sourceChat.id}_${timestamp}`,
     sourceSessionId,
@@ -103,26 +115,45 @@ export const createSharedAnalysisInvite = async ({
     createdAt: timestamp,
     note,
     preview: buildSharedAnalysisPreview(sourceChat),
-    dashboardId,
-    dashboardEditable,
+    dashboardId: dashboardsToShare[0], // Store first one for backward compatibility
+    dashboardEditable: dashboardPermissions 
+      ? dashboardPermissions[dashboardsToShare[0]] === 'edit'
+      : dashboardEditable,
   };
 
   const { resource } = await sharedContainer.items.create(invite);
 
-  // If dashboardId is provided, also create a dashboard share invite
-  if (dashboardId) {
+  // Create dashboard share invites for all selected dashboards
+  if (dashboardsToShare.length > 0) {
     try {
       const { createSharedDashboardInvite } = await import("./sharedDashboard.model.js");
-      await createSharedDashboardInvite({
-        ownerEmail: normalizedOwner,
-        targetEmail: normalizedTarget,
-        sourceDashboardId: dashboardId,
-        permission: dashboardEditable ? "edit" : "view",
-        note: note ? `Shared along with analysis: ${note}` : "Shared along with analysis",
-      });
-    } catch (dashboardError: any) {
+      
+      // Share all dashboards
+      await Promise.all(
+        dashboardsToShare.map(async (dashboardId) => {
+          const permission = dashboardPermissions 
+            ? dashboardPermissions[dashboardId] || 'view'
+            : dashboardEditable 
+              ? 'edit' 
+              : 'view';
+          
+          try {
+            await createSharedDashboardInvite({
+              ownerEmail: normalizedOwner,
+              targetEmail: normalizedTarget,
+              sourceDashboardId: dashboardId,
+              permission,
+              note: note ? `Shared along with analysis: ${note}` : "Shared along with analysis",
+            });
+          } catch (dashboardError: any) {
+            // Log error but continue with other dashboards
+            console.error(`Failed to create dashboard share invite for ${dashboardId}:`, dashboardError);
+          }
+        })
+      );
+    } catch (error: any) {
       // Log error but don't fail the analysis share if dashboard share fails
-      console.error("Failed to create dashboard share invite:", dashboardError);
+      console.error("Failed to create dashboard share invites:", error);
       // Continue with analysis share even if dashboard share fails
     }
   }

@@ -12,18 +12,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { sharedAnalysesApi, dashboardsApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { getUserEmail } from "@/utils/userStorage";
-import { X } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface ShareAnalysisDialogProps {
   open: boolean;
@@ -40,8 +33,8 @@ export const ShareAnalysisDialog = ({
 }: ShareAnalysisDialogProps) => {
   const [targetEmail, setTargetEmail] = useState("");
   const [note, setNote] = useState("");
-  const [selectedDashboardId, setSelectedDashboardId] = useState<string | undefined>(undefined);
-  const [dashboardEditable, setDashboardEditable] = useState(false);
+  // Map of dashboardId -> { editable: boolean }
+  const [selectedDashboards, setSelectedDashboards] = useState<Record<string, { editable: boolean }>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { toast } = useToast();
   const userEmail = getUserEmail();
@@ -74,8 +67,29 @@ export const ShareAnalysisDialog = ({
   const resetForm = () => {
     setTargetEmail("");
     setNote("");
-    setSelectedDashboardId(undefined);
-    setDashboardEditable(false);
+    setSelectedDashboards({});
+  };
+
+  const handleDashboardToggle = (dashboardId: string, checked: boolean) => {
+    if (checked) {
+      setSelectedDashboards(prev => ({
+        ...prev,
+        [dashboardId]: { editable: false }
+      }));
+    } else {
+      setSelectedDashboards(prev => {
+        const updated = { ...prev };
+        delete updated[dashboardId];
+        return updated;
+      });
+    }
+  };
+
+  const handleDashboardEditableToggle = (dashboardId: string, editable: boolean) => {
+    setSelectedDashboards(prev => ({
+      ...prev,
+      [dashboardId]: { editable }
+    }));
   };
 
   const handleClose = (next: boolean) => {
@@ -91,15 +105,25 @@ export const ShareAnalysisDialog = ({
     if (!sessionId || !targetEmail.trim()) return;
     setIsSubmitting(true);
     try {
+      const dashboardIds = Object.keys(selectedDashboards);
+      
+      // Share analysis with multiple dashboards
+      // For now, we'll share them one by one (backend will need to support array)
       await sharedAnalysesApi.share({
         sessionId,
         targetEmail: targetEmail.trim(),
         note: note.trim() || undefined,
-        dashboardId: selectedDashboardId || undefined,
-        isEditable: selectedDashboardId ? dashboardEditable : undefined,
+        dashboardIds: dashboardIds.length > 0 ? dashboardIds : undefined,
+        dashboardPermissions: dashboardIds.length > 0 
+          ? Object.fromEntries(
+              dashboardIds.map(id => [id, selectedDashboards[id].editable ? 'edit' : 'view'])
+            )
+          : undefined,
       });
-      const dashboardText = selectedDashboardId 
-        ? ` and dashboard "${(dashboardsData?.dashboards || []).find(d => d.id === selectedDashboardId)?.name || 'selected dashboard'}"`
+      
+      const dashboardCount = dashboardIds.length;
+      const dashboardText = dashboardCount > 0 
+        ? ` and ${dashboardCount} dashboard${dashboardCount > 1 ? 's' : ''}`
         : "";
       toast({
         title: "Invite sent",
@@ -154,65 +178,56 @@ export const ShareAnalysisDialog = ({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="share-dashboard">Share dashboard (optional)</Label>
-            <div className="flex gap-2">
-              <Select
-                value={selectedDashboardId || ""}
-                onValueChange={(value) => {
-                  setSelectedDashboardId(value);
-                }}
-                disabled={isSubmitting}
-              >
-                <SelectTrigger id="share-dashboard" className="flex-1">
-                  <SelectValue placeholder="Select a dashboard to share (optional)" />
-                </SelectTrigger>
-                <SelectContent>
-                  {isLoadingDashboards ? (
-                    <div className="px-2 py-1.5 text-sm text-muted-foreground">Loading...</div>
-                  ) : (dashboardsData?.dashboards || []).length === 0 ? (
-                    <div className="px-2 py-1.5 text-sm text-muted-foreground">No dashboards available</div>
-                  ) : (
-                    (dashboardsData?.dashboards || []).map((dashboard) => (
-                      <SelectItem key={dashboard.id} value={dashboard.id}>
-                        {dashboard.name}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-              {selectedDashboardId && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => {
-                    setSelectedDashboardId(undefined);
-                    setDashboardEditable(false);
-                  }}
-                  disabled={isSubmitting}
-                  className="flex-shrink-0"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              )}
-            </div>
+            <Label>Share dashboards (optional)</Label>
+            {isLoadingDashboards ? (
+              <div className="px-2 py-1.5 text-sm text-muted-foreground">Loading dashboards...</div>
+            ) : (dashboardsData?.dashboards || []).length === 0 ? (
+              <div className="px-2 py-1.5 text-sm text-muted-foreground">No dashboards available</div>
+            ) : (
+              <ScrollArea className="h-48 w-full rounded-md border p-4">
+                <div className="space-y-3">
+                  {(dashboardsData?.dashboards || []).map((dashboard) => {
+                    const isSelected = selectedDashboards[dashboard.id] !== undefined;
+                    const isEditable = selectedDashboards[dashboard.id]?.editable || false;
+                    return (
+                      <div key={dashboard.id} className="space-y-2">
+                        <div className="flex items-center space-x-2">
+                          <Checkbox
+                            id={`dashboard-${dashboard.id}`}
+                            checked={isSelected}
+                            onCheckedChange={(checked) => handleDashboardToggle(dashboard.id, checked === true)}
+                            disabled={isSubmitting}
+                          />
+                          <Label
+                            htmlFor={`dashboard-${dashboard.id}`}
+                            className="text-sm font-medium leading-none cursor-pointer flex-1"
+                          >
+                            {dashboard.name}
+                          </Label>
+                        </div>
+                        {isSelected && (
+                          <div className="flex items-center space-x-2 ml-6">
+                            <Checkbox
+                              id={`dashboard-editable-${dashboard.id}`}
+                              checked={isEditable}
+                              onCheckedChange={(checked) => handleDashboardEditableToggle(dashboard.id, checked === true)}
+                              disabled={isSubmitting}
+                            />
+                            <Label
+                              htmlFor={`dashboard-editable-${dashboard.id}`}
+                              className="text-sm font-normal cursor-pointer"
+                            >
+                              Allow editing
+                            </Label>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </ScrollArea>
+            )}
           </div>
-          {selectedDashboardId && (
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="dashboard-editable"
-                checked={dashboardEditable}
-                onCheckedChange={(checked) => setDashboardEditable(checked === true)}
-                disabled={isSubmitting}
-              />
-              <Label
-                htmlFor="dashboard-editable"
-                className="text-sm font-normal cursor-pointer"
-              >
-                Allow editing of dashboard
-              </Label>
-            </div>
-          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => handleClose(false)} disabled={isSubmitting}>

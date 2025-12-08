@@ -6,7 +6,15 @@ import {
 } from "@/shared/schema";
 
 export const sharedAnalysesApi = {
-  share: (payload: { sessionId: string; targetEmail: string; note?: string; dashboardId?: string; isEditable?: boolean }) =>
+  share: (payload: { 
+    sessionId: string; 
+    targetEmail: string; 
+    note?: string; 
+    dashboardId?: string; 
+    isEditable?: boolean;
+    dashboardIds?: string[];
+    dashboardPermissions?: Record<string, 'view' | 'edit'>;
+  }) =>
     api.post<{ invite: SharedAnalysisInvite }>("/api/shared-analyses", payload),
 
   getIncoming: () => api.get<SharedAnalysesResponse>("/api/shared-analyses/incoming"),

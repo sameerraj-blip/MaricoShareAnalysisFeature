@@ -77,18 +77,30 @@ export const shareAnalysisController = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Missing authenticated user email." });
     }
 
-    const { sessionId, targetEmail, note, dashboardId, isEditable } = req.body || {};
+    const { sessionId, targetEmail, note, dashboardId, isEditable, dashboardIds, dashboardPermissions } = req.body || {};
     if (!sessionId || !targetEmail) {
       return res.status(400).json({ error: "sessionId and targetEmail are required." });
     }
 
+    // Support both single dashboard (backward compatibility) and multiple dashboards
+    const dashboardIdsToShare = dashboardIds && dashboardIds.length > 0 
+      ? dashboardIds 
+      : dashboardId 
+        ? [dashboardId] 
+        : [];
+
+    // Create the analysis invite (store first dashboard ID for backward compatibility)
     const invite = await createSharedAnalysisInvite({
       ownerEmail,
       targetEmail: sanitizeEmail(targetEmail),
       sourceSessionId: sessionId,
       note,
-      dashboardId,
-      dashboardEditable: isEditable,
+      dashboardId: dashboardIdsToShare[0], // Store first one for backward compatibility
+      dashboardEditable: dashboardPermissions 
+        ? dashboardPermissions[dashboardIdsToShare[0]] === 'edit'
+        : isEditable,
+      dashboardIds: dashboardIdsToShare.length > 0 ? dashboardIdsToShare : undefined,
+      dashboardPermissions: dashboardPermissions,
     });
 
     res.status(201).json({ invite });
