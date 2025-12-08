@@ -47,11 +47,15 @@ export const createSharedAnalysisInvite = async ({
   targetEmail,
   sourceSessionId,
   note,
+  dashboardId,
+  dashboardEditable,
 }: {
   ownerEmail: string;
   targetEmail: string;
   sourceSessionId: string;
   note?: string;
+  dashboardId?: string;
+  dashboardEditable?: boolean;
 }): Promise<SharedAnalysisInvite> => {
   if (!ownerEmail || !targetEmail) {
     const error = new Error("Both owner and target emails are required to share an analysis.");
@@ -99,9 +103,30 @@ export const createSharedAnalysisInvite = async ({
     createdAt: timestamp,
     note,
     preview: buildSharedAnalysisPreview(sourceChat),
+    dashboardId,
+    dashboardEditable,
   };
 
   const { resource } = await sharedContainer.items.create(invite);
+
+  // If dashboardId is provided, also create a dashboard share invite
+  if (dashboardId) {
+    try {
+      const { createSharedDashboardInvite } = await import("./sharedDashboard.model.js");
+      await createSharedDashboardInvite({
+        ownerEmail: normalizedOwner,
+        targetEmail: normalizedTarget,
+        sourceDashboardId: dashboardId,
+        permission: dashboardEditable ? "edit" : "view",
+        note: note ? `Shared along with analysis: ${note}` : "Shared along with analysis",
+      });
+    } catch (dashboardError: any) {
+      // Log error but don't fail the analysis share if dashboard share fails
+      console.error("Failed to create dashboard share invite:", dashboardError);
+      // Continue with analysis share even if dashboard share fails
+    }
+  }
+
   return resource as SharedAnalysisInvite;
 };
 

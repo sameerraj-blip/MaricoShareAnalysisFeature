@@ -32,6 +32,9 @@ export interface DataOpsIntent {
   customValue?: any;
   targetType?: 'numeric' | 'string' | 'date' | 'percentage' | 'boolean';
   limit?: number;
+  previewMode?: 'first' | 'last' | 'specific' | 'range'; // For preview operations
+  previewStartRow?: number; // For specific row or range start (1-based)
+  previewEndRow?: number; // For range end (1-based)
   newColumnName?: string;
   expression?: string;
   defaultValue?: any; // For creating columns with static values
@@ -75,8 +78,24 @@ export async function parseDataOpsIntent(
   
   // ---------------------------------------------------------------------------
   // STEP 0: Strong explicit patterns that should ALWAYS create a new intent
+  // Use AI detection first, fall back to regex if AI doesn't detect
   // ---------------------------------------------------------------------------
   
+  // Try AI detection first for STEP 0 operations (replace_value, remove_column, remove_rows)
+  try {
+    const aiIntent = await detectDataOpsIntentWithAI(message, availableColumns);
+    if (aiIntent && 
+        (aiIntent.operation === 'replace_value' || 
+         aiIntent.operation === 'remove_column' || 
+         aiIntent.operation === 'remove_rows')) {
+      console.log(`✅ AI detected STEP 0 intent: ${aiIntent.operation}`);
+      return aiIntent;
+    }
+  } catch (error) {
+    console.error('⚠️ AI intent detection failed in STEP 0, falling back to regex:', error);
+  }
+  
+  // Fallback to regex patterns if AI didn't detect STEP 0 operations
   // Replace value intent - Handle multiple phrasings and edge cases
   // Examples: 
   // - "replace - with 0"
@@ -209,7 +228,7 @@ export async function parseDataOpsIntent(
     return null;
   }
   
-  // Try to extract replace value intent
+  // Try to extract replace value intent (regex fallback)
   const replaceIntent = extractReplaceValueIntent(message);
   if (replaceIntent) {
     return {
@@ -221,7 +240,7 @@ export async function parseDataOpsIntent(
     };
   }
   
-  // High-confidence "remove column" pattern – this should not be treated as
+  // High-confidence "remove column" pattern (regex fallback) – this should not be treated as
   // a clarification response even if we were previously asking about nulls.
   // Allow common typos like "remover"/"removing" by matching "remov*"
   const removeColumnRegex = /\b(remove|remov\w*|delete|drop)\s+(the\s+)?(column|col)\b/i;
@@ -244,7 +263,7 @@ export async function parseDataOpsIntent(
     }
   }
   
-  // High-confidence "remove row" patterns – handle explicit first/last/index
+  // High-confidence "remove row" patterns (regex fallback) – handle explicit first/last/index
   // directly before any clarification / AI logic so simple requests like
   // "remove the first row" just work.
   const lower = lowerMessage;
@@ -459,14 +478,110 @@ export async function parseDataOpsIntent(
     }
   }
   
-  // Preview intent
-  if (lowerMessage.includes('show') && (lowerMessage.includes('data') || lowerMessage.includes('rows'))) {
-    const limitMatch = lowerMessage.match(/(?:top|first|show)\s+(\d+)/i);
-    const limit = limitMatch ? parseInt(limitMatch[1], 10) : 50;
+  // Preview intent - handle first, last, specific rows, and ranges
+  if (lowerMessage.includes('show') && (lowerMessage.includes('data') || lowerMessage.includes('rows') || lowerMessage.includes('row'))) {
+    // Pattern 1: Range - handle multiple phrasings
+    // "show rows 12 to 28" or "show rows 12-28" or "show rows 12 through 28"
+    // "show me row from range 3 to 10 rows" or "row from range 3 to 10"
+    // "range 3 to 10 rows" or "rows from range 3 to 10"
+    let rangeMatch = lowerMessage.match(/rows?\s+(\d+)\s+(?:to|through|-)\s+(\d+)/i) ||
+                     lowerMessage.match(/row\s+from\s+range\s+(\d+)\s+to\s+(\d+)/i) ||
+                     lowerMessage.match(/range\s+(\d+)\s+to\s+(\d+)\s+rows?/i) ||
+                     lowerMessage.match(/rows?\s+from\s+range\s+(\d+)\s+to\s+(\d+)/i) ||
+                     lowerMessage.match(/from\s+range\s+(\d+)\s+to\s+(\d+)/i);
+    if (rangeMatch) {
+      const startRow = parseInt(rangeMatch[1], 10);
+      const endRow = parseInt(rangeMatch[2], 10);
+      if (startRow > 0 && endRow > 0 && endRow >= startRow) {
+        return {
+          operation: 'preview',
+          previewMode: 'range',
+          previewStartRow: startRow,
+          previewEndRow: endRow,
+          requiresClarification: false
+        };
+      }
+    }
     
+    // Pattern 2: Specific row - "show row 12" or "show the 12th row" or "show row number 12"
+    let specificMatch = lowerMessage.match(/(?:the\s+)?(\d+)(?:st|nd|rd|th)\s+row/i) || 
+                        lowerMessage.match(/row\s+(?:number\s+)?(\d+)/i) ||
+                        lowerMessage.match(/show\s+(?:the\s+)?row\s+(\d+)/i);
+    if (specificMatch) {
+      const rowNum = parseInt(specificMatch[1], 10);
+      if (rowNum > 0) {
+        return {
+          operation: 'preview',
+          previewMode: 'specific',
+          previewStartRow: rowNum,
+          requiresClarification: false
+        };
+      }
+    }
+    
+    // Pattern 3: Last N rows - "show last 5 rows" or "show me the last 10 rows"
+    let lastMatch = lowerMessage.match(/last\s+(\d+)\s+rows?/i) ||
+                    lowerMessage.match(/show\s+(?:me\s+)?(?:the\s+)?last\s+(\d+)\s+rows?/i);
+    if (lastMatch) {
+      const limit = parseInt(lastMatch[1], 10);
+      if (limit > 0) {
+        return {
+          operation: 'preview',
+          previewMode: 'last',
+          limit: Math.min(limit, 10000),
+          requiresClarification: false
+        };
+      }
+    }
+    
+    // Pattern 4: First N rows - "show first 10 rows" or "show me only first 10 rows"
+    let firstMatch = lowerMessage.match(/(?:first|top)\s+(\d+)\s+rows?/i) ||
+                     lowerMessage.match(/show\s+(?:me\s+)?(?:only\s+)?(?:the\s+)?(?:first|top)\s+(\d+)\s+rows?/i);
+    if (firstMatch) {
+      const limit = parseInt(firstMatch[1], 10);
+      if (limit > 0) {
+        return {
+          operation: 'preview',
+          previewMode: 'first',
+          limit: Math.min(limit, 10000),
+          requiresClarification: false
+        };
+      }
+    }
+    
+    // Pattern 5: Generic "show N rows" - defaults to first N
+    let genericMatch = lowerMessage.match(/show\s+(?:me\s+)?(?:only\s+)?(?:the\s+)?(\d+)\s+rows?/i);
+    if (genericMatch) {
+      const limit = parseInt(genericMatch[1], 10);
+      if (limit > 0) {
+        return {
+          operation: 'preview',
+          previewMode: 'first',
+          limit: Math.min(limit, 10000),
+          requiresClarification: false
+        };
+      }
+    }
+    
+    // Pattern 6: Simple "show N" or "first N" - defaults to first N
+    let simpleMatch = lowerMessage.match(/(?:show|first|top)\s+(\d+)/i);
+    if (simpleMatch) {
+      const limit = parseInt(simpleMatch[1], 10);
+      if (limit > 0) {
+        return {
+          operation: 'preview',
+          previewMode: 'first',
+          limit: Math.min(limit, 10000),
+          requiresClarification: false
+        };
+      }
+    }
+    
+    // Default: show first 50 rows
     return {
       operation: 'preview',
-      limit: Math.min(limit, 10000), // Cap at 10k
+      previewMode: 'first',
+      limit: 50,
       requiresClarification: false
     };
   }
@@ -851,8 +966,13 @@ Determine the intent and return JSON with this structure:
   "defaultValue": any (if creating static column),
   "transformType": "add" | "subtract" | "multiply" | "divide" (if modifying existing column),
   "transformValue": number (if modifying existing column),
-  "rowPosition": "first" | "last" (if removing rows),
-  "rowIndex": number (if removing row by index),
+  "limit": number (if preview operation with first/last mode, the number of rows to show, e.g., "show first 10 rows" -> limit: 10, default: 50),
+  "previewMode": "first" | "last" | "specific" | "range" (if preview operation, how to select rows),
+  "previewStartRow": number (if previewMode is "specific" or "range", the starting row number, 1-based),
+  "previewEndRow": number (if previewMode is "range", the ending row number, 1-based),
+  "rowPosition": "first" | "last" (if removing rows from start/end),
+  "rowIndex": number (if removing specific row by index, 1-based),
+  "rowCount": number (if removing multiple rows, e.g., "remove first 5 rows" or "remove last 3 rows"),
   "oldValue": any (if replace_value operation, the value to replace, null otherwise),
   "newValue": any (if replace_value operation, the value to replace with, null otherwise),
   "requiresClarification": false,
@@ -876,8 +996,13 @@ Operations:
   * Extract column, transformType, transformValue
 - "normalize_column": User wants to normalize or standardize an existing column
   * Extract column to normalize
-- "remove_rows": User wants to remove first/last or a specific row (e.g., "remove last row", "delete row 5")
-  * Extract rowPosition (first/last) or rowIndex (1-based)
+- "remove_rows": User wants to remove first/last or a specific row(s) (e.g., "remove last row", "delete row 5", "remove first 3 rows", "delete last 5 rows")
+  * Extract rowPosition (first/last) if removing from start/end
+  * Extract rowIndex (1-based) if removing a specific row by index
+  * Extract rowCount (number) if removing multiple rows (e.g., "remove first 5 rows" -> rowPosition: "first", rowCount: 5)
+- "remove_column": User wants to remove/delete/drop a column (e.g., "remove column X", "delete the column Y", "drop column Z")
+  * Extract column: the name of the column to remove
+  * If column name is not specified, set requiresClarification to true
 - "add_row": User wants to add/append a row (e.g., "add a new row", "append row at bottom")
 - "count_nulls": User wants to count/null values (e.g., "how many nulls", "count missing values")
 - "replace_value": User wants to replace a specific value with another. Handle various phrasings:
@@ -890,7 +1015,13 @@ Operations:
   * Extract newValue: the value to replace with (e.g., 0, 134.2, null, "N/A")
   * Extract column: if a specific column is mentioned
 - "describe": User wants general info about data (e.g., "how many rows", "describe the data", "what's in the dataset")
-- "preview": User wants to see data (e.g., "show data", "display rows")
+- "preview": User wants to see data. Handle various modes:
+  * "first" mode: "show first 10 rows", "show me only first 5 rows", "display top 20 rows" -> previewMode: "first", limit: 10/5/20
+  * "last" mode: "show last 5 rows", "show me the last 10 rows" -> previewMode: "last", limit: 5/10
+  * "specific" mode: "show row 12", "show the 12th row", "show row number 28" -> previewMode: "specific", previewStartRow: 12/28
+  * "range" mode: "show rows 12 to 28", "show rows 12-28", "show rows 12 through 28", "show me row from range 3 to 10 rows", "rows from range 3 to 10", "range 3 to 10 rows", "show me rows from range 5 to 15", "display rows from range 1 to 20" -> previewMode: "range", previewStartRow: 12/3/5/1, previewEndRow: 28/10/15/20
+  * IMPORTANT: When user says "show me row from range 3 to 10 rows", this means rows 3 through 10 (inclusive), so previewMode: "range", previewStartRow: 3, previewEndRow: 10
+  * If no specific mode is mentioned, default to "first" mode with limit: 50
 - "summary": User wants statistics summary
 - "remove_nulls": User wants to remove/handle nulls. IMPORTANT: If user says "fill null with mean/median/mode" or "impute null", set method to "mean"/"median"/"mode" and requiresClarification to false. If user says "remove null" or "delete null" without specifying fill/impute, default to asking for clarification.
 - "convert_type": User wants to convert column type
@@ -962,12 +1093,22 @@ Return ONLY valid JSON, no other text.`;
       newColumnName: parsed.newColumnName,
       expression: parsed.expression,
       defaultValue: parsed.defaultValue,
+      transformType: parsed.transformType,
+      transformValue: parsed.transformValue,
+      limit: parsed.limit,
+      previewMode: parsed.previewMode,
+      previewStartRow: parsed.previewStartRow,
+      previewEndRow: parsed.previewEndRow,
+      rowPosition: parsed.rowPosition,
+      rowIndex: parsed.rowIndex,
+      rowCount: parsed.rowCount,
       oldValue: parsed.oldValue,
       newValue: parsed.newValue,
       modelType: parsed.modelType,
       targetVariable: parsed.targetVariable,
       features: parsed.features,
       requiresClarification: method ? false : (parsed.requiresClarification || false),
+      clarificationType: parsed.clarificationType,
       clarificationMessage: parsed.clarificationMessage,
     } as DataOpsIntent;
   } catch (error) {
@@ -1932,11 +2073,52 @@ export async function executeDataOperation(
     }
     
     case 'preview': {
-      const result = await getDataPreview(data, intent.limit || 50);
+      let previewData: Record<string, any>[];
+      let answer: string;
+      
+      // Check for range first (even if previewMode is not explicitly set to 'range')
+      // This handles cases where AI might return previewStartRow and previewEndRow but miss previewMode
+      if ((intent.previewMode === 'range' || (!intent.previewMode && intent.previewStartRow && intent.previewEndRow)) 
+          && intent.previewStartRow && intent.previewEndRow) {
+        // Show range of rows (1-based indices)
+        const startIndex = intent.previewStartRow - 1;
+        const endIndex = intent.previewEndRow; // slice is exclusive, so use endIndex directly
+        if (startIndex >= 0 && startIndex < data.length && endIndex > startIndex && endIndex <= data.length) {
+          previewData = data.slice(startIndex, endIndex);
+          answer = `Showing rows ${intent.previewStartRow} to ${intent.previewEndRow} (${previewData.length} rows) of ${data.length} total rows:`;
+        } else {
+          return {
+            answer: `Invalid range. Rows ${intent.previewStartRow} to ${intent.previewEndRow} are out of range. The dataset has ${data.length} rows.`
+          };
+        }
+      } else if (intent.previewMode === 'last') {
+        // Show last N rows
+        const limit = intent.limit || 50;
+        const startIndex = Math.max(0, data.length - limit);
+        previewData = data.slice(startIndex);
+        answer = `Showing last ${previewData.length} of ${data.length} rows:`;
+      } else if (intent.previewMode === 'specific' && intent.previewStartRow) {
+        // Show specific row (1-based index)
+        const rowIndex = intent.previewStartRow - 1;
+        if (rowIndex >= 0 && rowIndex < data.length) {
+          previewData = [data[rowIndex]];
+          answer = `Showing row ${intent.previewStartRow} of ${data.length} rows:`;
+        } else {
+          return {
+            answer: `Row ${intent.previewStartRow} is out of range. The dataset has ${data.length} rows.`
+          };
+        }
+      } else {
+        // Default: first N rows (or use Python service for consistency)
+        const limit = intent.limit || 50;
+        const result = await getDataPreview(data, limit);
+        previewData = result.data;
+        answer = `Showing ${result.returned_rows} of ${result.total_rows} rows:`;
+      }
       
       return {
-        answer: `Showing ${result.returned_rows} of ${result.total_rows} rows:`,
-        preview: result.data
+        answer,
+        preview: previewData
       };
     }
     

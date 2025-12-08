@@ -8,6 +8,7 @@ import sessionRoutes from "./sessions.js";
 import dataRetrievalRoutes from "./dataRetrieval.js";
 import dashboardRoutes from "./dashboards.js";
 import sharedAnalysisRoutes from "./sharedAnalyses.js";
+import sharedDashboardRoutes from "./sharedDashboards.js";
 import dataOpsRoutes from "./dataOps.js";
 
 export function registerRoutes(app: Express): Server | void {
@@ -20,6 +21,7 @@ export function registerRoutes(app: Express): Server | void {
   app.use('/api/data', dataRetrievalRoutes);
   app.use('/api', dashboardRoutes);
   app.use('/api', sharedAnalysisRoutes);
+  app.use('/api', sharedDashboardRoutes);
   app.use('/api', dataOpsRoutes);
 
   // For Vercel, we don't need to create HTTP server

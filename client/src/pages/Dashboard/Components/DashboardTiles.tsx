@@ -24,6 +24,7 @@ interface DashboardTilesProps {
   onTileFiltersChange: (tileId: string, filters: ActiveChartFilters) => void;
   sheetId?: string;
   onUpdate?: () => void;
+  canEdit?: boolean; // Whether the user can edit this dashboard
 }
 
 const COLS = { lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 } as const;
@@ -187,6 +188,7 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
   onTileFiltersChange,
   sheetId,
   onUpdate,
+  canEdit = true, // Default to true for backward compatibility
 }) => {
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => loadHiddenTiles(dashboardId));
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -340,17 +342,19 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
                 <CardTitle className="text-base text-foreground">
                   {tile.title || `Chart ${tile.index + 1}`}
                 </CardTitle>
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                    aria-label="Remove chart from dashboard"
-                    onClick={() => handleDeleteClick(tile)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
+                {canEdit && (
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      aria-label="Remove chart from dashboard"
+                      onClick={() => handleDeleteClick(tile)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
               </div>
             </CardHeader>
             <CardContent className="flex min-h-0 flex-1 flex-col gap-3 pt-0 px-4">
@@ -379,31 +383,33 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
                 {tile.title && (
                   <CardTitle className="text-sm font-semibold text-primary flex-1 min-w-0">{tile.title}</CardTitle>
                 )}
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-primary hover:text-primary/80"
-                  aria-label="Edit insight"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (chartIndex >= 0) {
-                      setEditingTile({ type: 'insight', chartIndex, text: tile.narrative });
-                    }
-                  }}
-                >
-                  <Edit2 className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                  aria-label="Remove insight tile"
-                  onClick={() => handleDeleteClick(tile)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+                {canEdit && (
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-primary hover:text-primary/80"
+                      aria-label="Edit insight"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (chartIndex >= 0) {
+                          setEditingTile({ type: 'insight', chartIndex, text: tile.narrative });
+                        }
+                      }}
+                    >
+                      <Edit2 className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      aria-label="Remove insight tile"
+                      onClick={() => handleDeleteClick(tile)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
               </div>
             </CardHeader>
             <CardContent className="flex-1 overflow-auto pt-0 px-4 pb-4">
@@ -427,11 +433,11 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
         cols={COLS}
         rowHeight={ROW_HEIGHT}
         margin={GRID_MARGIN}
-        isResizable
-        isDraggable
-        resizeHandles={['s', 'e', 'n', 'w', 'se', 'sw', 'ne', 'nw']}
+        isResizable={canEdit}
+        isDraggable={canEdit}
+        resizeHandles={canEdit ? ['s', 'e', 'n', 'w', 'se', 'sw', 'ne', 'nw'] : []}
         onLayoutChange={handleLayoutChange}
-        draggableHandle=".dashboard-tile-grab-area"
+        draggableHandle={canEdit ? ".dashboard-tile-grab-area" : ""}
         compactType="vertical"
         preventCollision={false}
         draggableCancel="[data-dashboard-tile='chart'] button, [data-dashboard-tile='insight'] button"

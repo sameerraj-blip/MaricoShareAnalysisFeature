@@ -106,28 +106,9 @@ export class AgentOrchestrator {
         
         // Step 2: Extract operation from query (let DataOpsHandler use AI-based detection)
         this.emitThinkingStep(onThinkingStep, "Identifying data operation", "active");
-        // Don't pre-determine operation here - let DataOpsHandler's AI classifier handle it
+        // Let DataOpsHandler's AI classifier handle all operation identification
         // This allows better context-aware detection (e.g., feature engineering vs add_column)
         let operation: string | undefined;
-        
-        // Only do basic regex for obvious cases, let handler do AI detection for ambiguous ones
-        const queryLower = enrichedQuestion.toLowerCase();
-        if (queryLower.match(/\b(delete|remove|drop)\s+(row|rows?)\b/) || 
-            queryLower.match(/\b(delete|remove|drop)\s+.*\b(row|rows?)\b/)) {
-          operation = 'delete_rows';
-        } else if (queryLower.match(/\b(remove|delete|impute|fill)\s+null/)) {
-          operation = 'remove_nulls';
-        } else if (queryLower.match(/\b(convert|change)\s+type/)) {
-          operation = 'convert_type';
-        } else if (queryLower.match(/\b(delete|remove|drop)\s+(?:the\s+)?column\b/) ||
-                   queryLower.match(/\b(delete|remove|drop)\s+[a-z0-9_\s]+column\b/)) {
-          operation = 'remove_column';
-        } else if (queryLower.match(/\b(show|display|preview|give me|last|first|top)\s+.*rows?/i) || queryLower.match(/\brows?\b/)) {
-          operation = 'preview';
-        } else if (queryLower.match(/\b(summary|statistics|describe|stats)/)) {
-          operation = 'summary';
-        }
-        // For add_column/feature_engineering/update_column, let handler's AI classifier decide
         
         // Create intent for DataOpsHandler
         const intent: AnalysisIntent = {
