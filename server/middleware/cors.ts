@@ -31,6 +31,12 @@ export const corsConfig = cors({
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     const allowedOrigins = getAllowedOrigins();
     
+    // Debug logging
+    if (process.env.NODE_ENV === 'production') {
+      console.log('CORS Origin check:', origin);
+      console.log('NODE_ENV:', process.env.NODE_ENV);
+    }
+    
     // Allow requests with no origin (mobile apps, curl, Postman, etc.)
     if (!origin) {
       return callback(null, true);
@@ -41,8 +47,27 @@ export const corsConfig = cors({
       return callback(null, true);
     }
     
+    // Allow Vercel domains (works in both production and when NODE_ENV might not be set)
+    if (origin && origin.includes('.vercel.app')) {
+      console.log('Allowing Vercel domain:', origin);
+      return callback(null, true);
+    }
+    
+    // Allow Render domains (for backend-to-backend communication)
+    if (origin && origin.includes('.onrender.com')) {
+      console.log('Allowing Render domain:', origin);
+      return callback(null, true);
+    }
+    
+    // Allow localhost in development
+    if (origin && origin.includes('localhost')) {
+      console.log('Allowing localhost:', origin);
+      return callback(null, true);
+    }
+    
     // Block origin not in allowed list
     console.warn('CORS blocked origin:', origin);
+    console.warn('Allowed origins:', allowedOrigins);
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
