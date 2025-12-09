@@ -15,6 +15,7 @@ import {
 import { enrichCharts, validateAndEnrichResponse } from "./chatResponse.service.js";
 import { sendSSE, setSSEHeaders } from "../../utils/sse.helper.js";
 import { loadLatestData } from "../../utils/dataLoader.js";
+import { classifyMode } from "../../lib/agents/modeClassifier.js";
 import { Response } from "express";
 
 export interface ProcessStreamChatParams {
@@ -24,16 +25,43 @@ export interface ProcessStreamChatParams {
   targetTimestamp?: number;
   username: string;
   res: Response;
+  mode?: 'general' | 'analysis' | 'dataOps' | 'modeling'; // Optional mode override
 }
 
 /**
  * Process a streaming chat message
  */
 export async function processStreamChat(params: ProcessStreamChatParams): Promise<void> {
-  const { sessionId, message, chatHistory, targetTimestamp, username, res } = params;
+  const { sessionId, message, chatHistory, targetTimestamp, username, res, mode } = params;
 
   // Set SSE headers
   setSSEHeaders(res);
+
+  // Track if client disconnected
+  let clientDisconnected = false;
+
+  // Handle client disconnect/abort
+  const checkConnection = (): boolean => {
+    if (res.writableEnded || res.destroyed || !res.writable) {
+      clientDisconnected = true;
+      return false;
+    }
+    return true;
+  };
+
+  // Set up connection close handlers
+  res.on('close', () => {
+    clientDisconnected = true;
+    console.log('🚫 Client disconnected from chat stream');
+  });
+
+  res.on('error', (error: any) => {
+    // ECONNRESET, EPIPE, ECONNABORTED are expected when client disconnects
+    if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
+      console.error('SSE connection error:', error);
+    }
+    clientDisconnected = true;
+  });
 
   try {
     // If targetTimestamp is provided, this is an edit operation
@@ -78,6 +106,55 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       sendSSE(res, 'thinking', step);
     };
 
+    // Check connection before processing
+    if (!checkConnection()) {
+      return;
+    }
+
+    // Determine mode: use provided mode (user override) or auto-detect
+    // Treat 'general' the same as no mode (auto-detect)
+    const shouldAutoDetect = !mode || mode === 'general';
+    let detectedMode: 'analysis' | 'dataOps' | 'modeling' = mode && mode !== 'general' ? mode : 'analysis';
+    
+    if (shouldAutoDetect) {
+      // Auto-detect mode using AI classifier
+      try {
+        onThinkingStep({
+          step: 'Detecting query type',
+          status: 'active',
+          timestamp: Date.now(),
+        });
+        
+        const modeClassification = await classifyMode(
+          message,
+          chatHistory || [],
+          chatDocument.dataSummary
+        );
+        
+        detectedMode = modeClassification.mode;
+        
+        onThinkingStep({
+          step: 'Detecting query type',
+          status: 'completed',
+          timestamp: Date.now(),
+          details: `Detected: ${detectedMode} (confidence: ${(modeClassification.confidence * 100).toFixed(0)}%)`,
+        });
+        
+        console.log(`🎯 Auto-detected mode: ${detectedMode} (confidence: ${modeClassification.confidence.toFixed(2)})`);
+      } catch (error) {
+        console.error('⚠️ Mode classification failed, defaulting to analysis:', error);
+        onThinkingStep({
+          step: 'Detecting query type',
+          status: 'completed',
+          timestamp: Date.now(),
+          details: 'Using default: analysis',
+        });
+        detectedMode = 'analysis';
+      }
+    } else {
+      console.log(`🎯 Using user-specified mode: ${mode}`);
+    }
+
     // Answer the question with streaming using the latest data
     const result = await answerQuestion(
       latestData,
@@ -86,16 +163,46 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       chatDocument.dataSummary,
       sessionId,
       chatLevelInsights,
-      onThinkingStep
+      onThinkingStep,
+      detectedMode
     );
+
+    // Check connection after processing
+    if (!checkConnection()) {
+      return;
+    }
 
     // Enrich charts
     if (result.charts && Array.isArray(result.charts)) {
       result.charts = await enrichCharts(result.charts, chatDocument, chatLevelInsights);
     }
 
+    // Check connection after enriching charts
+    if (!checkConnection()) {
+      return;
+    }
+
     // Validate and enrich response
     const validated = validateAndEnrichResponse(result, chatDocument, chatLevelInsights);
+
+    // Transform data operations response format for frontend compatibility
+    // Frontend expects 'preview' and 'summary', but orchestrator returns 'table' and 'operationResult'
+    const transformedResponse: any = { ...validated };
+    if (result.table && Array.isArray(result.table)) {
+      transformedResponse.preview = result.table;
+      console.log(`📊 Transformed table to preview: ${result.table.length} rows`);
+    }
+    if (result.operationResult) {
+      if (result.operationResult.summary && Array.isArray(result.operationResult.summary)) {
+        transformedResponse.summary = result.operationResult.summary;
+        console.log(`📋 Transformed operationResult.summary to summary: ${result.operationResult.summary.length} items`);
+      }
+    }
+
+    // Check connection before generating suggestions
+    if (!checkConnection()) {
+      return;
+    }
 
     // Generate AI suggestions
     let suggestions: string[] = [];
@@ -103,18 +210,24 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       const updatedChatHistory = [
         ...(chatHistory || []),
         { role: 'user' as const, content: message, timestamp: Date.now() },
-        { role: 'assistant' as const, content: validated.answer, timestamp: Date.now() }
+        { role: 'assistant' as const, content: transformedResponse.answer, timestamp: Date.now() }
       ];
       suggestions = await generateAISuggestions(
         updatedChatHistory,
         chatDocument.dataSummary,
-        validated.answer
+        transformedResponse.answer
       );
     } catch (error) {
       console.error('Failed to generate suggestions:', error);
     }
 
-    // Save messages
+    // Check connection before saving messages
+    if (!checkConnection()) {
+      console.log('🚫 Client disconnected, skipping message save');
+      return;
+    }
+
+    // Save messages only if client is still connected
     try {
       const userEmail = username?.toLowerCase();
       await addMessagesBySessionId(sessionId, [
@@ -126,9 +239,9 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
         },
         {
           role: 'assistant',
-          content: validated.answer,
-          charts: validated.charts,
-          insights: validated.insights,
+          content: transformedResponse.answer,
+          charts: transformedResponse.charts,
+          insights: transformedResponse.insights,
           timestamp: Date.now(),
         },
       ]);
@@ -137,19 +250,36 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       console.error("⚠️ Failed to save messages to CosmosDB:", cosmosError);
     }
 
-    // Send final response
-    sendSSE(res, 'response', {
-      ...validated,
+    // Check connection before sending response
+    if (!checkConnection()) {
+      return;
+    }
+
+    // Send final response with preview/summary for data operations
+    if (!sendSSE(res, 'response', {
+      ...transformedResponse,
       suggestions,
-    });
-    sendSSE(res, 'done', {});
+    })) {
+      return; // Client disconnected
+    }
+
+    if (!sendSSE(res, 'done', {})) {
+      return; // Client disconnected
+    }
+
+    if (!res.writableEnded && !res.destroyed) {
     res.end();
+    }
     console.log('✅ Stream completed successfully');
   } catch (error) {
     console.error('Chat stream error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Failed to process message';
+    if (checkConnection()) {
     sendSSE(res, 'error', { message: errorMessage });
+    }
+    if (!res.writableEnded && !res.destroyed) {
     res.end();
+    }
   }
 }
 

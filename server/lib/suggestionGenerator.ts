@@ -11,24 +11,37 @@ export async function generateAISuggestions(
     .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.substring(0, 200)}`)
     .join('\n');
 
+  // Build column context for better suggestions
+  const allColumnNames = dataSummary.columns.map(c => c.name).slice(0, 20).join(', ');
+  const columnTypes = dataSummary.columns.slice(0, 10).map(c => `- ${c.name} (${c.datatype})`).join('\n');
+  
   const prompt = `You are a helpful data analyst assistant. Based on the conversation history and data context, generate 3-4 concise, actionable follow-up questions that would be natural next steps for the user to ask.
 
-CONVERSATION CONTEXT:
-${conversationContext}
+${conversationContext ? `CONVERSATION CONTEXT:\n${conversationContext}\n` : 'NO CONVERSATION HISTORY - This is a new dataset upload. Generate initial exploratory questions based on the data structure.\n'}
 
 ${lastAnswer ? `LAST ASSISTANT RESPONSE:\n${lastAnswer.substring(0, 500)}\n` : ''}
 
 AVAILABLE DATA COLUMNS:
+${columnTypes}
+- Total columns: ${dataSummary.columns.length}
 - Numeric columns: ${dataSummary.numericColumns.slice(0, 10).join(', ')}
 - Date columns: ${dataSummary.dateColumns.slice(0, 5).join(', ')}
-- Total columns: ${dataSummary.columns.length}
+
+${!conversationContext ? `IMPORTANT: Since this is a new dataset, generate questions that:
+- Are specific to the actual column names in the dataset (use exact column names from the list above)
+- Explore relationships between columns (e.g., "What affects [column name]?" where [column name] is from the numeric columns)
+- Ask about trends over time if date columns exist
+- Compare different columns or ask about top performers
+- Make questions relevant to the domain (e.g., if columns contain "nGRP", "TOM", "Adstocked", these might be marketing/media metrics)
+- Avoid generic questions like "What affects revenue?" if "revenue" is not in the column names
+` : ''}
 
 GUIDELINES:
-- Generate questions that are relevant to the current conversation
-- Make them specific and actionable (e.g., "What affects revenue?" not "Tell me more")
+- Generate questions that are relevant to the current conversation${!conversationContext ? ' and the actual data structure' : ''}
+- Make them specific and actionable (e.g., "What affects ${dataSummary.numericColumns[0] || 'the data'}?" not "Tell me more")
+- Use actual column names from the dataset when possible
 - Vary the question types (correlation, trends, comparisons, etc.)
 - Keep each question under 10 words
-- If no conversation history, suggest general exploratory questions
 - Focus on the most interesting or relevant columns mentioned
 
 Output JSON only:

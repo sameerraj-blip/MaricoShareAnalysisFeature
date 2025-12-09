@@ -3,6 +3,7 @@
  * Thin controller layer for chat endpoints - delegates to services
  */
 import { Request, Response } from "express";
+import type { Request as ExpressRequest } from "express";
 import { processChatMessage } from "../services/chat/chat.service.js";
 import { createErrorResponse } from "../services/chat/chatResponse.service.js";
 import { processStreamChat, streamChatMessages } from "../services/chat/chatStream.service.js";
@@ -57,16 +58,21 @@ export const chatWithAI = async (req: Request, res: Response) => {
 export const chatWithAIStream = async (req: Request, res: Response) => {
   try {
     console.log('📨 chatWithAIStream() called');
-    const { sessionId, message, chatHistory, targetTimestamp } = req.body;
+    const { sessionId, message, chatHistory, targetTimestamp, mode } = req.body;
     const username = requireUsername(req);
 
-    console.log('📥 Request body:', { sessionId, message: message?.substring(0, 50), chatHistoryLength: chatHistory?.length, targetTimestamp });
+    console.log('📥 Request body:', { sessionId, message: message?.substring(0, 50), chatHistoryLength: chatHistory?.length, targetTimestamp, mode });
 
     // Validate required fields
     if (!sessionId || !message) {
       console.log('❌ Missing required fields');
       return;
     }
+
+    // Validate mode if provided (treat 'general' as undefined for auto-detection)
+    const validMode = mode && ['general', 'analysis', 'dataOps', 'modeling'].includes(mode) 
+      ? (mode === 'general' ? undefined : mode)
+      : undefined;
 
     // Process streaming chat
     await processStreamChat({
@@ -76,6 +82,7 @@ export const chatWithAIStream = async (req: Request, res: Response) => {
       targetTimestamp,
       username,
       res,
+      mode: validMode,
     });
   } catch (error) {
     console.error('Chat stream error:', error);
@@ -111,7 +118,7 @@ export const streamChatMessagesController = async (req: Request, res: Response) 
     }
 
     // Stream messages
-    await streamChatMessages(sessionId, username, req, res);
+    await streamChatMessages(sessionId, username, req as ExpressRequest, res);
   } catch (error) {
     console.error("streamChatMessagesController error:", error);
     // Error handling is done in the service

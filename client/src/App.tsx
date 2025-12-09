@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation, Router as WouterRouter } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -18,48 +18,80 @@ import { MsalProvider } from '@azure/msal-react';
 import { createMsalConfig } from '@/auth/msalConfig';
 
 type PageType = 'home' | 'dashboard' | 'analysis';
+type ModeType = 'analysis' | 'dataOps' | 'modeling';
 
 function Router() {
-  const [currentPage, setCurrentPage] = useState<PageType>('home');
+  const [location, setLocation] = useLocation();
   const [resetTrigger, setResetTrigger] = useState(0);
   const [loadedSessionData, setLoadedSessionData] = useState<any>(null);
 
+  // Extract mode from URL path
+  const getModeFromPath = (path: string): ModeType => {
+    if (path.startsWith('/data-ops')) return 'dataOps';
+    if (path.startsWith('/modeling')) return 'modeling';
+    return 'analysis'; // default
+  };
+
+  // Extract page type from location
+  const getCurrentPage = (): PageType => {
+    if (location.startsWith('/dashboard')) return 'dashboard';
+    if (location === '/analysis/history' || location.startsWith('/analysis/history')) return 'analysis';
+    // For /analysis, /data-ops, /modeling - these are chat interfaces, so return 'home'
+    return 'home';
+  };
+
   const handleNavigate = (page: PageType) => {
-    setCurrentPage(page);
+    if (page === 'home') {
+      // Navigate to chat interface (default to analysis mode)
+      setLocation('/analysis');
+    } else if (page === 'dashboard') {
+      setLocation('/dashboard');
+    } else if (page === 'analysis') {
+      // Navigate to analysis history page
+      setLocation('/analysis/history');
+    }
   };
 
   const handleNewChat = () => {
-    setCurrentPage('home');
-    setLoadedSessionData(null); // Clear any loaded session data
+    const currentMode = getModeFromPath(location);
+    setLocation(`/${currentMode === 'dataOps' ? 'data-ops' : currentMode === 'modeling' ? 'modeling' : 'analysis'}`);
+    setLoadedSessionData(null);
   };
 
   const handleUploadNew = () => {
-    setCurrentPage('home');
-    setResetTrigger(prev => prev + 1); // Trigger reset only for new uploads
-    setLoadedSessionData(null); // Clear any loaded session data
+    const currentMode = getModeFromPath(location);
+    setLocation(`/${currentMode === 'dataOps' ? 'data-ops' : currentMode === 'modeling' ? 'modeling' : 'analysis'}`);
+    setResetTrigger(prev => prev + 1);
+    setLoadedSessionData(null);
   };
 
   const handleLoadSession = (sessionId: string, sessionData: any) => {
     console.log('🔄 Loading session in App:', sessionId, sessionData);
     setLoadedSessionData(sessionData);
-    setCurrentPage('home'); // Navigate to home page with loaded session
+    // Navigate to chat interface (default to analysis mode) when loading a session
+    setLocation('/analysis');
   };
 
-  const renderPage = () => {
-    return (
-      <>
-        <div className={currentPage === 'home' ? 'block' : 'hidden'}>
-          <Home resetTrigger={resetTrigger} loadedSessionData={loadedSessionData} />
-        </div>
-        <div className={currentPage === 'dashboard' ? 'block' : 'hidden'}>
-          <Dashboard />
-        </div>
-        <div className={currentPage === 'analysis' ? 'block' : 'hidden'}>
-          <Analysis onNavigate={handleNavigate} onNewChat={handleNewChat} onLoadSession={handleLoadSession} onUploadNew={handleUploadNew} />
-        </div>
-      </>
-    );
+  const handleModeChange = (mode: ModeType) => {
+    const basePath = location.split('/').slice(0, -1).join('/') || '';
+    if (mode === 'dataOps') {
+      setLocation('/data-ops');
+    } else if (mode === 'modeling') {
+      setLocation('/modeling');
+    } else {
+      setLocation('/analysis');
+    }
   };
+
+  // Redirect root to /analysis
+  useEffect(() => {
+    if (location === '/') {
+      setLocation('/analysis');
+    }
+  }, [location, setLocation]);
+
+  const currentPage = getCurrentPage();
+  const currentMode = getModeFromPath(location);
 
   return (
     <Layout 
@@ -68,7 +100,41 @@ function Router() {
       onNewChat={handleNewChat}
       onUploadNew={handleUploadNew}
     >
-      {renderPage()}
+      <Switch>
+        <Route path="/analysis/history">
+          <Analysis onNavigate={handleNavigate} onNewChat={handleNewChat} onLoadSession={handleLoadSession} onUploadNew={handleUploadNew} />
+        </Route>
+        <Route path="/analysis">
+          <Home 
+            resetTrigger={resetTrigger} 
+            loadedSessionData={loadedSessionData}
+            initialMode="analysis"
+            onModeChange={handleModeChange}
+          />
+        </Route>
+        <Route path="/data-ops">
+          <Home 
+            resetTrigger={resetTrigger} 
+            loadedSessionData={loadedSessionData}
+            initialMode="dataOps"
+            onModeChange={handleModeChange}
+          />
+        </Route>
+        <Route path="/modeling">
+          <Home 
+            resetTrigger={resetTrigger} 
+            loadedSessionData={loadedSessionData}
+            initialMode="modeling"
+            onModeChange={handleModeChange}
+          />
+        </Route>
+        <Route path="/dashboard">
+          <Dashboard />
+        </Route>
+        <Route>
+          <NotFound />
+        </Route>
+      </Switch>
     </Layout>
   );
 }
@@ -95,7 +161,11 @@ function AuthRedirectHandler() {
     return <AuthCallback />;
   }
 
-  return <Router />;
+  return (
+    <WouterRouter>
+      <Router />
+    </WouterRouter>
+  );
 }
 
 // Create MSAL instance with dynamic config

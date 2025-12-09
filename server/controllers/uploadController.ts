@@ -1,11 +1,12 @@
 import { Request, Response } from "express";
 import multer from "multer";
-import { parseFile, createDataSummary } from "../lib/fileParser.js";
+import { parseFile, createDataSummary, convertDashToZeroForNumericColumns } from "../lib/fileParser.js";
 import { analyzeUpload } from "../lib/dataAnalyzer.js";
 import { uploadResponseSchema } from "../shared/schema.js";
 import { createChatDocument, generateColumnStatistics } from "../models/chat.model.js";
 import { uploadFileToBlob } from "../lib/blobStorage.js";
 import { chunkData, generateChunkEmbeddings, clearVectorStore } from "../lib/ragService.js";
+import { generateAISuggestions } from "../lib/suggestionGenerator.js";
 
 export const uploadFile = async (
   req: Request & { file?: Express.Multer.File },
@@ -36,18 +37,33 @@ export const uploadFile = async (
     }
 
     // Parse the file
-    const data = await parseFile(req.file.buffer, req.file.originalname);
+    let data = await parseFile(req.file.buffer, req.file.originalname);
     
     if (data.length === 0) {
       return res.status(400).json({ error: 'No data found in file' });
     }
 
-    // Create data summary
+    // Create data summary to determine column types
     const summary = createDataSummary(data);
+    
+    // Convert "-" values to 0 for numerical columns
+    // This ensures that dash placeholders in numeric columns are treated as 0, not null
+    data = convertDashToZeroForNumericColumns(data, summary.numericColumns);
 
     // Analyze data with AI
     console.log('🤖 Starting AI analysis...');
     const { charts, insights } = await analyzeUpload(data, summary, req.file.originalname);
+    
+    // Generate AI suggestions based on the data (no conversation history yet)
+    console.log('💡 Generating AI suggestions based on data...');
+    let suggestions: string[] = [];
+    try {
+      suggestions = await generateAISuggestions([], summary); // Empty chat history for initial upload
+      console.log('✅ Generated suggestions:', suggestions);
+    } catch (suggestionError) {
+      console.error('Failed to generate AI suggestions:', suggestionError);
+      // Continue without suggestions - will use fallback
+    }
     
     console.log('📊 === CHART GENERATION RESULTS ===');
     console.log(`Generated ${charts.length} charts:`);
@@ -151,6 +167,7 @@ export const uploadFile = async (
       charts: sanitizedCharts,
       insights,
       sampleRows, // Use the sampleRows we already created
+      suggestions: suggestions.length > 0 ? suggestions : undefined, // Include AI-generated suggestions
       chatId: chatDocument?.id, // Include chat document ID if created
       blobInfo: blobInfo ? {
         blobUrl: blobInfo.blobUrl,

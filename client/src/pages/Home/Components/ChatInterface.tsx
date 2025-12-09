@@ -3,9 +3,7 @@ import { Message, ThinkingStep } from '@/shared/schema';
 import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Upload as UploadIcon, Square, Filter, Database } from 'lucide-react';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
+import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import {
   Select,
@@ -37,8 +35,8 @@ interface ChatInterfaceProps {
   thinkingTargetTimestamp?: number | null;
   aiSuggestions?: string[]; // AI-generated suggestions
   collaborators?: string[]; // List of all collaborators in the session
-  dataOpsMode?: boolean; // Data Ops mode toggle state
-  onDataOpsModeChange?: (enabled: boolean) => void; // Callback for mode change
+  mode?: 'general' | 'analysis' | 'dataOps' | 'modeling'; // Current mode
+  onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void; // Callback for mode change
 }
 
 // Dynamic suggestions based on conversation context
@@ -102,8 +100,8 @@ export function ChatInterface({
   thinkingTargetTimestamp,
   aiSuggestions,
   collaborators: propCollaborators,
-  dataOpsMode = false,
-  onDataOpsModeChange,
+  mode = 'analysis',
+  onModeChange,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
@@ -449,25 +447,6 @@ export function ChatInterface({
       {/* Input Area */}
       <div className="sticky bottom-0 bg-white/95 backdrop-blur-sm border-t border-gray-100">
         <div className="max-w-6xl mx-auto px-4 py-4">
-          {/* Data Ops Mode Toggle */}
-          {onDataOpsModeChange && (
-            <div className="mb-3 flex items-center justify-center gap-2">
-              <Label htmlFor="data-ops-toggle" className="text-sm font-medium text-gray-700 cursor-pointer flex items-center gap-2">
-                <Database className="w-4 h-4" />
-                <span>Analysis</span>
-              </Label>
-              <Switch
-                id="data-ops-toggle"
-                checked={dataOpsMode}
-                onCheckedChange={onDataOpsModeChange}
-                className="data-[state=checked]:bg-primary"
-              />
-              <Label htmlFor="data-ops-toggle" className="text-sm font-medium text-gray-700 cursor-pointer flex items-center gap-2">
-                <span>Data Ops</span>
-                <Database className="w-4 h-4" />
-              </Label>
-            </div>
-          )}
           {filteredMessages.length === 0 && messages.length > 0 && (
             <div className="mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">
@@ -517,6 +496,53 @@ export function ChatInterface({
           )}
           
           <form onSubmit={handleSubmit} className="flex items-end gap-2">
+            {/* Mode Selector Dropdown - Inline with input */}
+            {onModeChange && (
+              <div className="flex-shrink-0">
+                <Select value={mode} onValueChange={(value: 'general' | 'analysis' | 'dataOps' | 'modeling') => onModeChange(value)}>
+                  <SelectTrigger className="h-11 px-4 text-sm font-medium border-2 border-gray-200 bg-white hover:bg-gray-50 focus:ring-2 focus:ring-primary/40 focus:border-primary shadow-sm rounded-xl min-w-[170px]">
+                    <div className="flex items-center gap-2">
+                      {mode === 'general' && <Sparkles className="w-4 h-4 text-gray-600" />}
+                      {mode === 'analysis' && <BarChart3 className="w-4 h-4 text-gray-600" />}
+                      {mode === 'dataOps' && <Database className="w-4 h-4 text-gray-600" />}
+                      {mode === 'modeling' && <Settings className="w-4 h-4 text-gray-600" />}
+                      <span className="font-medium text-gray-900">
+                        {mode === 'general' && 'General'}
+                        {mode === 'analysis' && 'Analysis'}
+                        {mode === 'dataOps' && 'Data Operation'}
+                        {mode === 'modeling' && 'Modeling'}
+                      </span>
+                    </div>
+                  </SelectTrigger>
+                  <SelectContent side="top" sideOffset={8} className="min-w-[170px]">
+                    <SelectItem value="general">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-4 h-4" />
+                        <span>General (Auto-detect)</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="analysis">
+                      <div className="flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4" />
+                        <span>Analysis</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="dataOps">
+                      <div className="flex items-center gap-2">
+                        <Database className="w-4 h-4" />
+                        <span>Data Operation</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="modeling">
+                      <div className="flex items-center gap-2">
+                        <Settings className="w-4 h-4" />
+                        <span>Modeling</span>
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div className="relative flex-1">
               <Textarea
                 ref={inputRef}

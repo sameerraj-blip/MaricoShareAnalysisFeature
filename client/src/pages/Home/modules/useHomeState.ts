@@ -12,7 +12,7 @@ export interface HomeState {
   dateColumns: string[];
   totalRows: number;
   totalColumns: number;
-  dataOpsMode: boolean;
+  mode: 'general' | 'analysis' | 'dataOps' | 'modeling';
 }
 
 export const useHomeState = () => {
@@ -26,26 +26,29 @@ export const useHomeState = () => {
   const [dateColumns, setDateColumns] = useState<string[]>([]);
   const [totalRows, setTotalRows] = useState<number>(0);
   const [totalColumns, setTotalColumns] = useState<number>(0);
-  const [dataOpsMode, setDataOpsMode] = useState<boolean>(false);
+  const [mode, setMode] = useState<'general' | 'analysis' | 'dataOps' | 'modeling'>('general');
 
-  // Load dataOpsMode from localStorage when sessionId changes
+  // Load mode from localStorage when sessionId changes
   useEffect(() => {
     if (sessionId) {
-      const stored = localStorage.getItem(`dataOpsMode_${sessionId}`);
-      if (stored !== null) {
-        setDataOpsMode(stored === 'true');
+      const stored = localStorage.getItem(`mode_${sessionId}`);
+      if (stored && (stored === 'general' || stored === 'analysis' || stored === 'dataOps' || stored === 'modeling')) {
+        setMode(stored as 'general' | 'analysis' | 'dataOps' | 'modeling');
+      } else {
+        // Default to 'general' if no stored mode or invalid value
+        setMode('general');
       }
     } else {
-      setDataOpsMode(false);
+      setMode('general');
     }
   }, [sessionId]);
 
-  // Save dataOpsMode to localStorage when it changes
+  // Save mode to localStorage when it changes
   useEffect(() => {
     if (sessionId) {
-      localStorage.setItem(`dataOpsMode_${sessionId}`, String(dataOpsMode));
+      localStorage.setItem(`mode_${sessionId}`, mode);
     }
-  }, [dataOpsMode, sessionId]);
+  }, [mode, sessionId]);
 
   const resetState = useCallback(() => {
     setSessionId(null);
@@ -58,7 +61,7 @@ export const useHomeState = () => {
     setDateColumns([]);
     setTotalRows(0);
     setTotalColumns(0);
-    setDataOpsMode(false);
+    setMode('general');
   }, []);
 
   return {
@@ -73,7 +76,7 @@ export const useHomeState = () => {
     dateColumns,
     totalRows,
     totalColumns,
-    dataOpsMode,
+    mode,
     
     // State setters
     setSessionId,
@@ -86,7 +89,7 @@ export const useHomeState = () => {
     setDateColumns,
     setTotalRows,
     setTotalColumns,
-    setDataOpsMode,
+    setMode,
     
     // Helper functions
     resetState,

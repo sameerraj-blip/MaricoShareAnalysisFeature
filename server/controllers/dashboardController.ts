@@ -38,7 +38,45 @@ export const listDashboardsController = async (req: Request, res: Response) => {
   try {
     const username = (req.query.username || req.headers['x-user-email'] || 'anonymous@example.com') as string;
     const dashboards = await getUserDashboards(username);
-    res.json({ dashboards });
+    
+    // Also get shared dashboards that the user has accepted
+    const { listSharedDashboardsForUser } = await import("../models/sharedDashboard.model.js");
+    const { waitForDashboardsContainer } = await import("../models/database.config.js");
+    const normalizedUsername = username.toLowerCase();
+    const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+    
+    // Get accepted shared dashboards
+    const acceptedInvites = sharedInvites.filter(invite => invite.status === "accepted");
+    const sharedDashboards = await Promise.all(
+      acceptedInvites.map(async (invite) => {
+        try {
+          // Get dashboard using owner's username (partition key)
+          const dashboardsContainer = await waitForDashboardsContainer();
+          const { resource } = await dashboardsContainer.item(invite.sourceDashboardId, invite.ownerEmail).read();
+          const dashboard = resource as unknown as typeof dashboards[0];
+          
+          if (dashboard) {
+            // Add permission and shared flag to the dashboard
+            return {
+              ...dashboard,
+              isShared: true,
+              sharedPermission: invite.permission,
+              sharedBy: invite.ownerEmail,
+            };
+          }
+          return null;
+        } catch (error) {
+          console.error(`Failed to fetch shared dashboard ${invite.sourceDashboardId}:`, error);
+          return null;
+        }
+      })
+    );
+    
+    // Filter out null values and merge with owned dashboards
+    const validSharedDashboards = sharedDashboards.filter((d): d is NonNullable<typeof d> => d !== null);
+    const allDashboards = [...dashboards, ...validSharedDashboards];
+    
+    res.json({ dashboards: allDashboards });
   } catch (error: any) {
     res.status(500).json({ error: error?.message || 'Failed to fetch dashboards' });
   }
@@ -76,9 +114,13 @@ export const addChartToDashboardController = async (req: Request, res: Response)
     const username = (req.body.username || req.headers['x-user-email'] || 'anonymous@example.com') as string;
     const { dashboardId } = req.params as { dashboardId: string };
     const parsed = addChartToDashboardRequestSchema.parse(req.body);
+    
+    console.log(`[addChartToDashboard] Attempting to add chart to dashboard ${dashboardId} for user ${username}`);
+    
     const updated = await addChartToDashboard(dashboardId, username, parsed.chart, parsed.sheetId);
     res.json(updated);
   } catch (error: any) {
+    console.error(`[addChartToDashboard] Error:`, error);
     res.status(400).json({ error: error?.message || 'Failed to add chart' });
   }
 };

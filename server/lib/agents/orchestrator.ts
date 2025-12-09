@@ -106,32 +106,15 @@ export class AgentOrchestrator {
         
         // Step 2: Extract operation from query (let DataOpsHandler use AI-based detection)
         this.emitThinkingStep(onThinkingStep, "Identifying data operation", "active");
-        // Don't pre-determine operation here - let DataOpsHandler's AI classifier handle it
+        // Let DataOpsHandler's AI classifier handle all operation identification
         // This allows better context-aware detection (e.g., feature engineering vs add_column)
         let operation: string | undefined;
         
-        // Only do basic regex for obvious cases, let handler do AI detection for ambiguous ones
-        const queryLower = enrichedQuestion.toLowerCase();
-        if (queryLower.match(/\b(delete|remove|drop)\s+(row|rows?)\b/) || 
-            queryLower.match(/\b(delete|remove|drop)\s+.*\b(row|rows?)\b/)) {
-          operation = 'delete_rows';
-        } else if (queryLower.match(/\b(remove|delete|impute|fill)\s+null/)) {
-          operation = 'remove_nulls';
-        } else if (queryLower.match(/\b(convert|change)\s+type/)) {
-          operation = 'convert_type';
-        } else if (queryLower.match(/\b(delete|remove|drop)\s+(?:the\s+)?column\b/) ||
-                   queryLower.match(/\b(delete|remove|drop)\s+[a-z0-9_\s]+column\b/)) {
-          operation = 'remove_column';
-        } else if (queryLower.match(/\b(show|display|preview|give me|last|first|top)\s+.*rows?/i) || queryLower.match(/\brows?\b/)) {
-          operation = 'preview';
-        } else if (queryLower.match(/\b(summary|statistics|describe|stats)/)) {
-          operation = 'summary';
-        }
-        // For add_column/feature_engineering/update_column, let handler's AI classifier decide
-        
         // Create intent for DataOpsHandler
+        // Note: DataOpsHandler checks for type 'dataOps', but AnalysisIntent schema doesn't include it
+        // So we use 'custom' but ensure the handler can still process it via mode routing
         const intent: AnalysisIntent = {
-          type: 'dataOps' as const,
+          type: 'custom' as const,
           confidence: 1.0,
           customRequest: enrichedQuestion,
           operation: operation as any,
@@ -147,7 +130,6 @@ export class AgentOrchestrator {
           console.error('❌ DataOpsHandler not found!');
           return {
             answer: 'Data Operations handler is not available. Please contact support.',
-            error: 'DataOpsHandler not registered',
           };
         }
         
@@ -180,7 +162,6 @@ export class AgentOrchestrator {
             this.emitThinkingStep(onThinkingStep, "Performing data operation", "error", response.error);
             return {
               answer: response.answer || `Error: ${response.error}`,
-              error: response.error,
               table: response.table,
               operationResult: response.operationResult,
             };
@@ -205,13 +186,22 @@ export class AgentOrchestrator {
           this.emitThinkingStep(onThinkingStep, "Performing data operation", "error", error instanceof Error ? error.message : String(error));
           return {
             answer: `An error occurred while performing the data operation: ${error instanceof Error ? error.message : String(error)}`,
-            error: error instanceof Error ? error.message : String(error),
           };
         }
       }
       
       // ============================================
+      // MODELING MODE ROUTE
+      // Routes through analysis flow, but intent classifier will detect ml_model
+      // ============================================
+      if (mode === 'modeling') {
+        console.log(`🤖 Modeling Mode: Routing through analysis flow (will detect ml_model intent)`);
+        // Continue to analysis flow - intent classifier will handle ml_model detection
+      }
+      
+      // ============================================
       // ANALYSIS MODE ROUTE (existing logic)
+      // Also handles modeling mode (routes through same flow)
       // ============================================
       
       this.emitThinkingStep(onThinkingStep, "Understanding your question", "active");

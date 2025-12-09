@@ -6,6 +6,7 @@ import PptxGenJS from 'pptxgenjs';
 import { DashboardSection, DashboardTile } from '../types';
 import { DashboardHeader } from './DashboardHeader';
 import { DashboardTiles } from './DashboardTiles';
+import { ShareDashboardDialog } from './ShareDashboardDialog';
 import { ActiveChartFilters, hasActiveFilters } from '@/lib/chartFilters';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +16,7 @@ import { Label } from '@/components/ui/label';
 import { ChevronLeft, ChevronRight, FileText, Edit2, Check, X, Trash2, Download, Loader2, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useDashboardContext } from '../context/DashboardContext';
+import { getUserEmail } from '@/utils/userStorage';
 
 interface DashboardViewProps {
   dashboard: DashboardData;
@@ -22,11 +24,12 @@ interface DashboardViewProps {
   onDeleteChart: (chartIndex: number, sheetId?: string) => void;
   isRefreshing?: boolean;
   onRefresh?: () => Promise<any>;
+  permission?: "view" | "edit"; // Optional permission, defaults to checking ownership
 }
 
 const PPT_LAYOUT = 'LAYOUT_16x9';
 
-export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing = false, onRefresh }: DashboardViewProps) {
+export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing = false, onRefresh, permission }: DashboardViewProps) {
   const [isExporting, setIsExporting] = useState(false);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [isSheetSidebarOpen, setIsSheetSidebarOpen] = useState(true);
@@ -39,8 +42,33 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
   const [selectedSheetIds, setSelectedSheetIds] = useState<Set<string>>(new Set());
   const [addSheetDialogOpen, setAddSheetDialogOpen] = useState(false);
   const [newSheetName, setNewSheetName] = useState('');
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const { toast } = useToast();
   const { renameDashboard, renameSheet, addSheet, removeSheet, refetch: refetchDashboards } = useDashboardContext();
+
+  // Determine permission: if not provided, check if user owns the dashboard or has edit permission on shared dashboard
+  const canEdit = useMemo(() => {
+    if (permission !== undefined) {
+      return permission === "edit";
+    }
+    // If it's a shared dashboard, use the shared permission
+    if (dashboard.isShared && dashboard.sharedPermission) {
+      return dashboard.sharedPermission === "edit";
+    }
+    // Check if user is a collaborator with edit permission
+    const userEmail = getUserEmail()?.toLowerCase();
+    if (dashboard.collaborators && userEmail) {
+      const collaborator = dashboard.collaborators.find(
+        (c) => c.userId.toLowerCase() === userEmail
+      );
+      if (collaborator && collaborator.permission === "edit") {
+        return true;
+      }
+    }
+    // Check ownership by comparing username with current user email
+    const dashboardUsername = dashboard.username?.toLowerCase();
+    return userEmail === dashboardUsername;
+  }, [permission, dashboard]);
 
   // Get sheets or create default from charts (backward compatibility)
   const sheets = useMemo(() => {
@@ -407,7 +435,8 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
           isExporting={isExporting}
           onBack={onBack}
           onExport={handleExportClick}
-          onRename={async (newName) => {
+          onShare={canEdit ? () => setShareDialogOpen(true) : undefined}
+          onRename={canEdit ? async (newName) => {
             try {
               await renameDashboard(dashboard.id, newName);
               if (onRefresh) {
@@ -422,7 +451,7 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
               });
               throw error;
             }
-          }}
+          } : undefined}
         />
 
       </div>
@@ -441,17 +470,19 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
                 <div className="flex items-center justify-between p-4 border-b">
                   <div className="flex items-center gap-2">
                     <h3 className="font-semibold text-sm text-foreground">Views</h3>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => {
-                        setNewSheetName('');
-                        setAddSheetDialogOpen(true);
-                      }}
-                    >
-                      <Plus className="h-4 w-4" />
-                    </Button>
+                    {canEdit && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => {
+                          setNewSheetName('');
+                          setAddSheetDialogOpen(true);
+                        }}
+                      >
+                        <Plus className="h-4 w-4" />
+                      </Button>
+                    )}
                   </div>
                   <Button
                     variant="ghost"
@@ -569,28 +600,30 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
                                   {sheet.charts.length} chart{sheet.charts.length !== 1 ? 's' : ''}
                                 </div>
                               </button>
-                              <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={handleStartEdit}
-                                  className={cn("h-6 w-6 flex-shrink-0", isActive && "text-primary-foreground")}
-                                  aria-label="Rename view"
-                              >
-                                <Edit2 className="h-3 w-3" />
-                              </Button>
-                                {sheets.length > 1 && (
+                              {canEdit && (
+                                <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    onClick={handleDeleteClick}
-                                    className={cn("h-6 w-6 flex-shrink-0 hover:text-destructive", isActive && "text-primary-foreground hover:text-destructive")}
-                                    aria-label="Delete view"
+                                    onClick={handleStartEdit}
+                                    className={cn("h-6 w-6 flex-shrink-0", isActive && "text-primary-foreground")}
+                                    aria-label="Rename view"
                                   >
-                                    <Trash2 className="h-3 w-3" />
+                                    <Edit2 className="h-3 w-3" />
                                   </Button>
-                                )}
-                              </div>
+                                  {sheets.length > 1 && (
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      onClick={handleDeleteClick}
+                                      className={cn("h-6 w-6 flex-shrink-0 hover:text-destructive", isActive && "text-primary-foreground hover:text-destructive")}
+                                      aria-label="Delete view"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </Button>
+                                  )}
+                                </div>
+                              )}
                             </>
                           )}
                         </div>
@@ -636,15 +669,16 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
                 <DashboardTiles
                   dashboardId={dashboard.id}
                   tiles={activeSection.tiles}
-                  onDeleteChart={(chartIndex) => {
+                  onDeleteChart={canEdit ? (chartIndex) => {
                     const sheetIdToUse = currentSheetId || (sheets.length > 0 ? sheets[0].id : undefined);
                     console.log('Deleting chart:', { chartIndex, sheetId: sheetIdToUse, activeSheetId, sheets });
                     onDeleteChart(chartIndex, sheetIdToUse || undefined);
-                  }}
+                  } : undefined}
                   filtersByTile={tileFilters}
                   onTileFiltersChange={handleTileFiltersChange}
                   sheetId={currentSheetId || undefined}
                   onUpdate={onRefresh}
+                  canEdit={canEdit}
                 />
               </section>
             ) : (
@@ -848,6 +882,12 @@ export function DashboardView({ dashboard, onBack, onDeleteChart, isRefreshing =
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ShareDashboardDialog
+        open={shareDialogOpen}
+        onOpenChange={setShareDialogOpen}
+        dashboardId={dashboard.id}
+        dashboardName={dashboard.name}
+      />
     </div>
   );
 }

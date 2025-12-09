@@ -68,22 +68,155 @@ export const getUserDashboards = async (username: string): Promise<Dashboard[]> 
 
 /**
  * Get dashboard by ID
+ * Also checks if user has access via shared dashboard invite
  */
 export const getDashboardById = async (id: string, username: string): Promise<Dashboard | null> => {
   try {
     const dashboardsContainer = await waitForDashboardsContainer();
-    const { resource } = await dashboardsContainer.item(id, username).read();
-    const dashboard = resource as unknown as Dashboard;
+    const normalizedUsername = username.toLowerCase();
     
-    // Update lastOpenedAt when dashboard is accessed
-    if (dashboard) {
-      dashboard.lastOpenedAt = Date.now();
-      return await updateDashboard(dashboard);
+    console.log(`[getDashboardById] Looking for dashboard ${id} for user ${normalizedUsername}`);
+    
+    // First try to get dashboard as owner (try both original and normalized)
+    try {
+      // Try with normalized username first (most common case)
+      const { resource } = await dashboardsContainer.item(id, normalizedUsername).read();
+      const dashboard = resource as unknown as Dashboard;
+      
+      console.log(`[getDashboardById] Resource from CosmosDB:`, { 
+        exists: !!resource, 
+        hasId: !!dashboard?.id, 
+        hasName: !!dashboard?.name,
+        username: dashboard?.username 
+      });
+      
+      // Check if dashboard is valid (has required fields)
+      if (dashboard && dashboard.id && dashboard.name) {
+        console.log(`[getDashboardById] Found dashboard as owner: ${dashboard.name}`);
+        // Update lastOpenedAt when dashboard is accessed
+        dashboard.lastOpenedAt = Date.now();
+        return await updateDashboard(dashboard);
+      }
+      
+      // If dashboard is invalid, treat as not found
+      console.log(`[getDashboardById] Dashboard resource is invalid or incomplete`);
+      throw new Error('Dashboard resource is invalid');
+    } catch (error: any) {
+      // If normalized fails, try with original username (for backward compatibility)
+      if (normalizedUsername !== username) {
+        try {
+          const { resource } = await dashboardsContainer.item(id, username).read();
+          const dashboard = resource as unknown as Dashboard;
+          
+          if (dashboard && dashboard.id && dashboard.name) {
+            console.log(`[getDashboardById] Found dashboard with original username: ${dashboard.name}`);
+            dashboard.lastOpenedAt = Date.now();
+            return await updateDashboard(dashboard);
+          }
+          
+          // If dashboard is invalid, treat as not found
+          throw new Error('Dashboard resource is invalid');
+        } catch (secondError: any) {
+          // Continue to shared dashboard check
+          error = secondError;
+        }
+      }
+      // If not found as owner, check if user has access via shared invite
+      // CosmosDB errors can have code 404 or statusCode 404
+      // Also check for invalid resource errors
+      const isNotFound = error.code === 404 || error.statusCode === 404 || 
+                        (error.message && (error.message.includes('NotFound') || error.message.includes('invalid'))) ||
+                        (error.code === 'NotFound');
+      
+      console.log(`[getDashboardById] Dashboard not found as owner. Error code: ${error.code}, statusCode: ${error.statusCode}, isNotFound: ${isNotFound}`);
+      
+      if (isNotFound) {
+        // First, try to get dashboard using any owner to check collaborators
+        // We need to query all dashboards with this ID to find the owner
+        const { resources: allDashboards } = await dashboardsContainer.items
+          .query({
+            query: "SELECT * FROM c WHERE c.id = @dashboardId",
+            parameters: [{ name: "@dashboardId", value: id }],
+          })
+          .fetchAll();
+        
+        // Check if user is a collaborator in any of these dashboards
+        for (const dashboardDoc of allDashboards) {
+          const dashboard = dashboardDoc as unknown as Dashboard;
+          if (dashboard && dashboard.collaborators) {
+            const collaborator = dashboard.collaborators.find(
+              (c) => c.userId.toLowerCase() === normalizedUsername
+            );
+            if (collaborator) {
+              console.log(`[getDashboardById] Found user as collaborator with permission: ${collaborator.permission}`);
+              // User is a collaborator, return the dashboard
+              dashboard.lastOpenedAt = Date.now();
+              return await updateDashboard(dashboard);
+            }
+          }
+        }
+        
+        // If not found as collaborator, check shared invites (for backward compatibility)
+        const { listSharedDashboardsForUser } = await import("./sharedDashboard.model.js");
+        const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+        
+        console.log(`[getDashboardById] Found ${sharedInvites.length} shared invites for user ${normalizedUsername}`);
+        
+        // Check if there's an accepted invite for this dashboard
+        const acceptedInvite = sharedInvites.find(
+          (invite) => invite.sourceDashboardId === id && invite.status === "accepted"
+        );
+        
+        if (acceptedInvite) {
+          console.log(`[getDashboardById] Found accepted invite. Owner: ${acceptedInvite.ownerEmail}, Permission: ${acceptedInvite.permission}`);
+          
+          // Get the dashboard using the owner's username (normalized)
+          const ownerUsername = acceptedInvite.ownerEmail.toLowerCase();
+          try {
+            const { resource } = await dashboardsContainer.item(id, ownerUsername).read();
+            const dashboard = resource as unknown as Dashboard;
+            
+            // Check if dashboard is valid
+            if (dashboard && dashboard.id && dashboard.name) {
+              console.log(`[getDashboardById] Successfully retrieved shared dashboard: ${dashboard.name}`);
+              // Update lastOpenedAt when dashboard is accessed
+              dashboard.lastOpenedAt = Date.now();
+              return await updateDashboard(dashboard);
+            }
+            
+            // If dashboard is invalid, treat as not found
+            console.error(`[getDashboardById] Shared dashboard resource is invalid for owner ${ownerUsername}`);
+            throw new Error('Dashboard resource is invalid');
+          } catch (ownerError: any) {
+            const ownerIsNotFound = ownerError.code === 404 || ownerError.statusCode === 404 ||
+                                   (ownerError.message && ownerError.message.includes('NotFound')) ||
+                                   (ownerError.code === 'NotFound');
+            if (ownerIsNotFound) {
+              console.error(`[getDashboardById] Dashboard ${id} not found for owner ${ownerUsername}. Error:`, ownerError);
+              return null;
+            }
+            throw ownerError;
+          }
+        } else {
+          console.log(`[getDashboardById] No accepted invite found for dashboard ${id} and user ${normalizedUsername}`);
+          console.log(`[getDashboardById] Available invites:`, sharedInvites.map(i => ({ id: i.sourceDashboardId, status: i.status })));
+        }
+      } else {
+        // If it's not a 404 error, re-throw it
+        console.error(`[getDashboardById] Unexpected error:`, error);
+        throw error;
+      }
+      return null;
     }
-    
-    return dashboard;
   } catch (error: any) {
-    if (error.code === 404) return null;
+    const isNotFound = error.code === 404 || error.statusCode === 404 ||
+                      (error.message && error.message.includes('NotFound')) ||
+                      (error.code === 'NotFound');
+    if (isNotFound) {
+      console.log(`[getDashboardById] Final check - dashboard not found`);
+      return null;
+    }
+    console.error(`[getDashboardById] Unexpected error in outer catch:`, error);
     throw error;
   }
 };
@@ -96,11 +229,43 @@ export const renameDashboard = async (
   username: string,
   newName: string
 ): Promise<Dashboard> => {
+  const normalizedUsername = username.toLowerCase();
+  
   const dashboard = await getDashboardById(id, username);
   if (!dashboard) throw new Error("Dashboard not found");
+
+  // Check if user has edit permission
+  const dashboardOwner = dashboard.username?.toLowerCase();
   
+  if (dashboardOwner !== normalizedUsername) {
+    // This is a shared dashboard, check if user has edit permission
+    // First check collaborators
+    const collaborator = dashboard.collaborators?.find(
+      (c) => c.userId.toLowerCase() === normalizedUsername
+    );
+    
+    if (collaborator) {
+      if (collaborator.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    } else {
+      // Fallback to shared invites (for backward compatibility)
+      const { listSharedDashboardsForUser } = await import("./sharedDashboard.model.js");
+      const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+      const acceptedInvite = sharedInvites.find(
+        (invite) => invite.sourceDashboardId === id && invite.status === "accepted"
+      );
+      
+      if (!acceptedInvite || acceptedInvite.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    }
+  }
+
   // Check if a dashboard with the same name already exists for this username (excluding current dashboard)
-  const existingDashboards = await getUserDashboards(username);
+  // For shared dashboards, check against owner's dashboards
+  const checkUsername = dashboardOwner || normalizedUsername;
+  const existingDashboards = await getUserDashboards(checkUsername);
   const duplicateDashboard = existingDashboards.find(
     d => d.id !== id && d.name.toLowerCase().trim() === newName.toLowerCase().trim()
   );
@@ -120,7 +285,9 @@ export const renameDashboard = async (
 export const updateDashboard = async (dashboard: Dashboard): Promise<Dashboard> => {
   const dashboardsContainer = await waitForDashboardsContainer();
   dashboard.updatedAt = Date.now();
-  const { resource } = await dashboardsContainer.items.upsert(dashboard);
+  // Use the dashboard's username as the partition key
+  const partitionKey = dashboard.username;
+  const { resource } = await dashboardsContainer.item(dashboard.id, partitionKey).replace(dashboard);
   return resource as unknown as Dashboard;
 };
 
@@ -128,8 +295,42 @@ export const updateDashboard = async (dashboard: Dashboard): Promise<Dashboard> 
  * Delete dashboard
  */
 export const deleteDashboard = async (id: string, username: string): Promise<void> => {
+  const normalizedUsername = username.toLowerCase();
+  
+  const dashboard = await getDashboardById(id, username);
+  if (!dashboard) throw new Error("Dashboard not found");
+
+  // Check if user has edit permission
+  const dashboardOwner = dashboard.username?.toLowerCase();
+  
+  if (dashboardOwner !== normalizedUsername) {
+    // This is a shared dashboard, check if user has edit permission
+    // First check collaborators
+    const collaborator = dashboard.collaborators?.find(
+      (c) => c.userId.toLowerCase() === normalizedUsername
+    );
+    
+    if (collaborator) {
+      if (collaborator.permission !== "edit") {
+        throw new Error("You do not have permission to delete this dashboard");
+      }
+    } else {
+      // Fallback to shared invites (for backward compatibility)
+      const { listSharedDashboardsForUser } = await import("./sharedDashboard.model.js");
+      const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+      const acceptedInvite = sharedInvites.find(
+        (invite) => invite.sourceDashboardId === id && invite.status === "accepted"
+      );
+      
+      if (!acceptedInvite || acceptedInvite.permission !== "edit") {
+        throw new Error("You do not have permission to delete this dashboard");
+      }
+    }
+  }
+
+  // Use the dashboard owner's username as partition key for deletion
   const dashboardsContainer = await waitForDashboardsContainer();
-  await dashboardsContainer.item(id, username).delete();
+  await dashboardsContainer.item(id, dashboardOwner).delete();
 };
 
 /**
@@ -141,8 +342,49 @@ export const addChartToDashboard = async (
   chart: ChartSpec,
   sheetId?: string
 ): Promise<Dashboard> => {
+  const normalizedUsername = username.toLowerCase();
+  
+  console.log(`[addChartToDashboard] Starting - Dashboard ID: ${id}, User: ${normalizedUsername}, SheetID: ${sheetId}`);
+  
+  // Try to get dashboard - it will handle both owned and shared dashboards
   const dashboard = await getDashboardById(id, username);
-  if (!dashboard) throw new Error("Dashboard not found");
+  if (!dashboard) {
+    console.error(`[addChartToDashboard] Dashboard ${id} not found for user ${normalizedUsername}`);
+    throw new Error("Dashboard not found");
+  }
+  
+  console.log(`[addChartToDashboard] Dashboard found: ${dashboard.name}, Owner: ${dashboard.username}`);
+  
+  // Check if user has edit permission
+  const dashboardOwner = dashboard.username?.toLowerCase();
+  
+  if (dashboardOwner !== normalizedUsername) {
+    // This is a shared dashboard, check if user has edit permission
+    // First check collaborators
+    const collaborator = dashboard.collaborators?.find(
+      (c) => c.userId.toLowerCase() === normalizedUsername
+    );
+    
+    if (collaborator) {
+      console.log(`[addChartToDashboard] User found as collaborator with permission: ${collaborator.permission}`);
+      if (collaborator.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    } else {
+      // Fallback to shared invites (for backward compatibility)
+      const { listSharedDashboardsForUser } = await import("./sharedDashboard.model.js");
+      const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+      const acceptedInvite = sharedInvites.find(
+        (invite) => invite.sourceDashboardId === id && invite.status === "accepted"
+      );
+      
+      console.log(`[addChartToDashboard] Shared dashboard check - Invite found: ${!!acceptedInvite}, Permission: ${acceptedInvite?.permission}`);
+      
+      if (!acceptedInvite || acceptedInvite.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    }
+  }
   
   // Initialize sheets if not present (backward compatibility)
   if (!dashboard.sheets || dashboard.sheets.length === 0) {
@@ -167,6 +409,7 @@ export const addChartToDashboard = async (
   // Also update the legacy charts array for backward compatibility
   dashboard.charts.push(chart);
   
+  // Use the dashboard's owner username for the partition key when updating
   return updateDashboard(dashboard);
 };
 
@@ -274,8 +517,38 @@ export const removeChartFromDashboard = async (
   username: string,
   predicate: { index?: number; title?: string; type?: ChartSpec["type"]; sheetId?: string }
 ): Promise<Dashboard> => {
+  const normalizedUsername = username.toLowerCase();
+  
   const dashboard = await getDashboardById(id, username);
   if (!dashboard) throw new Error("Dashboard not found");
+  
+  // Check if user has edit permission
+  const dashboardOwner = dashboard.username?.toLowerCase();
+  
+  if (dashboardOwner !== normalizedUsername) {
+    // This is a shared dashboard, check if user has edit permission
+    // First check collaborators
+    const collaborator = dashboard.collaborators?.find(
+      (c) => c.userId.toLowerCase() === normalizedUsername
+    );
+    
+    if (collaborator) {
+      if (collaborator.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    } else {
+      // Fallback to shared invites (for backward compatibility)
+      const { listSharedDashboardsForUser } = await import("./sharedDashboard.model.js");
+      const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+      const acceptedInvite = sharedInvites.find(
+        (invite) => invite.sourceDashboardId === id && invite.status === "accepted"
+      );
+      
+      if (!acceptedInvite || acceptedInvite.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    }
+  }
 
   // If sheetId is provided, remove from that specific sheet
   if (predicate.sheetId && dashboard.sheets && dashboard.sheets.length > 0) {
@@ -393,8 +666,38 @@ export const updateChartInsightOrRecommendation = async (
   sheetId: string | undefined,
   updates: { keyInsight?: string }
 ): Promise<Dashboard> => {
+  const normalizedUsername = username.toLowerCase();
+  
   const dashboard = await getDashboardById(id, username);
   if (!dashboard) throw new Error("Dashboard not found");
+  
+  // Check if user has edit permission
+  const dashboardOwner = dashboard.username?.toLowerCase();
+  
+  if (dashboardOwner !== normalizedUsername) {
+    // This is a shared dashboard, check if user has edit permission
+    // First check collaborators
+    const collaborator = dashboard.collaborators?.find(
+      (c) => c.userId.toLowerCase() === normalizedUsername
+    );
+    
+    if (collaborator) {
+      if (collaborator.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    } else {
+      // Fallback to shared invites (for backward compatibility)
+      const { listSharedDashboardsForUser } = await import("./sharedDashboard.model.js");
+      const sharedInvites = await listSharedDashboardsForUser(normalizedUsername);
+      const acceptedInvite = sharedInvites.find(
+        (invite) => invite.sourceDashboardId === id && invite.status === "accepted"
+      );
+      
+      if (!acceptedInvite || acceptedInvite.permission !== "edit") {
+        throw new Error("You do not have permission to edit this dashboard");
+      }
+    }
+  }
 
   // Initialize sheets if not present (backward compatibility)
   if (!dashboard.sheets || dashboard.sheets.length === 0) {

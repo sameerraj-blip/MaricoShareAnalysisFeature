@@ -11,6 +11,7 @@ const COSMOS_DATABASE_ID = process.env.COSMOS_DATABASE_ID || "marico-insights";
 const COSMOS_CONTAINER_ID = process.env.COSMOS_CONTAINER_ID || "chats";
 const COSMOS_DASHBOARDS_CONTAINER_ID = process.env.COSMOS_DASHBOARDS_CONTAINER_ID || "dashboards";
 const COSMOS_SHARED_ANALYSES_CONTAINER_ID = process.env.COSMOS_SHARED_ANALYSES_CONTAINER_ID || "shared-analyses";
+const COSMOS_SHARED_DASHBOARDS_CONTAINER_ID = process.env.COSMOS_SHARED_DASHBOARDS_CONTAINER_ID || "shared-dashboards";
 
 // Initialize CosmosDB client
 const client = new CosmosClient({
@@ -22,6 +23,7 @@ let database: Database;
 let container: Container;
 let dashboardsContainer: Container;
 let sharedAnalysesContainer: Container;
+let sharedDashboardsContainer: Container;
 let initializationInProgress = false;
 let initializationPromise: Promise<void> | null = null;
 
@@ -31,7 +33,7 @@ let initializationPromise: Promise<void> | null = null;
  */
 export const initializeCosmosDB = async (): Promise<void> => {
   // If already initialized, return immediately
-  if (container && dashboardsContainer && sharedAnalysesContainer) {
+  if (container && dashboardsContainer && sharedAnalysesContainer && sharedDashboardsContainer) {
     return;
   }
 
@@ -80,6 +82,14 @@ export const initializeCosmosDB = async (): Promise<void> => {
       });
       sharedAnalysesContainer = sharedCont;
       console.log(`✅ Shared analyses container ready: ${COSMOS_SHARED_ANALYSES_CONTAINER_ID}`);
+
+      // Create shared dashboards container if it doesn't exist
+      const { container: sharedDashCont } = await database.containers.createIfNotExists({
+        id: COSMOS_SHARED_DASHBOARDS_CONTAINER_ID,
+        partitionKey: "/targetEmail",
+      });
+      sharedDashboardsContainer = sharedDashCont;
+      console.log(`✅ Shared dashboards container ready: ${COSMOS_SHARED_DASHBOARDS_CONTAINER_ID}`);
 
       console.log("✅ CosmosDB initialized successfully");
     } catch (error) {
@@ -213,6 +223,45 @@ export const waitForSharedAnalysesContainer = async (
  * Get the CosmosDB client instance
  */
 export const getCosmosClient = () => client;
+
+/**
+ * Wait for shared dashboards container to be initialized
+ * Will attempt to initialize if not already done
+ */
+export const waitForSharedDashboardsContainer = async (
+  maxRetries: number = 60,
+  retryDelay: number = 500
+): Promise<Container> => {
+  // Try to initialize if not already done
+  if (!sharedDashboardsContainer) {
+    try {
+      await initializeCosmosDB();
+    } catch (error) {
+      console.warn("⚠️ Initialization attempt failed, will retry:", error);
+    }
+  }
+
+  let retries = 0;
+
+  while (!sharedDashboardsContainer && retries < maxRetries) {
+    await new Promise(resolve => setTimeout(resolve, retryDelay));
+    // Try to initialize again every 5 retries
+    if (retries % 5 === 0 && !sharedDashboardsContainer) {
+      try {
+        await initializeCosmosDB();
+      } catch (error) {
+        // Continue retrying
+      }
+    }
+    retries++;
+  }
+
+  if (!sharedDashboardsContainer) {
+    throw new Error("CosmosDB shared dashboards container not initialized. Please check your COSMOS_ENDPOINT and COSMOS_KEY environment variables and ensure CosmosDB is accessible.");
+  }
+
+  return sharedDashboardsContainer;
+};
 
 /**
  * Get the database instance

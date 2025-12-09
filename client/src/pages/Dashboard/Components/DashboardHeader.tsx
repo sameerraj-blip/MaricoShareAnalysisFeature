@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ArrowLeft, BarChart3, Calendar, Download, Loader2, Edit2, Check, X } from 'lucide-react';
+import { ArrowLeft, BarChart3, Calendar, Download, Loader2, Edit2, Check, X, Share2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -12,6 +12,7 @@ interface DashboardHeaderProps {
   onBack: () => void;
   onExport: () => void;
   onRename?: (newName: string) => Promise<void>;
+  onShare?: () => void;
 }
 
 export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
@@ -23,6 +24,7 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
   onBack,
   onExport,
   onRename,
+  onShare,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(name);
@@ -138,19 +140,31 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
         </div>
       </div>
 
-      <Button onClick={onExport} className="ml-auto" disabled={isExporting}>
-        {isExporting ? (
-          <>
-            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            Exporting…
-          </>
-        ) : (
-          <>
-            <Download className="h-4 w-4 mr-2" />
-            Export PPT
-          </>
+      <div className="flex items-center gap-2 ml-auto">
+        {onShare && (
+          <Button
+            variant="outline"
+            onClick={onShare}
+            className="text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+          >
+            <Share2 className="h-4 w-4 mr-2" />
+            Share
+          </Button>
         )}
-      </Button>
+        <Button onClick={onExport} disabled={isExporting}>
+          {isExporting ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              Exporting…
+            </>
+          ) : (
+            <>
+              <Download className="h-4 w-4 mr-2" />
+              Export PPT
+            </>
+          )}
+        </Button>
+      </div>
     </div>
   );
 };

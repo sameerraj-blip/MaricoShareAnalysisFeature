@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,6 +10,8 @@ import { ChartSpec } from '@/shared/schema';
 import { useDashboardContext } from '@/pages/Dashboard/context/DashboardContext';
 import { dashboardsApi } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { getUserEmail } from '@/utils/userStorage';
+import { DashboardData } from '@/pages/Dashboard/modules/useDashboardState';
 
 interface DashboardModalProps {
   isOpen: boolean;
@@ -31,18 +33,37 @@ export function DashboardModal({ isOpen, onClose, chart }: DashboardModalProps) 
   
   const { dashboards, createDashboard, addChartToDashboard, refetch } = useDashboardContext();
 
-  // Filter dashboards based on search query
-  const filteredDashboards = dashboards.filter(dashboard =>
+  // Helper function to check if user has edit permission on a dashboard
+  const hasEditPermission = useMemo(() => {
+    const userEmail = getUserEmail()?.toLowerCase();
+    return (dashboard: DashboardData): boolean => {
+      // If it's a shared dashboard, check the permission
+      if (dashboard.isShared) {
+        return dashboard.sharedPermission === "edit";
+      }
+      // If not shared, check if user owns it
+      const dashboardUsername = dashboard.username?.toLowerCase();
+      return userEmail === dashboardUsername;
+    };
+  }, []);
+
+  // Filter dashboards to only show those with edit permission
+  const editableDashboards = useMemo(() => {
+    return dashboards.filter(hasEditPermission);
+  }, [dashboards, hasEditPermission]);
+
+  // Filter dashboards based on search query (only editable ones)
+  const filteredDashboards = editableDashboards.filter(dashboard =>
     dashboard.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // Get recently created dashboards (last 5, sorted by creation date)
-  const recentDashboards = dashboards
+  // Get recently created dashboards (last 5, sorted by creation date, only editable ones)
+  const recentDashboards = editableDashboards
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 5);
 
   // Get selected dashboard's sheets
-  const selectedDashboardData = dashboards.find(d => d.id === selectedDashboard);
+  const selectedDashboardData = editableDashboards.find(d => d.id === selectedDashboard);
   // If no sheets exist, create a default one for backward compatibility
   const sheets = selectedDashboardData?.sheets && selectedDashboardData.sheets.length > 0 
     ? selectedDashboardData.sheets 
@@ -121,7 +142,7 @@ export function DashboardModal({ isOpen, onClose, chart }: DashboardModalProps) 
           {step === 'select' ? (
             <>
               {/* Dashboard Selection View */}
-              {dashboards.length > 0 && (
+              {editableDashboards.length > 0 && (
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">Search Dashboard</Label>
                   <div className="relative" ref={dropdownRef}>
@@ -150,7 +171,7 @@ export function DashboardModal({ isOpen, onClose, chart }: DashboardModalProps) 
                                 setShowDropdown(false);
                                 setNewDashboardName('');
                                 // Set default sheet to first sheet
-                                const dashboardData = dashboards.find(d => d.id === dashboard.id);
+                                const dashboardData = editableDashboards.find(d => d.id === dashboard.id);
                                 if (dashboardData?.sheets && dashboardData.sheets.length > 0) {
                                   setSelectedSheetId(dashboardData.sheets[0].id);
                                   setCreateNewSheet(false);
@@ -197,7 +218,7 @@ export function DashboardModal({ isOpen, onClose, chart }: DashboardModalProps) 
                           setSearchQuery(dashboard.name);
                           setNewDashboardName('');
                           // Set default sheet to first sheet
-                          const dashboardData = dashboards.find(d => d.id === dashboard.id);
+                          const dashboardData = editableDashboards.find(d => d.id === dashboard.id);
                           if (dashboardData?.sheets && dashboardData.sheets.length > 0) {
                             setSelectedSheetId(dashboardData.sheets[0].id);
                             setCreateNewSheet(false);
@@ -289,13 +310,13 @@ export function DashboardModal({ isOpen, onClose, chart }: DashboardModalProps) 
                     <div>
                       <div className="font-medium text-sm">
                         {selectedDashboard ? 
-                          dashboards.find(d => d.id === selectedDashboard)?.name : 
+                          editableDashboards.find(d => d.id === selectedDashboard)?.name : 
                           newDashboardName
                         }
                       </div>
                       <div className="text-xs text-muted-foreground">
                         {selectedDashboard ? 
-                          `${dashboards.find(d => d.id === selectedDashboard)?.sheets?.length || 1} sheet${(dashboards.find(d => d.id === selectedDashboard)?.sheets?.length || 1) === 1 ? '' : 's'}` : 
+                          `${editableDashboards.find(d => d.id === selectedDashboard)?.sheets?.length || 1} sheet${(editableDashboards.find(d => d.id === selectedDashboard)?.sheets?.length || 1) === 1 ? '' : 's'}` : 
                           'New dashboard'
                         }
                       </div>

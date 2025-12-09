@@ -181,6 +181,9 @@ export const sharedAnalysisInviteSchema = z.object({
   note: z.string().optional(),
   acceptedSessionId: z.string().optional(),
   preview: sharedAnalysisPreviewSchema.optional(),
+  // Optional dashboard sharing fields
+  dashboardId: z.string().optional(),
+  dashboardEditable: z.boolean().optional(),
 });
 
 export type SharedAnalysisInvite = z.infer<typeof sharedAnalysisInviteSchema>;
@@ -192,6 +195,42 @@ export const sharedAnalysesResponseSchema = z.object({
 
 export type SharedAnalysesResponse = z.infer<typeof sharedAnalysesResponseSchema>;
 
+// Shared Dashboard Schemas
+export const sharedDashboardPermissionSchema = z.enum(["view", "edit"]);
+
+export const sharedDashboardStatusSchema = z.enum(["pending", "accepted", "declined"]);
+
+export const sharedDashboardPreviewSchema = z.object({
+  name: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  sheetsCount: z.number(),
+  chartsCount: z.number(),
+});
+
+export const sharedDashboardInviteSchema = z.object({
+  id: z.string(),
+  sourceDashboardId: z.string(),
+  ownerEmail: z.string(),
+  targetEmail: z.string(),
+  permission: sharedDashboardPermissionSchema,
+  status: sharedDashboardStatusSchema,
+  createdAt: z.number(),
+  acceptedAt: z.number().optional(),
+  declinedAt: z.number().optional(),
+  note: z.string().optional(),
+  preview: sharedDashboardPreviewSchema.optional(),
+});
+
+export type SharedDashboardInvite = z.infer<typeof sharedDashboardInviteSchema>;
+
+export const sharedDashboardsResponseSchema = z.object({
+  pending: z.array(sharedDashboardInviteSchema),
+  accepted: z.array(sharedDashboardInviteSchema),
+});
+
+export type SharedDashboardsResponse = z.infer<typeof sharedDashboardsResponseSchema>;
+
 // API Response Types
 export const uploadResponseSchema = z.object({
   sessionId: z.string(),
@@ -199,6 +238,7 @@ export const uploadResponseSchema = z.object({
   charts: z.array(chartSpecSchema),
   insights: z.array(insightSchema),
   sampleRows: z.array(z.record(z.union([z.string(), z.number(), z.null()]))).optional(),
+  suggestions: z.array(z.string()).optional(), // AI-generated suggestions based on the data
   chatId: z.string().optional(), // CosmosDB chat document ID
   blobInfo: z.object({
     blobUrl: z.string(),
@@ -269,6 +309,11 @@ export const dashboardSheetSchema = z.object({
 
 export type DashboardSheet = z.infer<typeof dashboardSheetSchema>;
 
+export const dashboardCollaboratorSchema = z.object({
+  userId: z.string(), // User email/ID
+  permission: z.enum(["view", "edit"]), // Permission level
+});
+
 export const dashboardSchema = z.object({
   id: z.string(),
   username: z.string(),
@@ -278,6 +323,7 @@ export const dashboardSchema = z.object({
   lastOpenedAt: z.number().optional(), // Track when dashboard was last accessed
   charts: z.array(chartSpecSchema), // Keep for backward compatibility
   sheets: z.array(dashboardSheetSchema).optional(), // New: multiple sheets
+  collaborators: z.array(dashboardCollaboratorSchema).optional(), // Users with access and their permissions
 });
 
 export type Dashboard = z.infer<typeof dashboardSchema>;

@@ -11,17 +11,41 @@ export interface DashboardData {
   createdAt: Date;
   updatedAt: Date;
   lastOpenedAt?: Date;
+  username?: string; // Owner's email/username
+  isShared?: boolean; // Whether this is a shared dashboard (shared WITH the current user)
+  sharedPermission?: "view" | "edit"; // Permission level for shared dashboards
+  sharedBy?: string; // Email of the user who shared this dashboard
+  permission?: "view" | "edit"; // Computed permission (for convenience)
+  hasCollaborators?: boolean; // Whether this dashboard has been shared with others (owned by current user but shared)
+  collaborators?: Array<{ userId: string; permission: "view" | "edit" }>; // List of collaborators
 }
 
-const normalizeDashboard = (dashboard: ServerDashboard): DashboardData => ({
-  id: dashboard.id,
-  name: dashboard.name,
-  charts: dashboard.charts || [],
-  sheets: dashboard.sheets || [],
-  createdAt: new Date(dashboard.createdAt),
-  updatedAt: new Date(dashboard.updatedAt),
-  lastOpenedAt: dashboard.lastOpenedAt ? new Date(dashboard.lastOpenedAt) : undefined,
-});
+export const normalizeDashboard = (dashboard: ServerDashboard & { isShared?: boolean; sharedPermission?: "view" | "edit"; sharedBy?: string }): DashboardData => {
+  const normalized: DashboardData = {
+    id: dashboard.id,
+    name: dashboard.name,
+    charts: dashboard.charts || [],
+    sheets: dashboard.sheets || [],
+    createdAt: new Date(dashboard.createdAt),
+    updatedAt: new Date(dashboard.updatedAt),
+    lastOpenedAt: dashboard.lastOpenedAt ? new Date(dashboard.lastOpenedAt) : undefined,
+    username: dashboard.username,
+    // Preserve shared dashboard properties
+    isShared: (dashboard as any).isShared || false,
+    sharedPermission: (dashboard as any).sharedPermission,
+    sharedBy: (dashboard as any).sharedBy,
+    // Check if dashboard has collaborators (has been shared by owner)
+    collaborators: (dashboard as any).collaborators || [],
+    hasCollaborators: ((dashboard as any).collaborators && (dashboard as any).collaborators.length > 0) || false,
+  };
+  
+  // Set permission for convenience (use sharedPermission if it's a shared dashboard)
+  if (normalized.isShared && normalized.sharedPermission) {
+    normalized.permission = normalized.sharedPermission;
+  }
+  
+  return normalized;
+};
 
 export const useDashboardState = () => {
   const queryClient = useQueryClient();
@@ -37,9 +61,10 @@ export const useDashboardState = () => {
     queryKey: ['dashboards', 'list'],
     queryFn: async () => {
       const res = await dashboardsApi.list();
-      return res.dashboards.map(normalizeDashboard);
+      const normalized = res.dashboards.map(normalizeDashboard);
+      return normalized;
     },
-    staleTime: 1000 * 60 * 5,
+    staleTime: 0, // Always refetch to get latest shared dashboards
   });
 
   const createDashboardMutation = useMutation({

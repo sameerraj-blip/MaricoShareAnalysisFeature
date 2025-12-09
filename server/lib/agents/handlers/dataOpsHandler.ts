@@ -13,7 +13,10 @@ import { getChatBySessionIdEfficient } from '../../../models/chat.model.js';
  */
 export class DataOpsHandler extends BaseHandler {
   canHandle(intent: AnalysisIntent): boolean {
-    return intent.type === 'dataOps';
+    // Handle dataOps type OR custom type when routed via dataOps mode
+    // The orchestrator routes to this handler when mode is 'dataOps', 
+    // so we accept custom intents as well (they'll be parsed by parseDataOpsIntent)
+    return intent.type === 'dataOps' || intent.type === 'custom';
   }
 
   async handle(intent: AnalysisIntent, context: HandlerContext): Promise<HandlerResponse> {

@@ -1,17 +1,16 @@
 import { Request, Response } from "express";
 import {
-  sharedAnalysesResponseSchema,
-  AnalysisSessionSummary,
+  sharedDashboardsResponseSchema,
 } from "../shared/schema.js";
 import {
-  acceptSharedAnalysisInvite,
-  createSharedAnalysisInvite,
-  declineSharedAnalysisInvite,
-  getSharedAnalysisInviteById,
-  listSharedAnalysesForOwner,
-  listSharedAnalysesForUser,
-} from "../models/sharedAnalysis.model.js";
-import type { ChatDocument } from "../models/chat.model.js";
+  acceptSharedDashboardInvite,
+  createSharedDashboardInvite,
+  declineSharedDashboardInvite,
+  getSharedDashboardInviteById,
+  listSharedDashboardsForOwner,
+  listSharedDashboardsForUser,
+} from "../models/sharedDashboard.model.js";
+import type { Dashboard } from "../models/dashboard.model.js";
 
 const getUserEmailFromRequest = (req: Request): string | undefined => {
   const headerEmail = req.headers["x-user-email"];
@@ -25,25 +24,9 @@ const getUserEmailFromRequest = (req: Request): string | undefined => {
   return undefined;
 };
 
-const toSessionSummary = (chatDocument: ChatDocument): AnalysisSessionSummary => ({
-  id: chatDocument.id,
-  fileName: chatDocument.fileName,
-  uploadedAt: chatDocument.uploadedAt,
-  createdAt: chatDocument.createdAt,
-  lastUpdatedAt: chatDocument.lastUpdatedAt,
-  collaborators: chatDocument.collaborators || [chatDocument.username],
-  dataSummary: chatDocument.dataSummary,
-  chartsCount: chatDocument.charts?.length || 0,
-  insightsCount: chatDocument.insights?.length || 0,
-  messagesCount: chatDocument.messages?.length || 0,
-  blobInfo: chatDocument.blobInfo,
-  analysisMetadata: chatDocument.analysisMetadata,
-  sessionId: chatDocument.sessionId,
-});
-
 const sanitizeEmail = (value: string) => value.trim().toLowerCase();
 
-// SSE helper function (similar to chatController)
+// SSE helper function (similar to sharedAnalysisController)
 function sendSSE(res: Response, event: string, data: any): boolean {
   // Check if connection is still writable
   if (res.writableEnded || res.destroyed || !res.writable) {
@@ -70,90 +53,81 @@ function sendSSE(res: Response, event: string, data: any): boolean {
   }
 }
 
-export const shareAnalysisController = async (req: Request, res: Response) => {
+export const shareDashboardController = async (req: Request, res: Response) => {
   try {
     const ownerEmail = getUserEmailFromRequest(req);
     if (!ownerEmail) {
       return res.status(401).json({ error: "Missing authenticated user email." });
     }
 
-    const { sessionId, targetEmail, note, dashboardId, isEditable, dashboardIds, dashboardPermissions } = req.body || {};
-    if (!sessionId || !targetEmail) {
-      return res.status(400).json({ error: "sessionId and targetEmail are required." });
+    const { dashboardId, targetEmail, permission, note } = req.body || {};
+    if (!dashboardId || !targetEmail || !permission) {
+      return res.status(400).json({ error: "dashboardId, targetEmail, and permission are required." });
     }
 
-    // Support both single dashboard (backward compatibility) and multiple dashboards
-    const dashboardIdsToShare = dashboardIds && dashboardIds.length > 0 
-      ? dashboardIds 
-      : dashboardId 
-        ? [dashboardId] 
-        : [];
+    if (permission !== "view" && permission !== "edit") {
+      return res.status(400).json({ error: "permission must be either 'view' or 'edit'." });
+    }
 
-    // Create the analysis invite (store first dashboard ID for backward compatibility)
-    const invite = await createSharedAnalysisInvite({
+    const invite = await createSharedDashboardInvite({
       ownerEmail,
       targetEmail: sanitizeEmail(targetEmail),
-      sourceSessionId: sessionId,
+      sourceDashboardId: dashboardId,
+      permission,
       note,
-      dashboardId: dashboardIdsToShare[0], // Store first one for backward compatibility
-      dashboardEditable: dashboardPermissions 
-        ? dashboardPermissions[dashboardIdsToShare[0]] === 'edit'
-        : isEditable,
-      dashboardIds: dashboardIdsToShare.length > 0 ? dashboardIdsToShare : undefined,
-      dashboardPermissions: dashboardPermissions,
     });
 
     res.status(201).json({ invite });
   } catch (error) {
-    console.error("shareAnalysisController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to share analysis.";
+    console.error("shareDashboardController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to share dashboard.";
     const statusCode = (error as any)?.statusCode || 500;
     res.status(statusCode).json({ error: message });
   }
 };
 
-export const getIncomingSharedAnalysesController = async (req: Request, res: Response) => {
+export const getIncomingSharedDashboardsController = async (req: Request, res: Response) => {
   try {
     const userEmail = getUserEmailFromRequest(req);
     if (!userEmail) {
       return res.status(401).json({ error: "Missing authenticated user email." });
     }
 
-    const invitations = await listSharedAnalysesForUser(userEmail);
+    const invitations = await listSharedDashboardsForUser(userEmail);
     const responsePayload = {
       pending: invitations.filter((invite) => invite.status === "pending"),
       accepted: invitations.filter((invite) => invite.status === "accepted"),
     };
 
     // Validate payload before sending (throws if invalid)
-    sharedAnalysesResponseSchema.parse(responsePayload);
+    sharedDashboardsResponseSchema.parse(responsePayload);
     res.json(responsePayload);
   } catch (error) {
-    console.error("getIncomingSharedAnalysesController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to load shared analyses.";
+    console.error("getIncomingSharedDashboardsController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to load shared dashboards.";
     const statusCode = (error as any)?.statusCode || 500;
     res.status(statusCode).json({ error: message });
   }
 };
 
-export const getSentSharedAnalysesController = async (req: Request, res: Response) => {
+export const getSentSharedDashboardsController = async (req: Request, res: Response) => {
   try {
     const userEmail = getUserEmailFromRequest(req);
     if (!userEmail) {
       return res.status(401).json({ error: "Missing authenticated user email." });
     }
 
-    const invitations = await listSharedAnalysesForOwner(userEmail);
+    const invitations = await listSharedDashboardsForOwner(userEmail);
     res.json({ invitations });
   } catch (error) {
-    console.error("getSentSharedAnalysesController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to load sent shared analyses.";
+    console.error("getSentSharedDashboardsController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to load sent shared dashboards.";
     const statusCode = (error as any)?.statusCode || 500;
     res.status(statusCode).json({ error: message });
   }
 };
 
-export const acceptSharedAnalysisController = async (req: Request, res: Response) => {
+export const acceptSharedDashboardController = async (req: Request, res: Response) => {
   try {
     const userEmail = getUserEmailFromRequest(req);
     if (!userEmail) {
@@ -165,22 +139,21 @@ export const acceptSharedAnalysisController = async (req: Request, res: Response
       return res.status(400).json({ error: "inviteId is required." });
     }
 
-    const { invite, newSession } = await acceptSharedAnalysisInvite(inviteId, userEmail);
-    const summary = toSessionSummary(newSession);
+    const { invite, dashboard } = await acceptSharedDashboardInvite(inviteId, userEmail);
 
     res.json({
       invite,
-      acceptedSession: summary,
+      dashboard,
     });
   } catch (error) {
-    console.error("acceptSharedAnalysisController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to accept shared analysis.";
+    console.error("acceptSharedDashboardController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to accept shared dashboard.";
     const statusCode = (error as any)?.statusCode || 500;
     res.status(statusCode).json({ error: message });
   }
 };
 
-export const declineSharedAnalysisController = async (req: Request, res: Response) => {
+export const declineSharedDashboardController = async (req: Request, res: Response) => {
   try {
     const userEmail = getUserEmailFromRequest(req);
     if (!userEmail) {
@@ -192,17 +165,17 @@ export const declineSharedAnalysisController = async (req: Request, res: Respons
       return res.status(400).json({ error: "inviteId is required." });
     }
 
-    const invite = await declineSharedAnalysisInvite(inviteId, userEmail);
+    const invite = await declineSharedDashboardInvite(inviteId, userEmail);
     res.json({ invite });
   } catch (error) {
-    console.error("declineSharedAnalysisController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to decline shared analysis.";
+    console.error("declineSharedDashboardController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to decline shared dashboard.";
     const statusCode = (error as any)?.statusCode || 500;
     res.status(statusCode).json({ error: message });
   }
 };
 
-export const getSharedAnalysisInviteController = async (req: Request, res: Response) => {
+export const getSharedDashboardInviteController = async (req: Request, res: Response) => {
   try {
     const userEmail = getUserEmailFromRequest(req);
     if (!userEmail) {
@@ -214,25 +187,25 @@ export const getSharedAnalysisInviteController = async (req: Request, res: Respo
       return res.status(400).json({ error: "inviteId is required." });
     }
 
-    const invite = await getSharedAnalysisInviteById(inviteId, userEmail);
+    const invite = await getSharedDashboardInviteById(inviteId, userEmail);
     if (!invite) {
-      return res.status(404).json({ error: "Shared analysis invite not found." });
+      return res.status(404).json({ error: "Shared dashboard invite not found." });
     }
 
     res.json({ invite });
   } catch (error) {
-    console.error("getSharedAnalysisInviteController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to load shared analysis invite.";
+    console.error("getSharedDashboardInviteController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to load shared dashboard invite.";
     const statusCode = (error as any)?.statusCode || 500;
     res.status(statusCode).json({ error: message });
   }
 };
 
 /**
- * Streaming shared analyses endpoint using Server-Sent Events (SSE)
- * Provides real-time updates for incoming shared analysis invites
+ * Streaming shared dashboards endpoint using Server-Sent Events (SSE)
+ * Provides real-time updates for incoming shared dashboard invites
  */
-export const streamIncomingSharedAnalysesController = async (req: Request, res: Response) => {
+export const streamIncomingSharedDashboardsController = async (req: Request, res: Response) => {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -247,23 +220,22 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
       return;
     }
 
-
-    // Function to fetch and send shared analyses
-    const sendSharedAnalyses = async () => {
+    // Function to fetch and send shared dashboards
+    const sendSharedDashboards = async () => {
       // Check if connection is still open before attempting to send
       if (res.writableEnded || res.destroyed || !res.writable) {
         return false;
       }
 
       try {
-        const invitations = await listSharedAnalysesForUser(userEmail);
+        const invitations = await listSharedDashboardsForUser(userEmail);
         const responsePayload = {
           pending: invitations.filter((invite) => invite.status === "pending"),
           accepted: invitations.filter((invite) => invite.status === "accepted"),
         };
 
         // Validate payload before sending
-        sharedAnalysesResponseSchema.parse(responsePayload);
+        sharedDashboardsResponseSchema.parse(responsePayload);
         const sent = sendSSE(res, 'update', responsePayload);
         
         if (!sent) {
@@ -273,9 +245,9 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
       } catch (error) {
         // Only try to send error if connection is still open
         if (!res.writableEnded && !res.destroyed && res.writable) {
-          console.error('Error fetching shared analyses for SSE:', error);
+          console.error('Error fetching shared dashboards for SSE:', error);
           sendSSE(res, 'error', { 
-            message: error instanceof Error ? error.message : 'Failed to fetch shared analyses.' 
+            message: error instanceof Error ? error.message : 'Failed to fetch shared dashboards.' 
           });
         }
         return false;
@@ -283,7 +255,7 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
     };
 
     // Send initial data immediately
-    await sendSharedAnalyses();
+    await sendSharedDashboards();
 
     // Set up polling to check for new invites every 3 seconds
     const checkInterval = setInterval(async () => {
@@ -293,7 +265,7 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
         return;
       }
 
-      const stillConnected = await sendSharedAnalyses();
+      const stillConnected = await sendSharedDashboards();
       if (!stillConnected) {
         clearInterval(checkInterval);
         try {
@@ -333,10 +305,9 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
     });
 
   } catch (error) {
-    console.error("streamIncomingSharedAnalysesController error:", error);
-    const message = error instanceof Error ? error.message : "Failed to stream shared analyses.";
+    console.error("streamIncomingSharedDashboardsController error:", error);
+    const message = error instanceof Error ? error.message : "Failed to stream shared dashboards.";
     sendSSE(res, 'error', { message });
     res.end();
   }
 };
-

@@ -4,6 +4,7 @@ export { dataApi } from "./data";
 export { sessionsApi } from "./sessions";
 export { dashboardsApi } from "./dashboards";
 export { sharedAnalysesApi } from "./sharedAnalyses";
+export { sharedDashboardsApi } from "./sharedDashboards";
 export { streamChatRequest, streamDataOpsChatRequest } from "./chat";
 export type { StreamChatCallbacks, StreamDataOpsCallbacks, DataOpsResponse } from "./chat";
 
