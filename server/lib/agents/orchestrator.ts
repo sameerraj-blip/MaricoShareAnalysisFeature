@@ -111,8 +111,10 @@ export class AgentOrchestrator {
         let operation: string | undefined;
         
         // Create intent for DataOpsHandler
+        // Note: DataOpsHandler checks for type 'dataOps', but AnalysisIntent schema doesn't include it
+        // So we use 'custom' but ensure the handler can still process it via mode routing
         const intent: AnalysisIntent = {
-          type: 'dataOps' as const,
+          type: 'custom' as const,
           confidence: 1.0,
           customRequest: enrichedQuestion,
           operation: operation as any,
@@ -128,7 +130,6 @@ export class AgentOrchestrator {
           console.error('❌ DataOpsHandler not found!');
           return {
             answer: 'Data Operations handler is not available. Please contact support.',
-            error: 'DataOpsHandler not registered',
           };
         }
         
@@ -161,7 +162,6 @@ export class AgentOrchestrator {
             this.emitThinkingStep(onThinkingStep, "Performing data operation", "error", response.error);
             return {
               answer: response.answer || `Error: ${response.error}`,
-              error: response.error,
               table: response.table,
               operationResult: response.operationResult,
             };
@@ -186,13 +186,22 @@ export class AgentOrchestrator {
           this.emitThinkingStep(onThinkingStep, "Performing data operation", "error", error instanceof Error ? error.message : String(error));
           return {
             answer: `An error occurred while performing the data operation: ${error instanceof Error ? error.message : String(error)}`,
-            error: error instanceof Error ? error.message : String(error),
           };
         }
       }
       
       // ============================================
+      // MODELING MODE ROUTE
+      // Routes through analysis flow, but intent classifier will detect ml_model
+      // ============================================
+      if (mode === 'modeling') {
+        console.log(`🤖 Modeling Mode: Routing through analysis flow (will detect ml_model intent)`);
+        // Continue to analysis flow - intent classifier will handle ml_model detection
+      }
+      
+      // ============================================
       // ANALYSIS MODE ROUTE (existing logic)
+      // Also handles modeling mode (routes through same flow)
       // ============================================
       
       this.emitThinkingStep(onThinkingStep, "Understanding your question", "active");

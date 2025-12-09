@@ -478,6 +478,22 @@ export async function parseDataOpsIntent(
     }
   }
   
+  // Preview intent - handle "data preview", "give me data preview", "show data", etc.
+  // Check for explicit "data preview" patterns first (HIGH PRIORITY)
+  if (lowerMessage.includes('data preview') || lowerMessage.includes('preview data') || 
+      lowerMessage.match(/(?:give me|show me|display|view|see)\s+(?:the\s+)?(?:data\s+)?preview/i)) {
+    // Extract number if specified (e.g., "give me data preview of 10 rows")
+    const limitMatch = lowerMessage.match(/(\d+)\s*(?:rows?|records?)?/i);
+    const limit = limitMatch ? Math.min(parseInt(limitMatch[1], 10), 10000) : 50;
+    
+    return {
+      operation: 'preview',
+      previewMode: 'first',
+      limit: limit,
+      requiresClarification: false
+    };
+  }
+  
   // Preview intent - handle first, last, specific rows, and ranges
   if (lowerMessage.includes('show') && (lowerMessage.includes('data') || lowerMessage.includes('rows') || lowerMessage.includes('row'))) {
     // Pattern 1: Range - handle multiple phrasings
@@ -612,6 +628,26 @@ export async function parseDataOpsIntent(
       operation: 'describe',
       requiresClarification: false
     };
+  }
+  
+  // Summary intent - check for "data summary" patterns first (HIGH PRIORITY)
+  if (lowerMessage.includes('data summary') || lowerMessage.includes('summary of data') ||
+      lowerMessage.match(/(?:give me|show me|display|view|see)\s+(?:the\s+)?(?:data\s+)?summary/i)) {
+    // Check if a specific column is mentioned
+    const mentionedColumn = findMentionedColumn(message, availableColumns);
+    
+    if (mentionedColumn) {
+      return {
+        operation: 'summary',
+        column: mentionedColumn,
+        requiresClarification: false
+      };
+    } else {
+      return {
+        operation: 'summary',
+        requiresClarification: false
+      };
+    }
   }
   
   // Summary intent - check if specific column is mentioned

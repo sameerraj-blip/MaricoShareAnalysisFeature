@@ -113,7 +113,8 @@ export async function answerQuestion(
   summary: DataSummary,
   sessionId?: string,
   chatInsights?: Insight[],
-  onThinkingStep?: (step: { step: string; status: 'pending' | 'active' | 'completed' | 'error'; timestamp: number; details?: string }) => void
+  onThinkingStep?: (step: { step: string; status: 'pending' | 'active' | 'completed' | 'error'; timestamp: number; details?: string }) => void,
+  mode?: 'analysis' | 'dataOps' | 'modeling'
 ): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[] }> {
   // CRITICAL: This log should ALWAYS appear first
   console.log('🚀 answerQuestion() CALLED with question:', question);
@@ -157,7 +158,8 @@ export async function answerQuestion(
       summary,
       sessionId || 'unknown',
       chatInsights,
-      onThinkingStep
+      onThinkingStep,
+      mode
     );
     
     console.log('📤 Agent system result:', { 

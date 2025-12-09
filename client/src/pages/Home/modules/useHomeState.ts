@@ -12,7 +12,7 @@ export interface HomeState {
   dateColumns: string[];
   totalRows: number;
   totalColumns: number;
-  mode: 'analysis' | 'dataOps' | 'modeling';
+  mode: 'general' | 'analysis' | 'dataOps' | 'modeling';
 }
 
 export const useHomeState = () => {
@@ -26,17 +26,20 @@ export const useHomeState = () => {
   const [dateColumns, setDateColumns] = useState<string[]>([]);
   const [totalRows, setTotalRows] = useState<number>(0);
   const [totalColumns, setTotalColumns] = useState<number>(0);
-  const [mode, setMode] = useState<'analysis' | 'dataOps' | 'modeling'>('analysis');
+  const [mode, setMode] = useState<'general' | 'analysis' | 'dataOps' | 'modeling'>('general');
 
   // Load mode from localStorage when sessionId changes
   useEffect(() => {
     if (sessionId) {
       const stored = localStorage.getItem(`mode_${sessionId}`);
-      if (stored && (stored === 'analysis' || stored === 'dataOps' || stored === 'modeling')) {
-        setMode(stored as 'analysis' | 'dataOps' | 'modeling');
+      if (stored && (stored === 'general' || stored === 'analysis' || stored === 'dataOps' || stored === 'modeling')) {
+        setMode(stored as 'general' | 'analysis' | 'dataOps' | 'modeling');
+      } else {
+        // Default to 'general' if no stored mode or invalid value
+        setMode('general');
       }
     } else {
-      setMode('analysis');
+      setMode('general');
     }
   }, [sessionId]);
 
@@ -58,7 +61,7 @@ export const useHomeState = () => {
     setDateColumns([]);
     setTotalRows(0);
     setTotalColumns(0);
-    setMode('analysis');
+    setMode('general');
   }, []);
 
   return {

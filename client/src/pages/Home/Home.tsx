@@ -8,8 +8,8 @@ import { useChatMessagesStream } from '@/hooks/useChatMessagesStream';
 interface HomeProps {
   resetTrigger?: number;
   loadedSessionData?: any;
-  initialMode?: 'analysis' | 'dataOps' | 'modeling';
-  onModeChange?: (mode: 'analysis' | 'dataOps' | 'modeling') => void;
+  initialMode?: 'general' | 'analysis' | 'dataOps' | 'modeling';
+  onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void;
 }
 
 export default function Home({ resetTrigger = 0, loadedSessionData, initialMode, onModeChange }: HomeProps) {

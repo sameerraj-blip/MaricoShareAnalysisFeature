@@ -3,7 +3,7 @@ import { Message, ThinkingStep } from '@/shared/schema';
 import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings } from 'lucide-react';
+import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import {
   Select,
@@ -35,8 +35,8 @@ interface ChatInterfaceProps {
   thinkingTargetTimestamp?: number | null;
   aiSuggestions?: string[]; // AI-generated suggestions
   collaborators?: string[]; // List of all collaborators in the session
-  mode?: 'analysis' | 'dataOps' | 'modeling'; // Current mode
-  onModeChange?: (mode: 'analysis' | 'dataOps' | 'modeling') => void; // Callback for mode change
+  mode?: 'general' | 'analysis' | 'dataOps' | 'modeling'; // Current mode
+  onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void; // Callback for mode change
 }
 
 // Dynamic suggestions based on conversation context
@@ -499,13 +499,15 @@ export function ChatInterface({
             {/* Mode Selector Dropdown - Inline with input */}
             {onModeChange && (
               <div className="flex-shrink-0">
-                <Select value={mode} onValueChange={(value: 'analysis' | 'dataOps' | 'modeling') => onModeChange(value)}>
+                <Select value={mode} onValueChange={(value: 'general' | 'analysis' | 'dataOps' | 'modeling') => onModeChange(value)}>
                   <SelectTrigger className="h-11 px-4 text-sm font-medium border-2 border-gray-200 bg-white hover:bg-gray-50 focus:ring-2 focus:ring-primary/40 focus:border-primary shadow-sm rounded-xl min-w-[170px]">
                     <div className="flex items-center gap-2">
+                      {mode === 'general' && <Sparkles className="w-4 h-4 text-gray-600" />}
                       {mode === 'analysis' && <BarChart3 className="w-4 h-4 text-gray-600" />}
                       {mode === 'dataOps' && <Database className="w-4 h-4 text-gray-600" />}
                       {mode === 'modeling' && <Settings className="w-4 h-4 text-gray-600" />}
                       <span className="font-medium text-gray-900">
+                        {mode === 'general' && 'General'}
                         {mode === 'analysis' && 'Analysis'}
                         {mode === 'dataOps' && 'Data Operation'}
                         {mode === 'modeling' && 'Modeling'}
@@ -513,6 +515,12 @@ export function ChatInterface({
                     </div>
                   </SelectTrigger>
                   <SelectContent side="top" sideOffset={8} className="min-w-[170px]">
+                    <SelectItem value="general">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-4 h-4" />
+                        <span>General (Auto-detect)</span>
+                      </div>
+                    </SelectItem>
                     <SelectItem value="analysis">
                       <div className="flex items-center gap-2">
                         <BarChart3 className="w-4 h-4" />

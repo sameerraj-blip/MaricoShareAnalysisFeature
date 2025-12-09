@@ -15,7 +15,8 @@ export async function streamChatRequest(
   chatHistory: Array<{ role: string; content: string }>,
   callbacks: StreamChatCallbacks,
   signal?: AbortSignal,
-  targetTimestamp?: number
+  targetTimestamp?: number,
+  mode?: 'general' | 'analysis' | 'dataOps' | 'modeling'
 ): Promise<void> {
   const userEmail = getUserEmail();
   const headers: Record<string, string> = {
@@ -37,6 +38,7 @@ export async function streamChatRequest(
         message,
         chatHistory,
         targetTimestamp,
+        ...(mode && { mode }), // Only include mode if provided
       }),
       signal,
     });

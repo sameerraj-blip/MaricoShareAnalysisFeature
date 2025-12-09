@@ -8,7 +8,7 @@ import { useRef, useEffect, useState } from 'react';
 interface UseHomeMutationsProps {
   sessionId: string | null;
   messages: Message[];
-  mode?: 'analysis' | 'dataOps' | 'modeling';
+  mode?: 'general' | 'analysis' | 'dataOps' | 'modeling';
   setSessionId: (id: string | null) => void;
   setInitialCharts: (charts: UploadResponse['charts']) => void;
   setInitialInsights: (insights: UploadResponse['insights']) => void;
@@ -25,7 +25,7 @@ interface UseHomeMutationsProps {
 export const useHomeMutations = ({
   sessionId,
   messages,
-  mode = 'analysis',
+  mode = 'general',
   setSessionId,
   setInitialCharts,
   setInitialInsights,
@@ -266,9 +266,12 @@ export const useHomeMutations = ({
           });
         });
       } else {
-        // For 'analysis' and 'modeling' modes, use regular chat
-        // TODO: Add separate modeling endpoint if needed
-      return new Promise<ChatResponse>((resolve, reject) => {
+        // For 'general', 'analysis', and 'modeling' modes, use regular chat endpoint
+        // Only send mode parameter if it's explicitly set (not 'general')
+        // For 'general' (auto-detect), don't send mode to let backend auto-detect
+        const modeToSend = mode === 'general' ? undefined : (mode === 'modeling' || mode === 'analysis' ? mode : undefined);
+        
+        return new Promise<ChatResponse>((resolve, reject) => {
         let responseData: ChatResponse | null = null;
         
         streamChatRequest(
@@ -313,7 +316,8 @@ export const useHomeMutations = ({
             },
           },
           abortControllerRef.current.signal,
-          targetTimestamp
+          targetTimestamp,
+          modeToSend
         ).catch((error: any) => {
             if (error?.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
             console.log('🚫 Request was cancelled by user');
