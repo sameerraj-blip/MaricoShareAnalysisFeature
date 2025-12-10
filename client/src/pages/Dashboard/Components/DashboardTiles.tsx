@@ -427,7 +427,7 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
 
   return (
     <div className="space-y-4">
-    <ResponsiveGridLayout
+      <ResponsiveGridLayout
         className="dashboard-grid"
         layouts={layouts}
         cols={COLS}
@@ -438,7 +438,7 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
         resizeHandles={canEdit ? ['s', 'e', 'n', 'w', 'se', 'sw', 'ne', 'nw'] : []}
         onLayoutChange={handleLayoutChange}
         draggableHandle={canEdit ? ".dashboard-tile-grab-area" : ""}
-        compactType="vertical"
+        compactType={null}
         preventCollision={false}
         draggableCancel="[data-dashboard-tile='chart'] button, [data-dashboard-tile='insight'] button"
       >
