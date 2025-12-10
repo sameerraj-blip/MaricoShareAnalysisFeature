@@ -2,6 +2,64 @@ import { API_BASE_URL } from "@/lib/config";
 import { getUserEmail } from "@/utils/userStorage";
 import { ChatResponse, ThinkingStep } from "@/shared/schema";
 
+/**
+ * Download modified dataset from data operations
+ */
+export async function downloadModifiedDataset(
+  sessionId: string,
+  format: 'csv' | 'xlsx' = 'csv'
+): Promise<void> {
+  const userEmail = getUserEmail();
+  const headers: Record<string, string> = {};
+
+  if (userEmail) {
+    headers["X-User-Email"] = userEmail;
+  }
+
+  try {
+    const url = `${API_BASE_URL}/api/data-ops/download/${sessionId}?format=${format}`;
+    console.log("🌐 Downloading modified dataset from:", url);
+    
+    const response = await fetch(url, {
+      method: "GET",
+      headers,
+      credentials: "include",
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to download dataset: ${response.status} ${errorText}`);
+    }
+
+    // Get filename from Content-Disposition header or generate one
+    const contentDisposition = response.headers.get("Content-Disposition");
+    let filename = `dataset_modified_${new Date().toISOString().split('T')[0]}.${format}`;
+    
+    if (contentDisposition) {
+      const filenameMatch = contentDisposition.match(/filename="?(.+)"?/i);
+      if (filenameMatch) {
+        filename = filenameMatch[1];
+      }
+    }
+
+    // Convert response to blob and trigger download
+    const blob = await response.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(downloadUrl);
+
+    console.log("✅ Dataset downloaded successfully:", filename);
+  } catch (error) {
+    console.error("❌ Failed to download dataset:", error);
+    throw error;
+  }
+}
+
 export interface StreamChatCallbacks {
   onThinkingStep?: (step: ThinkingStep) => void;
   onResponse?: (response: ChatResponse) => void;

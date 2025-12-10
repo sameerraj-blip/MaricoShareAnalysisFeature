@@ -218,6 +218,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       aiSuggestions={suggestions}
       collaborators={collaborators}
       mode={mode}
+      sessionId={sessionId}
       onModeChange={(newMode) => {
         setMode(newMode);
         // onModeChange will update the URL, which will update initialMode prop

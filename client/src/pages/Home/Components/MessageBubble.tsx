@@ -9,6 +9,7 @@ import { ThinkingDisplay } from './ThinkingDisplay';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { getUserEmail } from '@/utils/userStorage';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 interface MessageBubbleProps {
   message: Message;
@@ -22,6 +23,7 @@ interface MessageBubbleProps {
   messageIndex?: number;
   isLastUserMessage?: boolean;
   thinkingSteps?: ThinkingStep[]; // Thinking steps to display below user messages
+  sessionId?: string | null; // Session ID for downloading modified datasets
 }
 
 export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
@@ -36,6 +38,7 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
   messageIndex,
   isLastUserMessage = false,
   thinkingSteps,
+  sessionId,
 }, ref) => {
   const isUser = message.role === 'user';
   const currentUserEmail = getUserEmail()?.toLowerCase();
@@ -152,9 +155,9 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
             className="rounded-xl px-4 py-3 shadow-sm bg-white border border-gray-100"
             data-testid={`message-content-${message.role}`}
           >
-            <p className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">
-              {message.content}
-            </p>
+            <div className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">
+              <MarkdownRenderer content={message.content} />
+            </div>
           </div>
         )}
 
@@ -199,7 +202,7 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
         {/* Display data preview for Data Ops responses */}
         {!isUser && (message as any).preview && Array.isArray((message as any).preview) && (message as any).preview.length > 0 && (
           <div className="mt-3">
-            <DataPreviewTable data={(message as any).preview} />
+            <DataPreviewTable data={(message as any).preview} sessionId={sessionId} />
           </div>
         )}
 

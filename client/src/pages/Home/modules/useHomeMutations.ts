@@ -52,12 +52,8 @@ export const useHomeMutations = ({
     messagesRef.current = messages;
   }, [messages]);
 
-  const sanitizeMarkdown = (text: string) =>
-    text
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/\*(.*?)\*/g, '$1')
-      .replace(/__(.*?)__/g, '$1')
-      .replace(/_(.*?)_/g, '$1');
+  // Don't sanitize markdown - we'll render it properly in MessageBubble
+  // This preserves formatting like **bold** for headings
 
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
@@ -355,7 +351,7 @@ export const useHomeMutations = ({
       
       const assistantMessage: Message & { preview?: any[]; summary?: any[] } = {
         role: 'assistant',
-        content: sanitizeMarkdown(data.answer),
+        content: data.answer, // Keep markdown formatting for proper rendering
         charts: data.charts,
         insights: data.insights,
         timestamp: Date.now(),

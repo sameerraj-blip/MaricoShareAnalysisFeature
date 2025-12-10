@@ -7,11 +7,12 @@ import { Card, CardContent } from '@/components/ui/card';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Plus, BarChart3, X, Clock, ArrowLeft } from 'lucide-react';
 import { ChartSpec } from '@/shared/schema';
-import { useDashboardContext } from '@/pages/Dashboard/context/DashboardContext';
+import { DashboardContext } from '@/pages/Dashboard/context/DashboardContext';
 import { dashboardsApi } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { getUserEmail } from '@/utils/userStorage';
 import { DashboardData } from '@/pages/Dashboard/modules/useDashboardState';
+import { useContext } from 'react';
 
 interface DashboardModalProps {
   isOpen: boolean;
@@ -31,7 +32,30 @@ export function DashboardModal({ isOpen, onClose, chart }: DashboardModalProps) 
   const dropdownRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
   
-  const { dashboards, createDashboard, addChartToDashboard, refetch } = useDashboardContext();
+  // Safely get context - don't throw error if not available
+  const contextValue = useContext(DashboardContext);
+  
+  if (!contextValue) {
+    return (
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Error</DialogTitle>
+          </DialogHeader>
+          <div className="p-4">
+            <p className="text-sm text-muted-foreground">
+              Dashboard functionality is not available. Please navigate to the Dashboard page first.
+            </p>
+            <Button variant="outline" onClick={onClose} className="mt-4">
+              Close
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+  
+  const { dashboards, createDashboard, addChartToDashboard, refetch } = contextValue;
 
   // Helper function to check if user has edit permission on a dashboard
   const hasEditPermission = useMemo(() => {

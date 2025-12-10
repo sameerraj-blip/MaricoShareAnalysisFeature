@@ -1,16 +1,52 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Card } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Download, Loader2 } from 'lucide-react';
+import { downloadModifiedDataset } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
 
 interface DataPreviewTableProps {
   data: Record<string, any>[];
   title?: string;
   maxRows?: number;
+  sessionId?: string | null; // Session ID for downloading the full modified dataset
 }
 
-export function DataPreviewTable({ data, title, maxRows = 100 }: DataPreviewTableProps) {
+export function DataPreviewTable({ data, title, maxRows = 100, sessionId }: DataPreviewTableProps) {
+  const [downloadingFormat, setDownloadingFormat] = useState<'csv' | 'xlsx' | null>(null);
+  const { toast } = useToast();
+  
   const displayData = useMemo(() => {
     return data.slice(0, maxRows);
   }, [data, maxRows]);
+
+  const handleDownload = async (format: 'csv' | 'xlsx') => {
+    if (!sessionId) {
+      toast({
+        title: 'Error',
+        description: 'Session ID is required to download the dataset',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setDownloadingFormat(format);
+    try {
+      await downloadModifiedDataset(sessionId, format);
+      toast({
+        title: 'Success',
+        description: `Dataset downloaded as ${format.toUpperCase()}`,
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Download Failed',
+        description: error?.message || 'Failed to download dataset',
+        variant: 'destructive',
+      });
+    } finally {
+      setDownloadingFormat(null);
+    }
+  };
 
   if (!data || data.length === 0) {
     return (
@@ -24,8 +60,54 @@ export function DataPreviewTable({ data, title, maxRows = 100 }: DataPreviewTabl
 
   return (
     <Card className="p-4 mt-2">
-      {title && (
-        <h4 className="text-sm font-semibold mb-3 text-gray-900">{title}</h4>
+      {(title || sessionId) && (
+        <div className="flex items-center justify-between mb-3">
+          {title && (
+            <h4 className="text-sm font-semibold text-gray-900">{title}</h4>
+          )}
+          {sessionId && (
+            <div className="flex gap-2 ml-auto">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleDownload('csv')}
+                disabled={downloadingFormat !== null}
+                className="text-xs"
+              >
+                {downloadingFormat === 'csv' ? (
+                  <>
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Downloading...
+                  </>
+                ) : (
+                  <>
+                    <Download className="h-3 w-3 mr-1" />
+                    Download CSV
+                  </>
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleDownload('xlsx')}
+                disabled={downloadingFormat !== null}
+                className="text-xs"
+              >
+                {downloadingFormat === 'xlsx' ? (
+                  <>
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Downloading...
+                  </>
+                ) : (
+                  <>
+                    <Download className="h-3 w-3 mr-1" />
+                    Download Excel
+                  </>
+                )}
+              </Button>
+            </div>
+          )}
+        </div>
       )}
       <div className="overflow-x-auto max-h-[500px] overflow-y-auto border border-gray-200 rounded-md">
         <table className="w-full border-collapse text-sm">

@@ -25,7 +25,7 @@ interface DashboardContextType {
   refetch: () => Promise<any>;
 }
 
-const DashboardContext = createContext<DashboardContextType | undefined>(undefined);
+export const DashboardContext = createContext<DashboardContextType | undefined>(undefined);
 
 interface DashboardProviderProps {
   children: ReactNode;

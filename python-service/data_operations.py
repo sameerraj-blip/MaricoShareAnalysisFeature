@@ -654,14 +654,54 @@ def convert_type(
             if pd.isna(value):
                 row[key] = None
             elif isinstance(value, (np.integer, np.floating)):
-                row[key] = value.item()
+                # For string conversions, keep as string (don't convert back to number)
+                if target_type == "string" and key == column:
+                    row[key] = str(value.item())
+                else:
+                    row[key] = value.item()
             elif isinstance(value, np.ndarray):
                 row[key] = value.tolist()
             elif isinstance(value, datetime):
                 row[key] = value.isoformat()
+            elif target_type == "string" and key == column and not isinstance(value, str):
+                # Ensure the converted column is a string
+                row[key] = str(value)
     
-    # Round all numeric values to 2 decimal places
-    result_data = round_numeric_values_to_2_decimals(result_data)
+    # Round all numeric values to 2 decimal places, but skip columns converted to string
+    # We need to preserve string values, so we'll round only non-string columns
+    if target_type != "string":
+        result_data = round_numeric_values_to_2_decimals(result_data)
+    else:
+        # For string conversions, only round other columns, not the converted column
+        rounded_data = []
+        for row in result_data:
+            rounded_row = {}
+            for key, value in row.items():
+                if key == column:
+                    # Keep the converted column as string
+                    rounded_row[key] = str(value) if value is not None else None
+                else:
+                    # Round other numeric columns
+                    if value is None or pd.isna(value):
+                        rounded_row[key] = None
+                    elif isinstance(value, (int, np.integer)):
+                        rounded_row[key] = int(value) if isinstance(value, np.integer) else value
+                    elif isinstance(value, (float, np.floating)):
+                        rounded_row[key] = round(float(value), 2)
+                    elif isinstance(value, str):
+                        # Try to convert string numbers to float and round (for other columns)
+                        try:
+                            num_value = float(value)
+                            if not np.isnan(num_value) and np.isfinite(num_value):
+                                rounded_row[key] = round(num_value, 2)
+                            else:
+                                rounded_row[key] = value
+                        except (ValueError, TypeError):
+                            rounded_row[key] = value
+                    else:
+                        rounded_row[key] = value
+            rounded_data.append(rounded_row)
+        result_data = rounded_data
     
     return {
         "data": result_data,

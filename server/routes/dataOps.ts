@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { dataOpsChatWithAI, dataOpsChatWithAIStream } from "../controllers/dataOpsController.js";
+import { dataOpsChatWithAI, dataOpsChatWithAIStream, downloadModifiedDataset } from "../controllers/dataOpsController.js";
 
 const router = Router();
 
@@ -15,7 +15,10 @@ router.post('/data-ops/chat', dataOpsChatWithAI);
 // Streaming Data Ops chat endpoint (SSE)
 router.post('/data-ops/chat/stream', dataOpsChatWithAIStream);
 
-console.log('✅ Data Ops routes registered: /api/data-ops/chat, /api/data-ops/chat/stream');
+// Download modified dataset endpoint
+router.get('/data-ops/download/:sessionId', downloadModifiedDataset);
+
+console.log('✅ Data Ops routes registered: /api/data-ops/chat, /api/data-ops/chat/stream, /api/data-ops/download/:sessionId');
 
 export default router;
 

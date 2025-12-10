@@ -37,6 +37,7 @@ interface ChatInterfaceProps {
   collaborators?: string[]; // List of all collaborators in the session
   mode?: 'general' | 'analysis' | 'dataOps' | 'modeling'; // Current mode
   onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void; // Callback for mode change
+  sessionId?: string | null; // Session ID for downloading modified datasets
 }
 
 // Dynamic suggestions based on conversation context
@@ -102,6 +103,7 @@ export function ChatInterface({
   collaborators: propCollaborators,
   mode = 'analysis',
   onModeChange,
+  sessionId,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
@@ -435,6 +437,7 @@ export function ChatInterface({
                 totalColumns={originalIndex === 0 ? totalColumns : undefined}
                 onEditMessage={onEditMessage}
                 messageIndex={originalIndex >= 0 ? originalIndex : idx}
+                sessionId={sessionId}
                 isLastUserMessage={isLastUserMessage}
                 thinkingSteps={showThinkingSteps ? thinkingSteps : undefined}
                 ref={isLastMessage ? lastMessageRef : undefined}
@@ -454,7 +457,8 @@ export function ChatInterface({
               </h3>
             </div>
           )}
-          {messages.length === 0 && (
+          {/* Show suggestions when no messages OR when there's only the initial assistant message from upload */}
+          {(messages.length === 0 || (messages.length === 1 && messages[0].role === 'assistant')) && (
             <div className="mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">Try asking:</h3>
               <div className="flex flex-wrap gap-2 justify-center" data-testid="suggestion-chips">
@@ -475,8 +479,8 @@ export function ChatInterface({
             </div>
           )}
           
-          {/* Show follow-up suggestions after assistant messages */}
-          {filteredMessages.length > 0 && filteredMessages[filteredMessages.length - 1].role === 'assistant' && !isLoading && (
+          {/* Show follow-up suggestions after assistant messages (when there are multiple messages) */}
+          {filteredMessages.length > 1 && filteredMessages[filteredMessages.length - 1].role === 'assistant' && !isLoading && (
             <div className="mb-4 mt-2">
               <div className="flex flex-wrap gap-2 justify-center">
                 {getSuggestions(messages, columns, numericColumns, aiSuggestions).slice(0, 3).map((suggestion, idx) => (

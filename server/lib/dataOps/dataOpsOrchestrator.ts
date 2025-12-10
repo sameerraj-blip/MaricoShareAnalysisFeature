@@ -894,28 +894,106 @@ export async function parseDataOpsIntent(
     }
   }
   
-  // Type conversion intent
-  const typeMatch = lowerMessage.match(/convert\s+(\w+)\s+to\s+(numeric|string|date|percentage|boolean|number)/i);
-  if (typeMatch) {
-    const columnName = typeMatch[1];
-    const targetTypeRaw = typeMatch[2].toLowerCase();
-    const matchedColumn = findMatchingColumn(columnName, availableColumns);
-    
-    if (matchedColumn) {
-      const normalizedTarget = (targetTypeRaw === 'number' ? 'numeric' : targetTypeRaw) as 'numeric' | 'string' | 'date' | 'percentage' | 'boolean';
-      return {
-        operation: 'convert_type',
-        column: matchedColumn,
-        targetType: normalizedTarget,
-        requiresClarification: false
-      };
-    } else {
-      return {
-        operation: 'convert_type',
-        requiresClarification: true,
-        clarificationType: 'column',
-        clarificationMessage: `Column "${columnName}" not found. Please specify a valid column name.`
-      };
+  // Type conversion intent - handle multi-word column names
+  // Patterns: "convert Dove nGRP Adstocked to string", "convert column X to numeric", etc.
+  const convertTypePatterns = [
+    // Pattern 1: "convert [column name] to [type]" - captures everything between "convert" and "to"
+    /\b(convert|change|transform)\s+(?:the\s+)?(?:column\s+)?(.+?)\s+(?:data\s+)?type\s+to\s+(numeric|string|date|percentage|boolean|number)/i,
+    // Pattern 2: "convert [column name] to [type]" - simpler pattern
+    /\b(convert|change|transform)\s+(?:the\s+)?(?:column\s+)?(.+?)\s+to\s+(numeric|string|date|percentage|boolean|number)/i,
+  ];
+  
+  for (const pattern of convertTypePatterns) {
+    const typeMatch = message.match(pattern);
+    if (typeMatch) {
+      let extractedColumnName = typeMatch[2].trim();
+      const targetTypeRaw = (typeMatch[3] || typeMatch[4] || '').toLowerCase();
+      
+      // Clean up extracted column name - remove common stop words at the end
+      extractedColumnName = extractedColumnName.replace(/\s+(please|can|you|will|the|column|columns|for|to|with|by|data|type)$/i, '').trim();
+      // Remove trailing punctuation
+      extractedColumnName = extractedColumnName.replace(/[.,;:!?]+$/, '');
+      
+      // Try to match the extracted column name against available columns
+      let mentionedColumn: string | undefined;
+      if (extractedColumnName) {
+        const normalizedExtracted = extractedColumnName.toLowerCase().replace(/\s+/g, ' ').trim();
+        const extractedWords = normalizedExtracted.split(/\s+/).filter(w => w.length > 0);
+        
+        // First try exact match (case-insensitive, normalized spaces)
+        for (const col of availableColumns) {
+          const normalizedCol = col.toLowerCase().replace(/\s+/g, ' ').trim();
+          if (normalizedCol === normalizedExtracted) {
+            mentionedColumn = col;
+            break;
+          }
+        }
+        
+        // If no exact match, try to find column where ALL words from extracted name match
+        if (!mentionedColumn && extractedWords.length > 0) {
+          // Sort columns by length (longest first) to prioritize more specific matches
+          const sortedColumns = [...availableColumns].sort((a, b) => b.length - a.length);
+          
+          for (const col of sortedColumns) {
+            const colLower = col.toLowerCase();
+            let allWordsMatch = true;
+            let matchCount = 0;
+            
+            for (const word of extractedWords) {
+              // Use word boundary regex to ensure we match complete words
+              const wordRegex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+              if (wordRegex.test(colLower)) {
+                matchCount++;
+              } else {
+                // If word doesn't match as a word boundary, check if it's a substring
+                // but only if the word is significant (length >= 2)
+                if (word.length >= 2 && colLower.includes(word)) {
+                  matchCount++;
+                } else {
+                  allWordsMatch = false;
+                  break;
+                }
+              }
+            }
+            
+            // If all words match, return this column immediately
+            if (allWordsMatch && matchCount === extractedWords.length) {
+              mentionedColumn = col;
+              break;
+            }
+          }
+        }
+        
+        // If still no match, try the original findMentionedColumn function
+        if (!mentionedColumn) {
+          mentionedColumn = findMentionedColumn(extractedColumnName, availableColumns);
+        }
+      }
+      
+      if (mentionedColumn && targetTypeRaw) {
+        const normalizedTarget = (targetTypeRaw === 'number' ? 'numeric' : targetTypeRaw) as 'numeric' | 'string' | 'date' | 'percentage' | 'boolean';
+        return {
+          operation: 'convert_type',
+          column: mentionedColumn,
+          targetType: normalizedTarget,
+          requiresClarification: false
+        };
+      } else if (!mentionedColumn) {
+        return {
+          operation: 'convert_type',
+          requiresClarification: true,
+          clarificationType: 'column',
+          clarificationMessage: `Column "${extractedColumnName}" not found. Please specify a valid column name.`
+        };
+      } else if (!targetTypeRaw) {
+        return {
+          operation: 'convert_type',
+          column: mentionedColumn,
+          requiresClarification: true,
+          clarificationType: 'target_type',
+          clarificationMessage: `What type would you like to convert "${mentionedColumn}" to? (numeric, string, date, percentage, or boolean)`
+        };
+      }
     }
   }
   
@@ -1002,6 +1080,7 @@ Determine the intent and return JSON with this structure:
   "defaultValue": any (if creating static column),
   "transformType": "add" | "subtract" | "multiply" | "divide" (if modifying existing column),
   "transformValue": number (if modifying existing column),
+  "targetType": "numeric" | "string" | "date" | "percentage" | "boolean" (if convert_type operation, the target data type),
   "limit": number (if preview operation with first/last mode, the number of rows to show, e.g., "show first 10 rows" -> limit: 10, default: 50),
   "previewMode": "first" | "last" | "specific" | "range" (if preview operation, how to select rows),
   "previewStartRow": number (if previewMode is "specific" or "range", the starting row number, 1-based),
@@ -1131,6 +1210,7 @@ Return ONLY valid JSON, no other text.`;
       defaultValue: parsed.defaultValue,
       transformType: parsed.transformType,
       transformValue: parsed.transformValue,
+      targetType: parsed.targetType,
       limit: parsed.limit,
       previewMode: parsed.previewMode,
       previewStartRow: parsed.previewStartRow,
@@ -2027,6 +2107,26 @@ Return JSON:
 }
 
 /**
+ * Check if user explicitly requested to see/preview the data
+ */
+function userRequestedPreview(message: string | undefined): boolean {
+  if (!message) return false;
+  const lowerMessage = message.toLowerCase();
+  
+  // Check for explicit preview/show requests
+  const previewPatterns = [
+    /show\s+(?:me\s+)?(?:the\s+)?(?:data|dataset|result|updated\s+data|new\s+data)/i,
+    /preview/i,
+    /display/i,
+    /see\s+(?:the\s+)?(?:data|dataset|result)/i,
+    /view\s+(?:the\s+)?(?:data|dataset)/i,
+    /give\s+me\s+(?:a\s+)?(?:preview|look)/i,
+  ];
+  
+  return previewPatterns.some(pattern => pattern.test(lowerMessage));
+}
+
+/**
  * Execute data operation based on intent
  */
 export async function executeDataOperation(
@@ -2043,6 +2143,8 @@ export async function executeDataOperation(
   summary?: any[];
   saved?: boolean;
 }> {
+  // Check if user explicitly requested preview (except for 'preview' operation which always shows data)
+  const shouldShowPreview = intent.operation === 'preview' || userRequestedPreview(originalMessage);
   if (intent.requiresClarification) {
     // Save pending operation to context
     if (sessionDoc) {
@@ -2097,11 +2199,17 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, result.data);
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Removed ${result.nulls_removed} null value(s). Rows: ${result.rows_before} → ${result.rows_after}.`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, result.data);
+        answerText += ` Here's a preview of the updated data:`;
+      }
       
       return {
-        answer: `✅ Removed ${result.nulls_removed} null value(s). Rows: ${result.rows_before} → ${result.rows_after}. Here's a preview of the updated data:`,
+        answer: answerText,
         data: result.data,
         preview: previewData,
         saved: true
@@ -2333,12 +2441,18 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview from saved rawData (reload document to get updated rawData)
-      const updatedDoc = await getChatBySessionIdEfficient(sessionId);
-      const previewData = updatedDoc?.rawData ? updatedDoc.rawData.slice(0, 50) : modifiedData.slice(0, 50);
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Successfully created column "${newColumnName}"${defaultValue !== undefined ? ` with value "${defaultValue}"` : ''}.`;
+      
+      if (shouldShowPreview) {
+        const updatedDoc = await getChatBySessionIdEfficient(sessionId);
+        previewData = updatedDoc?.rawData ? updatedDoc.rawData.slice(0, 50) : modifiedData.slice(0, 50);
+        answerText += ` Here's a preview of the updated data:`;
+      }
       
       return {
-        answer: `✅ Successfully created column "${newColumnName}"${defaultValue !== undefined ? ` with value "${defaultValue}"` : ''}. Here's a preview of the updated data:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2391,11 +2505,17 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, result.data);
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Successfully created column "${newColumnName}" with expression: ${expression}.`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, result.data);
+        answerText += `\n\nHere's a preview of the updated data:`;
+      }
       
       return {
-        answer: `✅ Successfully created column "${newColumnName}" with expression: ${expression}\n\nHere's a preview of the updated data:`,
+        answer: answerText,
         data: result.data,
         preview: previewData,
         saved: true
@@ -2453,11 +2573,17 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
-
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Normalized column "${intent.column}" using min-max scaling (0-1).`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview:`;
+      }
+      
       return {
-        answer: `✅ Normalized column "${intent.column}" using min-max scaling (0-1). Here's a preview:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2519,11 +2645,17 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
-
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Updated column "${intent.column}" by ${intent.transformType === 'add' ? 'adding' : intent.transformType === 'subtract' ? 'subtracting' : intent.transformType === 'multiply' ? 'multiplying by' : 'dividing by'} ${intent.transformValue}.`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview of the updated data:`;
+      }
+      
       return {
-        answer: `✅ Updated column "${intent.column}" by ${intent.transformType === 'add' ? 'adding' : intent.transformType === 'subtract' ? 'subtracting' : intent.transformType === 'multiply' ? 'multiplying by' : 'dividing by'} ${intent.transformValue}. Here's a preview of the updated data:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2582,11 +2714,17 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
-
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Removed ${description}.`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview of the updated data:`;
+      }
+      
       return {
-        answer: `✅ Removed ${description}. Here's a preview of the updated data:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2611,11 +2749,17 @@ export async function executeDataOperation(
         sessionDoc
       );
 
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
-
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Added a new empty row at the bottom.`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview:`;
+      }
+      
       return {
-        answer: `✅ Added a new empty row at the bottom. Here's a preview:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2683,11 +2827,17 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Replaced ${replacedCount} occurrence(s) of "${intent.oldValue}" with "${intent.newValue}"${intent.column ? ` in column "${intent.column}"` : ' across all columns'}.`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview of the updated data:`;
+      }
       
       return {
-        answer: `✅ Replaced ${replacedCount} occurrence(s) of "${intent.oldValue}" with "${intent.newValue}"${intent.column ? ` in column "${intent.column}"` : ' across all columns'}. Here's a preview of the updated data:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2724,11 +2874,17 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Successfully removed column "${intent.column}".`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview of the updated data:`;
+      }
       
       return {
-        answer: `✅ Successfully removed column "${intent.column}". Here's a preview of the updated data:`,
+        answer: answerText,
         data: modifiedData,
         preview: previewData,
         saved: true
@@ -2753,15 +2909,20 @@ export async function executeDataOperation(
         sessionDoc
       );
       
-      // Get preview from saved rawData
-      const previewData = await getPreviewFromSavedData(sessionId, result.data);
-      
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
       const errorMsg = result.conversion_info.errors.length > 0
         ? ` Note: ${result.conversion_info.errors.join(', ')}`
         : '';
+      let answerText = `✅ Converted "${intent.column}" to ${intent.targetType}.${errorMsg}`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, result.data);
+        answerText += ` Here's a preview:`;
+      }
       
       return {
-        answer: `✅ Converted "${intent.column}" to ${intent.targetType}.${errorMsg} Here's a preview:`,
+        answer: answerText,
         data: result.data,
         preview: previewData,
         saved: true
