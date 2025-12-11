@@ -34,14 +34,28 @@ export function FileUpload({ onFileSelect, isUploading, autoOpenTrigger = 0 }: F
   });
 
   // Programmatically open the file dialog when trigger changes
+  // Only open when explicitly triggered (autoOpenTrigger > 0), not on initial render
   const lastTriggerRef = useRef<number>(0);
+  const isInitialMount = useRef<boolean>(true);
+  
   useEffect(() => {
+    // Skip on initial mount to prevent auto-opening when component first renders
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    
     // Only open once per unique trigger value; avoid re-open on cancel
+    // Only open when autoOpenTrigger is explicitly set (> 0)
     if (autoOpenTrigger > 0 && autoOpenTrigger !== lastTriggerRef.current && !isUploading) {
       lastTriggerRef.current = autoOpenTrigger;
-      try { open(); } catch {}
+      try { 
+        open(); 
+      } catch (error) {
+        console.error('Failed to open file dialog:', error);
+      }
     }
-  }, [autoOpenTrigger, isUploading]);
+  }, [autoOpenTrigger, isUploading, open]);
 
   return (
     <div className="h-[calc(100vh-80px)] bg-gradient-to-br from-slate-50 to-white flex items-center justify-center p-4">

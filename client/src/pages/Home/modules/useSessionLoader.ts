@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 interface UseSessionLoaderProps {
   loadedSessionData?: any;
   setSessionId: (id: string | null) => void;
+  setFileName: (fileName: string | null) => void;
   setInitialCharts: (charts: any[]) => void;
   setInitialInsights: (insights: any[]) => void;
   setSampleRows: (rows: Record<string, any>[]) => void;
@@ -22,6 +23,7 @@ interface UseSessionLoaderProps {
 export const useSessionLoader = ({
   loadedSessionData,
   setSessionId,
+  setFileName,
   setInitialCharts,
   setInitialInsights,
   setSampleRows,
@@ -39,8 +41,9 @@ export const useSessionLoader = ({
     const session = loadedSessionData.session;
     if (!session) return;
 
-    // Set session ID
+    // Set session ID and fileName
     setSessionId(session.sessionId);
+    setFileName(session.fileName || null);
 
     // Set collaborators if available
     if (setCollaborators && session.collaborators && Array.isArray(session.collaborators)) {
@@ -83,6 +86,7 @@ export const useSessionLoader = ({
   }, [
     loadedSessionData,
     setSessionId,
+    setFileName,
     setInitialCharts,
     setInitialInsights,
     setSampleRows,

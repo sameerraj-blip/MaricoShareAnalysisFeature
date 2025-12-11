@@ -10,6 +10,7 @@ interface UseHomeMutationsProps {
   messages: Message[];
   mode?: 'general' | 'analysis' | 'dataOps' | 'modeling';
   setSessionId: (id: string | null) => void;
+  setFileName: (fileName: string | null) => void;
   setInitialCharts: (charts: UploadResponse['charts']) => void;
   setInitialInsights: (insights: UploadResponse['insights']) => void;
   setSampleRows: (rows: Record<string, any>[]) => void;
@@ -27,6 +28,7 @@ export const useHomeMutations = ({
   messages,
   mode = 'general',
   setSessionId,
+  setFileName,
   setInitialCharts,
   setInitialInsights,
   setSampleRows,
@@ -62,6 +64,7 @@ export const useHomeMutations = ({
     onSuccess: (data) => {
       console.log("upload chart data from the backend",data)
       setSessionId(data.sessionId);
+      setFileName(data.fileName || null);
       setInitialCharts(data.charts);
       setInitialInsights(data.insights);
       

@@ -24,6 +24,8 @@ function Router() {
   const [location, setLocation] = useLocation();
   const [resetTrigger, setResetTrigger] = useState(0);
   const [loadedSessionData, setLoadedSessionData] = useState<any>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [currentFileName, setCurrentFileName] = useState<string | null>(null);
 
   // Extract mode from URL path
   const getModeFromPath = (path: string): ModeType => {
@@ -56,6 +58,8 @@ function Router() {
     const currentMode = getModeFromPath(location);
     setLocation(`/${currentMode === 'dataOps' ? 'data-ops' : currentMode === 'modeling' ? 'modeling' : 'analysis'}`);
     setLoadedSessionData(null);
+    setCurrentSessionId(null);
+    setCurrentFileName(null);
   };
 
   const handleUploadNew = () => {
@@ -63,10 +67,14 @@ function Router() {
     setLocation(`/${currentMode === 'dataOps' ? 'data-ops' : currentMode === 'modeling' ? 'modeling' : 'analysis'}`);
     setResetTrigger(prev => prev + 1);
     setLoadedSessionData(null);
+    setCurrentSessionId(null);
+    setCurrentFileName(null);
   };
 
   const handleLoadSession = (sessionId: string, sessionData: any) => {
     console.log('🔄 Loading session in App:', sessionId, sessionData);
+    // Clear resetTrigger to prevent file dialog from opening when loading a session
+    setResetTrigger(0);
     setLoadedSessionData(sessionData);
     // Navigate to chat interface (default to analysis mode) when loading a session
     setLocation('/analysis');
@@ -93,12 +101,19 @@ function Router() {
   const currentPage = getCurrentPage();
   const currentMode = getModeFromPath(location);
 
+  const handleSessionChange = (sessionId: string | null, fileName: string | null) => {
+    setCurrentSessionId(sessionId);
+    setCurrentFileName(fileName);
+  };
+
   return (
     <Layout 
       currentPage={currentPage}
       onNavigate={handleNavigate}
       onNewChat={handleNewChat}
       onUploadNew={handleUploadNew}
+      sessionId={currentSessionId}
+      fileName={currentFileName}
     >
       <Switch>
         <Route path="/analysis/history">
@@ -110,6 +125,7 @@ function Router() {
             loadedSessionData={loadedSessionData}
             initialMode="analysis"
             onModeChange={handleModeChange}
+            onSessionChange={handleSessionChange}
           />
         </Route>
         <Route path="/data-ops">
@@ -118,6 +134,7 @@ function Router() {
             loadedSessionData={loadedSessionData}
             initialMode="dataOps"
             onModeChange={handleModeChange}
+            onSessionChange={handleSessionChange}
           />
         </Route>
         <Route path="/modeling">
@@ -126,6 +143,7 @@ function Router() {
             loadedSessionData={loadedSessionData}
             initialMode="modeling"
             onModeChange={handleModeChange}
+            onSessionChange={handleSessionChange}
           />
         </Route>
         <Route path="/dashboard">

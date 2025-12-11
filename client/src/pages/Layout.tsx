@@ -9,11 +9,13 @@ import {
   Menu,
   X,
   Upload,
-  User
+  User,
+  Share2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import LogoutButton from '@/components/LogoutButton';
+import { ShareAnalysisDialog } from '@/pages/Analysis/ShareAnalysisDialog';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -21,10 +23,13 @@ interface LayoutProps {
   onNavigate: (page: 'home' | 'dashboard' | 'analysis') => void;
   onNewChat: () => void;
   onUploadNew?: () => void;
+  sessionId?: string;
+  fileName?: string;
 }
 
-export function Layout({ children, currentPage, onNavigate, onNewChat, onUploadNew }: LayoutProps) {
+export function Layout({ children, currentPage, onNavigate, onNewChat, onUploadNew, sessionId, fileName }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const { user } = useAuth();
 
   const navigationItems = [
@@ -130,6 +135,18 @@ export function Layout({ children, currentPage, onNavigate, onNewChat, onUploadN
           <div className="flex items-center justify-between">
             <h1>Marico Insighting</h1>
             <div className="flex items-center gap-3">
+              {/* Only show Share Analysis button when on analysis/chat interface (home page) with an active session */}
+              {currentPage === 'home' && sessionId && (
+                <Button
+                  onClick={() => setShareDialogOpen(true)}
+                  variant="outline"
+                  size="sm"
+                  className="flex items-center gap-2 rounded-md shadow-sm hover:shadow transition"
+                >
+                  <Share2 className="h-4 w-4" />
+                  Share Analysis
+                </Button>
+              )}
               {onUploadNew && (
                 <Button
                   onClick={onUploadNew}
@@ -150,6 +167,12 @@ export function Layout({ children, currentPage, onNavigate, onNewChat, onUploadN
           {children}
         </div>
       </div>
+      <ShareAnalysisDialog
+        open={shareDialogOpen}
+        onOpenChange={setShareDialogOpen}
+        sessionId={sessionId}
+        fileName={fileName}
+      />
     </div>
   );
 }

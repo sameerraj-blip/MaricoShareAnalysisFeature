@@ -3,6 +3,7 @@ import { Message, UploadResponse } from '@/shared/schema';
 
 export interface HomeState {
   sessionId: string | null;
+  fileName: string | null;
   messages: Message[];
   initialCharts: UploadResponse['charts'];
   initialInsights: UploadResponse['insights'];
@@ -17,6 +18,7 @@ export interface HomeState {
 
 export const useHomeState = () => {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [initialCharts, setInitialCharts] = useState<UploadResponse['charts']>([]);
   const [initialInsights, setInitialInsights] = useState<UploadResponse['insights']>([]);
@@ -52,6 +54,7 @@ export const useHomeState = () => {
 
   const resetState = useCallback(() => {
     setSessionId(null);
+    setFileName(null);
     setMessages([]);
     setInitialCharts([]);
     setInitialInsights([]);
@@ -67,6 +70,7 @@ export const useHomeState = () => {
   return {
     // State values
     sessionId,
+    fileName,
     messages,
     initialCharts,
     initialInsights,
@@ -80,6 +84,7 @@ export const useHomeState = () => {
     
     // State setters
     setSessionId,
+    setFileName,
     setMessages,
     setInitialCharts,
     setInitialInsights,

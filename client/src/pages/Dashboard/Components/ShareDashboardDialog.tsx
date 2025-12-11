@@ -15,6 +15,20 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { sharedDashboardsApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 
+// Utility function to parse multiple emails from space-separated input
+const parseEmails = (input: string): string[] => {
+  return input
+    .split(/\s+/)
+    .map(email => email.trim())
+    .filter(email => email.length > 0);
+};
+
+// Utility function to validate email format
+const isValidEmail = (email: string): boolean => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+};
+
 interface ShareDashboardDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -51,17 +65,51 @@ export const ShareDashboardDialog = ({
 
   const handleShare = async () => {
     if (!dashboardId || !targetEmail.trim()) return;
+    
+    // Parse multiple emails from input
+    const emails = parseEmails(targetEmail);
+    
+    // Validate all emails
+    const invalidEmails = emails.filter(email => !isValidEmail(email));
+    if (invalidEmails.length > 0) {
+      toast({
+        title: "Invalid email format",
+        description: `Please check these emails: ${invalidEmails.join(', ')}`,
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    if (emails.length === 0) {
+      toast({
+        title: "No emails provided",
+        description: "Please enter at least one email address.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
     setIsSubmitting(true);
     try {
-      await sharedDashboardsApi.share({
-        dashboardId,
-        targetEmail: targetEmail.trim(),
-        permission,
-        note: note.trim() || undefined,
-      });
+      // Share with each email address
+      const sharePromises = emails.map(email =>
+        sharedDashboardsApi.share({
+          dashboardId,
+          targetEmail: email,
+          permission,
+          note: note.trim() || undefined,
+        })
+      );
+      
+      await Promise.all(sharePromises);
+      
+      const emailText = emails.length === 1 
+        ? emails[0] 
+        : `${emails.length} recipients`;
+      
       toast({
-        title: "Invite sent",
-        description: `${dashboardName ?? "Dashboard"} was shared with ${targetEmail.trim()} with ${permission} permission.`,
+        title: "Invites sent",
+        description: `${dashboardName ?? "Dashboard"} was shared with ${emailText} with ${permission} permission.`,
       });
       resetForm();
       onOpenChange(false);
@@ -91,13 +139,16 @@ export const ShareDashboardDialog = ({
             <Label htmlFor="share-email">Recipient email</Label>
             <Input
               id="share-email"
-              type="email"
-              placeholder="teammate@example.com"
+              type="text"
+              placeholder="teammate@example.com teammate2@example.com"
               value={targetEmail}
               onChange={(event) => setTargetEmail(event.target.value)}
               disabled={isSubmitting}
               required
             />
+            <p className="text-xs text-muted-foreground">
+              Enter multiple emails separated by spaces
+            </p>
           </div>
           <div className="space-y-3">
             <Label>Permission</Label>

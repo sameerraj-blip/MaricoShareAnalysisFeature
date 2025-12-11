@@ -18,6 +18,20 @@ import { useToast } from "@/hooks/use-toast";
 import { getUserEmail } from "@/utils/userStorage";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
+// Utility function to parse multiple emails from space-separated input
+const parseEmails = (input: string): string[] => {
+  return input
+    .split(/\s+/)
+    .map(email => email.trim())
+    .filter(email => email.length > 0);
+};
+
+// Utility function to validate email format
+const isValidEmail = (email: string): boolean => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+};
+
 interface ShareAnalysisDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -103,31 +117,63 @@ export const ShareAnalysisDialog = ({
 
   const handleShare = async () => {
     if (!sessionId || !targetEmail.trim()) return;
+    
+    // Parse multiple emails from input
+    const emails = parseEmails(targetEmail);
+    
+    // Validate all emails
+    const invalidEmails = emails.filter(email => !isValidEmail(email));
+    if (invalidEmails.length > 0) {
+      toast({
+        title: "Invalid email format",
+        description: `Please check these emails: ${invalidEmails.join(', ')}`,
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    if (emails.length === 0) {
+      toast({
+        title: "No emails provided",
+        description: "Please enter at least one email address.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
     setIsSubmitting(true);
     try {
       const dashboardIds = Object.keys(selectedDashboards);
+      const dashboardPermissions = dashboardIds.length > 0 
+        ? Object.fromEntries(
+            dashboardIds.map(id => [id, selectedDashboards[id].editable ? 'edit' : 'view'])
+          )
+        : undefined;
       
-      // Share analysis with multiple dashboards
-      // For now, we'll share them one by one (backend will need to support array)
-      await sharedAnalysesApi.share({
-        sessionId,
-        targetEmail: targetEmail.trim(),
-        note: note.trim() || undefined,
-        dashboardIds: dashboardIds.length > 0 ? dashboardIds : undefined,
-        dashboardPermissions: dashboardIds.length > 0 
-          ? Object.fromEntries(
-              dashboardIds.map(id => [id, selectedDashboards[id].editable ? 'edit' : 'view'])
-            )
-          : undefined,
-      });
+      // Share with each email address
+      const sharePromises = emails.map(email =>
+        sharedAnalysesApi.share({
+          sessionId,
+          targetEmail: email,
+          note: note.trim() || undefined,
+          dashboardIds: dashboardIds.length > 0 ? dashboardIds : undefined,
+          dashboardPermissions,
+        })
+      );
+      
+      await Promise.all(sharePromises);
       
       const dashboardCount = dashboardIds.length;
       const dashboardText = dashboardCount > 0 
         ? ` and ${dashboardCount} dashboard${dashboardCount > 1 ? 's' : ''}`
         : "";
+      const emailText = emails.length === 1 
+        ? emails[0] 
+        : `${emails.length} recipients`;
+      
       toast({
-        title: "Invite sent",
-        description: `${fileName ?? "Analysis"}${dashboardText} was shared with ${targetEmail.trim()}.`,
+        title: "Invites sent",
+        description: `${fileName ?? "Analysis"}${dashboardText} was shared with ${emailText}.`,
       });
       resetForm();
       onOpenChange(false);
@@ -158,13 +204,16 @@ export const ShareAnalysisDialog = ({
             <Label htmlFor="share-email">Recipient email</Label>
             <Input
               id="share-email"
-              type="email"
-              placeholder="teammate@example.com"
+              type="text"
+              placeholder="teammate@example.com teammate2@example.com"
               value={targetEmail}
               onChange={(event) => setTargetEmail(event.target.value)}
               disabled={isSubmitting}
               required
             />
+            <p className="text-xs text-muted-foreground">
+              Enter multiple emails separated by spaces
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="share-note">Message (optional)</Label>

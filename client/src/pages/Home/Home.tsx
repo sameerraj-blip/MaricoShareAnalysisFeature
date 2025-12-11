@@ -10,14 +10,16 @@ interface HomeProps {
   loadedSessionData?: any;
   initialMode?: 'general' | 'analysis' | 'dataOps' | 'modeling';
   onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void;
+  onSessionChange?: (sessionId: string | null, fileName: string | null) => void;
 }
 
-export default function Home({ resetTrigger = 0, loadedSessionData, initialMode, onModeChange }: HomeProps) {
+export default function Home({ resetTrigger = 0, loadedSessionData, initialMode, onModeChange, onSessionChange }: HomeProps) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const {
     sessionId,
+    fileName,
     messages,
     initialCharts,
     initialInsights,
@@ -29,6 +31,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     totalColumns,
     mode,
     setSessionId,
+    setFileName,
     setMessages,
     setInitialCharts,
     setInitialInsights,
@@ -47,6 +50,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     messages,
     mode,
     setSessionId,
+    setFileName,
     setInitialCharts,
     setInitialInsights,
     setSampleRows,
@@ -163,17 +167,19 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   }, [initialMode]); // Only depend on initialMode, not mode
 
   // Reset state only when resetTrigger changes (upload new file)
+  // Only reset if resetTrigger > 0 AND we're not loading a session
   useEffect(() => {
-    if (resetTrigger > 0) {
+    if (resetTrigger > 0 && !loadedSessionData) {
       resetState();
       setSuggestions([]); // Clear suggestions when resetting
     }
-  }, [resetTrigger, resetState]);
+  }, [resetTrigger, resetState, loadedSessionData]);
 
   // Load session data when provided (and populate existing chat history)
   useSessionLoader({
     loadedSessionData,
     setSessionId,
+    setFileName,
     setInitialCharts,
     setInitialInsights,
     setSampleRows,
@@ -185,6 +191,13 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     setMessages,
     setCollaborators,
   });
+
+  // Notify parent when sessionId or fileName changes
+  useEffect(() => {
+    if (onSessionChange) {
+      onSessionChange(sessionId, fileName);
+    }
+  }, [sessionId, fileName, onSessionChange]);
 
   // Fetch collaborators when sessionId is available
   useEffect(() => {
@@ -207,12 +220,13 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
 
   // Don't show file upload if we're loading a session (even if sessionId isn't set yet)
   // Only show file upload if there's no session data being loaded AND no sessionId
+  // Only auto-open the dialog when resetTrigger > 0 (explicitly starting new analysis)
   if (!sessionId && !loadedSessionData) {
     return (
       <FileUpload
         onFileSelect={handleFileSelect}
         isUploading={uploadMutation.isPending}
-        autoOpenTrigger={resetTrigger}
+        autoOpenTrigger={resetTrigger > 0 ? resetTrigger : 0}
       />
     );
   }
