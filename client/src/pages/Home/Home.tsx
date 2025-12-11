@@ -110,9 +110,30 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     onNewMessages: (newMessages) => {
       // Append new messages to existing messages, avoiding duplicates
       setMessages((prev) => {
-        // Avoid duplicates by checking timestamps
-        const existingTimestamps = new Set(prev.map(m => m.timestamp));
-        const uniqueNewMessages = newMessages.filter(m => !existingTimestamps.has(m.timestamp));
+        // Avoid duplicates by checking both timestamp AND content+role
+        // This prevents duplicates when a message is added locally and then received from backend
+        const uniqueNewMessages = newMessages.filter(m => {
+          // Check for exact match (timestamp + content + role)
+          const exactMatch = prev.find(
+            p => p.role === m.role && 
+                 p.content === m.content &&
+                 p.timestamp === m.timestamp
+          );
+          if (exactMatch) {
+            return false;
+          }
+          
+          // Check for content+role match with similar timestamp (within 5 seconds)
+          // This handles cases where the same message is added locally and then from backend
+          // with slightly different timestamps
+          const similarMessage = prev.find(
+            p => p.role === m.role && 
+                 p.content === m.content &&
+                 Math.abs(p.timestamp - m.timestamp) < 5000
+          );
+          
+          return !similarMessage;
+        });
         
         if (uniqueNewMessages.length > 0) {
           return [...prev, ...uniqueNewMessages];
