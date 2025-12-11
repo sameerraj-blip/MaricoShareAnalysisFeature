@@ -138,7 +138,7 @@ export function Layout({ children, currentPage, onNavigate, onNewChat, onUploadN
                   className="flex items-center gap-2 rounded-md shadow-sm hover:shadow transition"
                 >
                   <Upload className="h-4 w-4" />
-                  Upload New File
+                  New Analysis
                 </Button>
               )}
             </div>

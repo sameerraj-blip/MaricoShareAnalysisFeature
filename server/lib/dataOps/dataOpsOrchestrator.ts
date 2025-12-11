@@ -2190,18 +2190,23 @@ export async function executeDataOperation(
         };
       }
       
+      // Determine if this is imputation or deletion
+      const isImputation = intent.method && intent.method !== 'delete';
+      const actionVerb = isImputation ? 'Imputed' : 'Removed';
+      const actionVerbLower = isImputation ? 'imputed' : 'removed';
+      
       // Save modified data first
       const saveResult = await saveModifiedData(
         sessionId,
         result.data,
         'remove_nulls',
-        `Removed nulls from ${intent.column || 'all columns'} using ${intent.method}`,
+        `${actionVerb} nulls from ${intent.column || 'all columns'} using ${intent.method || 'delete'}`,
         sessionDoc
       );
       
       // Only show preview if user explicitly requested it
       let previewData: Record<string, any>[] | undefined;
-      let answerText = `✅ Removed ${result.nulls_removed} null value(s). Rows: ${result.rows_before} → ${result.rows_after}.`;
+      let answerText = `✅ ${actionVerb} ${result.nulls_removed} null value(s)${isImputation ? ` with ${intent.method}` : ''}. Rows: ${result.rows_before} → ${result.rows_after}.`;
       
       if (shouldShowPreview) {
         previewData = await getPreviewFromSavedData(sessionId, result.data);

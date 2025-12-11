@@ -3,7 +3,7 @@ import { Message, ThinkingStep } from '@/shared/schema';
 import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles } from 'lucide-react';
+import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles, Loader2, ChevronUp, ChevronDown } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import {
   Select,
@@ -38,6 +38,7 @@ interface ChatInterfaceProps {
   mode?: 'general' | 'analysis' | 'dataOps' | 'modeling'; // Current mode
   onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void; // Callback for mode change
   sessionId?: string | null; // Session ID for downloading modified datasets
+  isReplacingAnalysis?: boolean; // Whether we're replacing the current analysis
 }
 
 // Dynamic suggestions based on conversation context
@@ -104,13 +105,17 @@ export function ChatInterface({
   mode = 'analysis',
   onModeChange,
   sessionId,
+  isReplacingAnalysis = false,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
+  const [showScrollToTop, setShowScrollToTop] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const { toast } = useToast();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastMessageRef = useRef<HTMLDivElement | null>(null);
   const previousLastTimestampRef = useRef<number | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [mentionState, setMentionState] = useState<{
     active: boolean;
     query: string;
@@ -181,6 +186,21 @@ export function ChatInterface({
     });
   }, [messages, selectedCollaborator]);
 
+  // Create a map for quick lookup of original indices
+  const messageIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    messages.forEach((message, index) => {
+      const key = `${message.timestamp}-${message.role}`;
+      map.set(key, index);
+    });
+    return map;
+  }, [messages]);
+
+  // Memoize suggestions to avoid recalculating on every render
+  const suggestions = useMemo(() => {
+    return getSuggestions(messages, columns, numericColumns, aiSuggestions);
+  }, [messages, columns, numericColumns, aiSuggestions]);
+
   useEffect(() => {
     if (!filteredMessages.length || !lastMessageRef.current) return;
 
@@ -211,67 +231,131 @@ export function ChatInterface({
     }
   }, [thinkingSteps, isLoading]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Handle scroll position tracking
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const isNearTop = scrollTop < 100;
+      const isNearBottom = scrollTop + clientHeight >= scrollHeight - 100;
+      
+      setShowScrollToTop(!isNearTop && scrollHeight > clientHeight);
+      setShowScrollToBottom(!isNearBottom && scrollHeight > clientHeight);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    // Check initial state
+    handleScroll();
+
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+    };
+  }, [filteredMessages]);
+
+  const scrollToTop = () => {
+    messagesContainerRef.current?.scrollTo({
+      top: 0,
+      behavior: 'smooth',
+    });
+  };
+
+  const scrollToBottom = () => {
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTo({
+        top: messagesContainerRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+    }
+  };
+
+  const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (inputValue.trim() && !isLoading) {
       onSendMessage(inputValue.trim());
       setInputValue('');
       inputRef.current?.focus();
     }
-  };
+  }, [inputValue, isLoading, onSendMessage]);
+
+  // Debounce timer ref for mention state updates
+  const mentionUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const updateMentionState = useCallback(
     (value: string, selectionStart: number | null) => {
-      if (selectionStart === null) {
-        setMentionState(prev => ({
-          ...prev,
-          active: false,
-          query: '',
-          start: null,
-          options: [],
-          selectedIndex: 0
-        }));
-        return;
+      // Clear any pending updates
+      if (mentionUpdateTimerRef.current) {
+        clearTimeout(mentionUpdateTimerRef.current);
       }
 
-      const textUntilCaret = value.slice(0, selectionStart);
-      const mentionMatch = textUntilCaret.match(/@([A-Za-z0-9 _-]*)$/);
-      const availableColumns = columns ?? [];
+      // Debounce the update to avoid processing on every keystroke
+      mentionUpdateTimerRef.current = setTimeout(() => {
+        if (selectionStart === null) {
+          setMentionState(prev => ({
+            ...prev,
+            active: false,
+            query: '',
+            start: null,
+            options: [],
+            selectedIndex: 0
+          }));
+          return;
+        }
 
-      if (mentionMatch && availableColumns.length > 0) {
-        const query = mentionMatch[1];
-        const start = selectionStart - mentionMatch[0].length;
-        const normalizedQuery = query.trim().toLowerCase();
-        const options = availableColumns.filter(column =>
-          normalizedQuery === '' ? true : column.toLowerCase().includes(normalizedQuery)
-        );
+        const textUntilCaret = value.slice(0, selectionStart);
+        const mentionMatch = textUntilCaret.match(/@([A-Za-z0-9 _-]*)$/);
+        const availableColumns = columns ?? [];
 
-        setMentionState(prev => ({
-          active: options.length > 0,
-          query,
-          start,
-          options,
-          selectedIndex: options.length > 0 ? Math.min(prev.selectedIndex, options.length - 1) : 0
-        }));
-      } else {
-        setMentionState(prev => ({
-          ...prev,
-          active: false,
-          query: '',
-          start: null,
-          options: [],
-          selectedIndex: 0
-        }));
-      }
+        if (mentionMatch && availableColumns.length > 0) {
+          const query = mentionMatch[1];
+          const start = selectionStart - mentionMatch[0].length;
+          const normalizedQuery = query.trim().toLowerCase();
+          
+          // Use a more efficient filter - only filter if query is not empty
+          const options = normalizedQuery === '' 
+            ? availableColumns 
+            : availableColumns.filter(column =>
+                column.toLowerCase().includes(normalizedQuery)
+              );
+
+          setMentionState(prev => ({
+            active: options.length > 0,
+            query,
+            start,
+            options,
+            selectedIndex: options.length > 0 ? Math.min(prev.selectedIndex, options.length - 1) : 0
+          }));
+        } else {
+          setMentionState(prev => ({
+            ...prev,
+            active: false,
+            query: '',
+            start: null,
+            options: [],
+            selectedIndex: 0
+          }));
+        }
+      }, 50); // Small debounce delay for better performance
     },
     [columns]
   );
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (mentionUpdateTimerRef.current) {
+        clearTimeout(mentionUpdateTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const { value, selectionStart } = e.target;
     setInputValue(value);
+    // Update mention state with debouncing
     updateMentionState(value, selectionStart);
-  };
+  }, [updateMentionState]);
 
   const selectMention = useCallback(
     (column: string) => {
@@ -297,22 +381,23 @@ export function ChatInterface({
         selectedIndex: 0
       });
 
-      requestAnimationFrame(() => {
+      // Use setTimeout instead of requestAnimationFrame for better performance
+      setTimeout(() => {
         textarea.focus();
         textarea.setSelectionRange(nextCaretPosition, nextCaretPosition);
         updateMentionState(nextValue, nextCaretPosition);
-      });
+      }, 0);
     },
     [inputValue.length, mentionState.start, updateMentionState]
   );
 
-  const handleSuggestionClick = (suggestion: string) => {
+  const handleSuggestionClick = useCallback((suggestion: string) => {
     if (!isLoading) {
       onSendMessage(suggestion);
     }
-  };
+  }, [isLoading, onSendMessage]);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (mentionState.active && mentionState.options.length > 0) {
       if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
         e.preventDefault();
@@ -361,20 +446,21 @@ export function ChatInterface({
       if (inputValue.trim() && !isLoading) {
         onSendMessage(inputValue.trim());
         setInputValue('');
-        requestAnimationFrame(() => inputRef.current?.focus());
+        // Use setTimeout instead of requestAnimationFrame for better performance
+        setTimeout(() => inputRef.current?.focus(), 0);
       }
       return;
     }
 
-    requestAnimationFrame(() => {
-      const textarea = inputRef.current;
-      if (textarea) {
-        updateMentionState(textarea.value, textarea.selectionStart);
-      }
-    });
-  };
+    // Only update mention state if not already handled above
+    // Remove the requestAnimationFrame as it's unnecessary and can cause lag
+    const textarea = inputRef.current;
+    if (textarea && !mentionState.active) {
+      updateMentionState(textarea.value, textarea.selectionStart);
+    }
+  }, [mentionState.active, mentionState.options, mentionState.selectedIndex, inputValue, isLoading, onSendMessage, selectMention, updateMentionState]);
 
-  const handleTextareaBlur = () => {
+  const handleTextareaBlur = useCallback(() => {
     setMentionState(prev => ({
       ...prev,
       active: false,
@@ -383,15 +469,32 @@ export function ChatInterface({
       options: [],
       selectedIndex: 0
     }));
-  };
+  }, []);
 
   return (
     <div className="flex flex-col bg-gradient-to-br from-slate-50 to-white h-[calc(100vh-80px)] relative">
+      {/* Loading Overlay when replacing analysis */}
+      {isReplacingAnalysis && (
+        <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="text-center">
+            <div className="relative mb-4">
+              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+                <Loader2 className="w-8 h-8 text-primary animate-spin" />
+              </div>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Replacing analysis...</h3>
+            <p className="text-sm text-gray-500">Uploading and analyzing your new data file</p>
+            <p className="text-xs text-gray-400 mt-2">This may take a moment</p>
+          </div>
+        </div>
+      )}
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto">
         <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
-          {collaborators.length > 0 && (
+          {/* Header with Filter dropdown */}
+          {(sessionId || messages.length > 0) && collaborators.length > 0 && (
             <div className="flex justify-end items-center mb-2">
+              {/* Filter Messages Dropdown - Right side */}
               <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1.5 shadow-sm hover:shadow-md transition-all duration-200">
                 <Filter className="w-3.5 h-3.5 text-gray-600" />
                 <span className="text-xs font-medium text-gray-700">Filter messages</span>
@@ -416,8 +519,9 @@ export function ChatInterface({
             </div>
           )}
           {filteredMessages.map((message, idx) => {
-            // Find the original index in the full messages array for edit functionality
-            const originalIndex = messages.findIndex((m) => m.timestamp === message.timestamp && m.role === message.role);
+            // Use the pre-computed map for O(1) lookup instead of O(n) findIndex
+            const key = `${message.timestamp}-${message.role}`;
+            const originalIndex = messageIndexMap.get(key) ?? idx;
             const isLastMessage = idx === filteredMessages.length - 1;
             // Check if this is the last user message (for edit button and thinking steps)
             const isLastUserMessage = message.role === 'user' && 
@@ -462,7 +566,7 @@ export function ChatInterface({
             <div className="mb-4">
               <h3 className="text-base font-semibold text-gray-900 mb-3 text-center">Try asking:</h3>
               <div className="flex flex-wrap gap-2 justify-center" data-testid="suggestion-chips">
-                {getSuggestions(messages, columns, numericColumns, aiSuggestions).map((suggestion, idx) => (
+                {suggestions.map((suggestion, idx) => (
                   <Button
                     key={idx}
                     variant="outline"
@@ -483,7 +587,7 @@ export function ChatInterface({
           {filteredMessages.length > 1 && filteredMessages[filteredMessages.length - 1].role === 'assistant' && !isLoading && (
             <div className="mb-4 mt-2">
               <div className="flex flex-wrap gap-2 justify-center">
-                {getSuggestions(messages, columns, numericColumns, aiSuggestions).slice(0, 3).map((suggestion, idx) => (
+                {suggestions.slice(0, 3).map((suggestion, idx) => (
                   <Button
                     key={idx}
                     variant="ghost"
@@ -608,6 +712,32 @@ export function ChatInterface({
           </form>
         </div>
       </div>
+
+      {/* Fixed Scroll Buttons - Right Center */}
+      {(showScrollToTop || showScrollToBottom) && (
+        <div className="fixed right-8 top-1/2 -translate-y-1/2 z-40 flex flex-col gap-2">
+          {showScrollToTop && (
+            <Button
+              onClick={scrollToTop}
+              size="icon"
+              className="h-10 w-10 rounded-full shadow-lg hover:shadow-xl transition-all bg-white hover:bg-gray-50 border border-gray-200"
+              title="Scroll to top"
+            >
+              <ChevronUp className="w-5 h-5 text-gray-700" />
+            </Button>
+          )}
+          {showScrollToBottom && (
+            <Button
+              onClick={scrollToBottom}
+              size="icon"
+              className="h-10 w-10 rounded-full shadow-lg hover:shadow-xl transition-all bg-white hover:bg-gray-50 border border-gray-200"
+              title="Scroll to bottom"
+            >
+              <ChevronDown className="w-5 h-5 text-gray-700" />
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

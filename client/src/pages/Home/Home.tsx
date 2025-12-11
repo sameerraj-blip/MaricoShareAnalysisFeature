@@ -110,29 +110,41 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     onNewMessages: (newMessages) => {
       // Append new messages to existing messages, avoiding duplicates
       setMessages((prev) => {
-        // Avoid duplicates by checking both timestamp AND content+role
-        // This prevents duplicates when a message is added locally and then received from backend
+        // Early return if no new messages
+        if (!newMessages || newMessages.length === 0) {
+          return prev;
+        }
+
+        // Create a Set for O(1) lookup instead of O(n) find operations
+        // Use a composite key: role + content + timestamp (rounded to nearest second for similarity check)
+        const existingKeys = new Set<string>();
+        const existingSimilarKeys = new Set<string>();
+        
+        prev.forEach(p => {
+          // Exact match key
+          const exactKey = `${p.role}|${p.content}|${p.timestamp}`;
+          existingKeys.add(exactKey);
+          
+          // Similar match key (for timestamp within 5 seconds)
+          // Round timestamp to nearest 5 seconds for grouping
+          const roundedTimestamp = Math.floor(p.timestamp / 5000) * 5000;
+          const similarKey = `${p.role}|${p.content}|${roundedTimestamp}`;
+          existingSimilarKeys.add(similarKey);
+        });
+
+        // Filter new messages efficiently using Set lookups
         const uniqueNewMessages = newMessages.filter(m => {
-          // Check for exact match (timestamp + content + role)
-          const exactMatch = prev.find(
-            p => p.role === m.role && 
-                 p.content === m.content &&
-                 p.timestamp === m.timestamp
-          );
-          if (exactMatch) {
+          // Check for exact match
+          const exactKey = `${m.role}|${m.content}|${m.timestamp}`;
+          if (existingKeys.has(exactKey)) {
             return false;
           }
           
-          // Check for content+role match with similar timestamp (within 5 seconds)
-          // This handles cases where the same message is added locally and then from backend
-          // with slightly different timestamps
-          const similarMessage = prev.find(
-            p => p.role === m.role && 
-                 p.content === m.content &&
-                 Math.abs(p.timestamp - m.timestamp) < 5000
-          );
+          // Check for similar match (content+role with timestamp within 5 seconds)
+          const roundedTimestamp = Math.floor(m.timestamp / 5000) * 5000;
+          const similarKey = `${m.role}|${m.content}|${roundedTimestamp}`;
           
-          return !similarMessage;
+          return !existingSimilarKeys.has(similarKey);
         });
         
         if (uniqueNewMessages.length > 0) {

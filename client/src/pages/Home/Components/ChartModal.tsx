@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,8 +8,9 @@ import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Slider } from '@/components/ui/slider';
-import { Filter, X } from 'lucide-react';
+import { Filter, X, Plus } from 'lucide-react';
 import { ChartSpec } from '@/shared/schema';
+import { DashboardModal } from './DashboardModal/DashboardModal';
 import { ChartFilterDefinition, ActiveChartFilters } from '@/lib/chartFilters';
 import { format as formatDate } from 'date-fns';
 import {
@@ -150,6 +151,7 @@ export function ChartModal({
   formatDateForDisplay = formatDateForDisplayLocal,
   determineSliderStep = determineSliderStepLocal,
 }: ChartModalProps) {
+  const [isDashboardModalOpen, setIsDashboardModalOpen] = useState(false);
   const { type, title, data: chartDataSource = [], x, y, xDomain, yDomain, trendLine, xLabel, yLabel } = chart;
   const chartColor = COLORS[0]; // Use primary color for modal
   
@@ -527,13 +529,23 @@ export function ChartModal({
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-7xl w-full max-h-[90vh] overflow-hidden [&>button]:hidden">
-        <DialogHeader className="flex flex-row items-center justify-between space-y-0 pb-4 gap-4">
-          <DialogTitle className="text-xl truncate flex-1 min-w-0">
-            {title}
-          </DialogTitle>
-          <div className="flex items-center gap-2 flex-shrink-0">
+    <>
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="max-w-7xl w-full max-h-[90vh] overflow-hidden [&>button]:hidden">
+          <DialogHeader className="flex flex-row items-center justify-between space-y-0 pb-4 gap-4">
+            <DialogTitle className="text-xl truncate flex-1 min-w-0">
+              {title}
+            </DialogTitle>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1 px-3 text-xs"
+                onClick={() => setIsDashboardModalOpen(true)}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add to Dashboard
+              </Button>
             {enableFilters && filterDefinitions.length > 0 && (
               <Popover>
                 <PopoverTrigger asChild>
@@ -846,6 +858,12 @@ export function ChartModal({
         </div>
       </DialogContent>
     </Dialog>
+    <DashboardModal
+      isOpen={isDashboardModalOpen}
+      onClose={() => setIsDashboardModalOpen(false)}
+      chart={chart}
+    />
+    </>
   );
 }
 

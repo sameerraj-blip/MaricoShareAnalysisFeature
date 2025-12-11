@@ -1,4 +1,4 @@
-import { forwardRef, useState } from 'react';
+import { forwardRef, useState, useMemo, memo } from 'react';
 import { Message, ThinkingStep } from '@/shared/schema';
 import { User, Bot, Edit2, Check, X as XIcon } from 'lucide-react';
 import { ChartRenderer } from './ChartRenderer';
@@ -26,7 +26,7 @@ interface MessageBubbleProps {
   sessionId?: string | null; // Session ID for downloading modified datasets
 }
 
-export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
+const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
   message,
   sampleRows,
   columns,
@@ -41,12 +41,20 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
   sessionId,
 }, ref) => {
   const isUser = message.role === 'user';
-  const currentUserEmail = getUserEmail()?.toLowerCase();
+  
+  // Memoize getUserEmail to avoid reading localStorage on every render
+  const currentUserEmail = useMemo(() => getUserEmail()?.toLowerCase(), []);
   const messageUserEmail = message.userEmail?.toLowerCase();
   
   // Show name if it's a user message and has a different email (shared analysis)
-  const showUserName = isUser && messageUserEmail && messageUserEmail !== currentUserEmail;
-  const displayName = message.userEmail ? message.userEmail.split('@')[0] : 'You';
+  const showUserName = useMemo(() => 
+    isUser && messageUserEmail && messageUserEmail !== currentUserEmail,
+    [isUser, messageUserEmail, currentUserEmail]
+  );
+  const displayName = useMemo(() => 
+    message.userEmail ? message.userEmail.split('@')[0] : 'You',
+    [message.userEmail]
+  );
   
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(message.content);
@@ -223,4 +231,28 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(({
   );
 });
 
-MessageBubble.displayName = 'MessageBubble';
+MessageBubbleComponent.displayName = 'MessageBubble';
+
+// Memoize the component to prevent unnecessary re-renders
+// Only re-render if props actually change
+export const MessageBubble = memo(MessageBubbleComponent, (prevProps, nextProps) => {
+  // Custom comparison function for better performance
+  return (
+    prevProps.message.timestamp === nextProps.message.timestamp &&
+    prevProps.message.content === nextProps.message.content &&
+    prevProps.message.role === nextProps.message.role &&
+    prevProps.message.userEmail === nextProps.message.userEmail &&
+    prevProps.isLastUserMessage === nextProps.isLastUserMessage &&
+    prevProps.messageIndex === nextProps.messageIndex &&
+    prevProps.sessionId === nextProps.sessionId &&
+    prevProps.onEditMessage === nextProps.onEditMessage &&
+    // Compare thinking steps by length and content
+    (prevProps.thinkingSteps?.length ?? 0) === (nextProps.thinkingSteps?.length ?? 0) &&
+    // Compare charts by length
+    (prevProps.message.charts?.length ?? 0) === (nextProps.message.charts?.length ?? 0) &&
+    // Compare insights by length
+    (prevProps.message.insights?.length ?? 0) === (nextProps.message.insights?.length ?? 0) &&
+    // Sample rows only matter for first message
+    (prevProps.messageIndex !== 0 || prevProps.sampleRows === nextProps.sampleRows)
+  );
+});
