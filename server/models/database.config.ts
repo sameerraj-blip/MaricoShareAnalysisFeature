@@ -28,6 +28,44 @@ let initializationInProgress = false;
 let initializationPromise: Promise<void> | null = null;
 
 /**
+ * Helper function to safely create a container with fallback if throughput limit is reached
+ */
+const createContainerSafely = async (
+  database: Database,
+  containerId: string,
+  partitionKey: string,
+  throughput: number = 400
+): Promise<Container> => {
+  try {
+    // Try to create with explicit throughput
+    const { container } = await database.containers.createIfNotExists({
+      id: containerId,
+      partitionKey,
+      throughput,
+    });
+    return container;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // If throughput limit error, try to read existing container
+    if (errorMessage.includes("throughput limit") || errorMessage.includes("RU/s")) {
+      console.warn(`⚠️ Throughput limit reached for container ${containerId}, attempting to use existing container...`);
+      try {
+        const { container } = database.container(containerId);
+        // Try to read container to verify it exists
+        await container.read();
+        console.log(`✅ Using existing container: ${containerId}`);
+        return container;
+      } catch (readError) {
+        // Container doesn't exist, re-throw original error
+        throw error;
+      }
+    }
+    throw error;
+  }
+};
+
+/**
  * Initialize CosmosDB database and containers
  * Can be called multiple times safely - will reuse existing promise if already initializing
  */
@@ -59,42 +97,62 @@ export const initializeCosmosDB = async (): Promise<void> => {
       database = db;
       console.log(`✅ Database ready: ${COSMOS_DATABASE_ID}`);
 
-      // Create container if it doesn't exist
-      const { container: cont } = await database.containers.createIfNotExists({
-        id: COSMOS_CONTAINER_ID,
-        partitionKey: "/fsmrora", // Partition by username for better performance
-      });
-      container = cont;
+      // Create containers with explicit throughput (400 RU/s minimum) to avoid exceeding account limits
+      // The helper function will fallback to using existing containers if throughput limit is reached
+      container = await createContainerSafely(
+        database,
+        COSMOS_CONTAINER_ID,
+        "/fsmrora", // Partition by username for better performance
+        400 // Minimum throughput: 400 RU/s
+      );
       console.log(`✅ Chats container ready: ${COSMOS_CONTAINER_ID}`);
 
-      // Create dashboards container if it doesn't exist
-      const { container: dashCont } = await database.containers.createIfNotExists({
-        id: COSMOS_DASHBOARDS_CONTAINER_ID,
-        partitionKey: "/username",
-      });
-      dashboardsContainer = dashCont;
+      dashboardsContainer = await createContainerSafely(
+        database,
+        COSMOS_DASHBOARDS_CONTAINER_ID,
+        "/username",
+        400 // Minimum throughput: 400 RU/s
+      );
       console.log(`✅ Dashboards container ready: ${COSMOS_DASHBOARDS_CONTAINER_ID}`);
 
-      // Create shared analyses container if it doesn't exist
-      const { container: sharedCont } = await database.containers.createIfNotExists({
-        id: COSMOS_SHARED_ANALYSES_CONTAINER_ID,
-        partitionKey: "/targetEmail",
-      });
-      sharedAnalysesContainer = sharedCont;
+      sharedAnalysesContainer = await createContainerSafely(
+        database,
+        COSMOS_SHARED_ANALYSES_CONTAINER_ID,
+        "/targetEmail",
+        400 // Minimum throughput: 400 RU/s
+      );
       console.log(`✅ Shared analyses container ready: ${COSMOS_SHARED_ANALYSES_CONTAINER_ID}`);
 
-      // Create shared dashboards container if it doesn't exist
-      const { container: sharedDashCont } = await database.containers.createIfNotExists({
-        id: COSMOS_SHARED_DASHBOARDS_CONTAINER_ID,
-        partitionKey: "/targetEmail",
-      });
-      sharedDashboardsContainer = sharedDashCont;
+      sharedDashboardsContainer = await createContainerSafely(
+        database,
+        COSMOS_SHARED_DASHBOARDS_CONTAINER_ID,
+        "/targetEmail",
+        400 // Minimum throughput: 400 RU/s
+      );
       console.log(`✅ Shared dashboards container ready: ${COSMOS_SHARED_DASHBOARDS_CONTAINER_ID}`);
 
       console.log("✅ CosmosDB initialized successfully");
     } catch (error) {
       console.error("❌ Failed to initialize CosmosDB:", error);
       const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check if error is related to throughput limits
+      if (errorMessage.includes("throughput limit") || errorMessage.includes("RU/s")) {
+        const helpfulMessage = `
+CosmosDB throughput limit exceeded. Your account has a limit of 20,000 RU/s.
+
+Possible solutions:
+1. If containers already exist, they may have high throughput configured. 
+   Check your Azure Portal and reduce throughput on existing containers.
+2. Delete unused containers to free up throughput.
+3. Request a throughput limit increase from Azure support.
+4. Consider using database-level shared throughput instead of container-level.
+
+Error details: ${errorMessage}
+        `.trim();
+        throw new Error(helpfulMessage);
+      }
+      
       throw new Error(`CosmosDB initialization failed: ${errorMessage}`);
     } finally {
       initializationInProgress = false;
