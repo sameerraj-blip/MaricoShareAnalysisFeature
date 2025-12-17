@@ -69,13 +69,22 @@ export async function classifyMode(
 
   const prompt = `You are a mode classifier for a data analysis AI assistant. Your job is to determine which top-level mode a user query should route to.
 
-QUESTION: ${question}
+CURRENT QUESTION: ${question}
 ${historyContext}
 
 AVAILABLE DATA:
 - Total rows: ${summary.rowCount}
 - Total columns: ${summary.columnCount}
 - Columns: ${allColumns}
+
+CRITICAL: CONTEXT-AWARE CLASSIFICATION
+The conversation history is EXTREMELY important. Short responses like "yes", "ok", "sure", "do it", "proceed", "go ahead", "that one", "the first one", "try it" are FOLLOW-UP responses that should be routed based on the PREVIOUS conversation context.
+
+CONTEXT RULES:
+- If the previous messages discuss MODELING (models, predictions, training, linear/logistic/random forest), route to "modeling"
+- If the previous messages discuss DATA OPERATIONS (adding columns, filtering, cleaning), route to "dataOps"  
+- If the previous messages discuss ANALYSIS (correlations, charts, statistics, insights), route to "analysis"
+- Short affirmative responses (yes, ok, sure, proceed, go ahead) should ALWAYS use the context from previous messages
 
 CLASSIFICATION RULES:
 
@@ -87,60 +96,34 @@ CLASSIFICATION RULES:
      "data preview", "data summary", "show me data", "display data", "view data", "see data",
      "show columns", "list columns", "data structure", "data overview", "preview data",
      "show rows", "display rows", "data sample", "sample data"
-   * Examples:
-     - "Add a new column called X"
-     - "Remove the column Y"
-     - "Filter rows where Z > 100"
-     - "Replace all - with 0"
-     - "Merge this dataset with another"
-     - "Clean the data"
-     - "Give me data preview"
-     - "Show me data summary"
-     - "Display the data"
-     - "Show me the columns"
-     - "Preview the data"
    * Set confidence to 0.9+ for clear data operation requests
 
 2. "modeling" - User wants to build, train, or create a machine learning model
    * HIGH PRIORITY: Questions about building/training ML models
    * Patterns: "build a model", "train a model", "create a model", "predict", "machine learning",
-     "linear model", "logistic model", "random forest", "decision tree", "regression", "classification"
-   * Examples:
-     - "Build a linear model"
-     - "Train a model to predict X"
-     - "Create a random forest model"
-     - "Build a model choosing Y as target and Z, W as independent variables"
-   * Set confidence to 0.9+ for clear modeling requests
+     "linear model", "logistic model", "random forest", "decision tree", "regression", "classification",
+     "which model", "best model", "compare models", "evaluate model", "model performance"
+   * ALSO applies to follow-up questions in a modeling conversation (e.g., "yes" after discussing models)
+   * Set confidence to 0.9+ for clear modeling requests or follow-ups in modeling context
 
 3. "analysis" - Everything else (default mode)
    * This includes: correlation analysis, statistical queries, chart requests, comparisons,
      trend analysis, insights, exploratory data analysis, "what affects", "show me", etc.
-   * Examples:
-     - "What affects revenue?"
-     - "Show me a chart of sales over time"
-     - "What is the correlation between X and Y?"
-     - "Which product performs best?"
-     - "Tell me about the trends"
    * This is the default mode when the query doesn't clearly fit dataOps or modeling
 
-IMPORTANT DISTINCTIONS:
-- "What affects X?" → analysis (correlation/relationship analysis)
-- "Add a column that shows X" → dataOps (data manipulation)
-- "Build a model to predict X" → modeling (ML model creation)
-- "Show me trends" → analysis (data visualization/analysis)
-- "Filter the data" → dataOps (data manipulation)
-- "Train a model" → modeling (ML model creation)
-- "Give me data preview" → dataOps (viewing data structure/preview)
-- "Show me data summary" → dataOps (viewing data overview/structure)
-- "Display the data" → dataOps (viewing data)
-- "What is the summary of the data?" → dataOps (viewing data structure)
-- "Show me the columns" → dataOps (viewing data structure)
+IMPORTANT: For short/ambiguous queries, ALWAYS check the conversation history to determine the correct mode.
+
+Examples with context:
+- Previous: "Build a linear model" → Current: "yes" → Route to "modeling" (continuing modeling conversation)
+- Previous: "What's the correlation?" → Current: "show me a chart" → Route to "analysis"
+- Previous: "Add a column X" → Current: "ok do it" → Route to "dataOps"
+- Previous: "Which model is best?" → Current: "try the random forest" → Route to "modeling"
 
 OUTPUT FORMAT (JSON only, no markdown):
 {
   "mode": "analysis" | "dataOps" | "modeling",
   "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of why this mode was chosen" (optional)
+  "reasoning": "Brief explanation including context consideration" (optional)
 }`;
 
   let lastError: Error | null = null;
@@ -220,20 +203,40 @@ OUTPUT FORMAT (JSON only, no markdown):
   let fallbackMode: 'analysis' | 'dataOps' | 'modeling' = 'analysis';
   let fallbackConfidence = 0.3;
   
-  // Simple pattern matching for fallback
-  if (questionLower.match(/\b(add|remove|delete|filter|transform|clean|merge|join|split|rename|replace|fill|drop|sort|group|pivot)\s+(column|row|data|dataset|values?)\b/) ||
-      questionLower.match(/\b(data\s+preview|data\s+summary|show\s+me\s+data|display\s+data|view\s+data|see\s+data|show\s+columns|list\s+columns|data\s+structure|data\s+overview|preview\s+data|show\s+rows|display\s+rows|data\s+sample|sample\s+data|give\s+me\s+data)\b/)) {
-    fallbackMode = 'dataOps';
-    fallbackConfidence = 0.7;
-  } else if (questionLower.match(/\b(build|train|create|predict|machine learning|linear model|logistic|random forest|decision tree|regression|classification)\b/)) {
-    fallbackMode = 'modeling';
-    fallbackConfidence = 0.6;
+  // Check if this is a short follow-up response
+  const isShortResponse = question.trim().length < 20 && 
+    /^(yes|no|ok|okay|sure|do it|proceed|go ahead|try it|that one|the first|the second|sounds good|perfect|great)\b/i.test(questionLower);
+  
+  // If short response, check chat history for context
+  if (isShortResponse && chatHistory.length > 0) {
+    // Look at recent messages for context
+    const recentContent = chatHistory.slice(-4).map(m => m.content.toLowerCase()).join(' ');
+    
+    if (recentContent.match(/\b(model|train|predict|linear|logistic|random forest|decision tree|regression|classification|machine learning|modeling|best model|which model)\b/)) {
+      fallbackMode = 'modeling';
+      fallbackConfidence = 0.8;
+      console.log('📌 Fallback detected modeling context from chat history');
+    } else if (recentContent.match(/\b(add column|remove column|filter|transform|clean|data preview|data summary|show data|display data)\b/)) {
+      fallbackMode = 'dataOps';
+      fallbackConfidence = 0.8;
+      console.log('📌 Fallback detected dataOps context from chat history');
+    }
+  } else {
+    // Simple pattern matching for fallback
+    if (questionLower.match(/\b(add|remove|delete|filter|transform|clean|merge|join|split|rename|replace|fill|drop|sort|group|pivot)\s+(column|row|data|dataset|values?)\b/) ||
+        questionLower.match(/\b(data\s+preview|data\s+summary|show\s+me\s+data|display\s+data|view\s+data|see\s+data|show\s+columns|list\s+columns|data\s+structure|data\s+overview|preview\s+data|show\s+rows|display\s+rows|data\s+sample|sample\s+data|give\s+me\s+data)\b/)) {
+      fallbackMode = 'dataOps';
+      fallbackConfidence = 0.7;
+    } else if (questionLower.match(/\b(build|train|create|predict|machine learning|linear model|logistic|random forest|decision tree|regression|classification|which model|best model|compare model)\b/)) {
+      fallbackMode = 'modeling';
+      fallbackConfidence = 0.6;
+    }
   }
 
   return {
     mode: fallbackMode,
     confidence: fallbackConfidence,
-    reasoning: 'Fallback classification based on keyword matching',
+    reasoning: isShortResponse ? 'Fallback classification based on chat history context' : 'Fallback classification based on keyword matching',
   };
 }
 

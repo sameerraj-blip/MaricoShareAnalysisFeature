@@ -3,9 +3,12 @@ import pandas as pd
 import numpy as np
 from typing import Any, Dict, List, Optional, Literal, Union
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso, ElasticNet
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor, GradientBoostingClassifier
 from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+from sklearn.svm import SVR, SVC
+from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     r2_score, mean_squared_error, mean_absolute_error,
     accuracy_score, precision_score, recall_score, f1_score,
@@ -266,12 +269,14 @@ def train_logistic_regression(
         # Cross-validation
         cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
         
-        # Coefficients
+        # Coefficients - for logistic regression, coef_ has shape (n_classes, n_features)
+        # For binary classification, we take the first row
+        coef_array = model.coef_[0] if len(model.coef_.shape) > 1 else model.coef_
         coefficients = {
             "intercept": float(model.intercept_[0]) if len(model.intercept_) == 1 else model.intercept_.tolist(),
             "features": {
-                feature: float(coef[0]) if len(coef) == 1 else coef.tolist()
-                for feature, coef in zip(features, model.coef_)
+                feature: float(coef)
+                for feature, coef in zip(features, coef_array)
             }
         }
         
@@ -615,3 +620,324 @@ def train_decision_tree(
     except Exception as e:
         raise ValueError(f"Error training decision tree: {str(e)}")
 
+
+def train_gradient_boosting(
+    data: List[Dict[str, Any]],
+    target_variable: str,
+    features: List[str],
+    n_estimators: int = 100,
+    learning_rate: float = 0.1,
+    max_depth: Optional[int] = 3,
+    test_size: float = 0.2,
+    random_state: int = 42
+) -> Dict[str, Any]:
+    """Train a gradient boosting model (regression or classification)."""
+    try:
+        X, y = _prepare_data(data, target_variable, features)
+        
+        # Determine task type
+        task_type = _determine_task_type(y)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state,
+            stratify=y if task_type == "classification" and y.nunique() > 1 else None
+        )
+        
+        # Train model
+        if task_type == "regression":
+            model = GradientBoostingRegressor(
+                n_estimators=n_estimators,
+                learning_rate=learning_rate,
+                max_depth=max_depth,
+                random_state=random_state
+            )
+        else:
+            model = GradientBoostingClassifier(
+                n_estimators=n_estimators,
+                learning_rate=learning_rate,
+                max_depth=max_depth,
+                random_state=random_state
+            )
+        
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        y_train_pred = model.predict(X_train)
+        y_test_pred = model.predict(X_test)
+        
+        # Metrics
+        if task_type == "regression":
+            train_metrics = _calculate_regression_metrics(y_train.values, y_train_pred)
+            test_metrics = _calculate_regression_metrics(y_test.values, y_test_pred)
+            cv_scoring = 'r2'
+        else:
+            train_metrics = _calculate_classification_metrics(y_train.values, y_train_pred)
+            test_metrics = _calculate_classification_metrics(y_test.values, y_test_pred)
+            cv_scoring = 'accuracy'
+        
+        # Cross-validation
+        cv_scores = cross_val_score(model, X, y, cv=5, scoring=cv_scoring)
+        
+        # Feature importance
+        feature_importance = {
+            feature: float(importance)
+            for feature, importance in zip(features, model.feature_importances_)
+        }
+        
+        # Predictions on full dataset
+        y_pred_full = model.predict(X)
+        
+        return {
+            "model_type": "gradient_boosting",
+            "task_type": task_type,
+            "target_variable": target_variable,
+            "features": features,
+            "n_estimators": n_estimators,
+            "learning_rate": learning_rate,
+            "max_depth": max_depth,
+            "coefficients": None,
+            "metrics": {
+                "train": train_metrics,
+                "test": test_metrics,
+                "cross_validation": {
+                    f"mean_{cv_scoring}": float(cv_scores.mean()),
+                    f"std_{cv_scoring}": float(cv_scores.std())
+                }
+            },
+            "predictions": y_pred_full.tolist(),
+            "feature_importance": feature_importance,
+            "n_samples": len(X),
+            "n_train": len(X_train),
+            "n_test": len(X_test)
+        }
+    except Exception as e:
+        raise ValueError(f"Error training gradient boosting: {str(e)}")
+
+
+def train_elasticnet(
+    data: List[Dict[str, Any]],
+    target_variable: str,
+    features: List[str],
+    alpha: float = 1.0,
+    l1_ratio: float = 0.5,
+    test_size: float = 0.2,
+    random_state: int = 42
+) -> Dict[str, Any]:
+    """Train an ElasticNet regression model (L1 + L2 regularization)."""
+    try:
+        X, y = _prepare_data(data, target_variable, features)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state
+        )
+        
+        # Train model
+        model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=random_state, max_iter=1000)
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        y_train_pred = model.predict(X_train)
+        y_test_pred = model.predict(X_test)
+        
+        # Metrics
+        train_metrics = _calculate_regression_metrics(y_train.values, y_train_pred)
+        test_metrics = _calculate_regression_metrics(y_test.values, y_test_pred)
+        
+        # Cross-validation
+        cv_scores = cross_val_score(model, X, y, cv=5, scoring='r2')
+        
+        # Coefficients
+        coefficients = {
+            "intercept": float(model.intercept_),
+            "features": {
+                feature: float(coef) for feature, coef in zip(features, model.coef_)
+            }
+        }
+        
+        # Predictions on full dataset
+        y_pred_full = model.predict(X)
+        
+        return {
+            "model_type": "elasticnet",
+            "task_type": "regression",
+            "target_variable": target_variable,
+            "features": features,
+            "alpha": alpha,
+            "l1_ratio": l1_ratio,
+            "coefficients": coefficients,
+            "metrics": {
+                "train": train_metrics,
+                "test": test_metrics,
+                "cross_validation": {
+                    "mean_r2": float(cv_scores.mean()),
+                    "std_r2": float(cv_scores.std())
+                }
+            },
+            "predictions": y_pred_full.tolist(),
+            "feature_importance": None,
+            "n_samples": len(X),
+            "n_train": len(X_train),
+            "n_test": len(X_test)
+        }
+    except Exception as e:
+        raise ValueError(f"Error training ElasticNet: {str(e)}")
+
+
+def train_svm(
+    data: List[Dict[str, Any]],
+    target_variable: str,
+    features: List[str],
+    kernel: str = 'rbf',
+    C: float = 1.0,
+    test_size: float = 0.2,
+    random_state: int = 42
+) -> Dict[str, Any]:
+    """Train a Support Vector Machine model (regression or classification)."""
+    try:
+        X, y = _prepare_data(data, target_variable, features)
+        
+        # Determine task type
+        task_type = _determine_task_type(y)
+        
+        # Scale features for SVM (important for performance)
+        scaler = StandardScaler()
+        X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns, index=X.index)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=test_size, random_state=random_state,
+            stratify=y if task_type == "classification" and y.nunique() > 1 else None
+        )
+        
+        # Train model
+        if task_type == "regression":
+            model = SVR(kernel=kernel, C=C)
+        else:
+            model = SVC(kernel=kernel, C=C, random_state=random_state)
+        
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        y_train_pred = model.predict(X_train)
+        y_test_pred = model.predict(X_test)
+        
+        # Metrics
+        if task_type == "regression":
+            train_metrics = _calculate_regression_metrics(y_train.values, y_train_pred)
+            test_metrics = _calculate_regression_metrics(y_test.values, y_test_pred)
+            cv_scoring = 'r2'
+        else:
+            train_metrics = _calculate_classification_metrics(y_train.values, y_train_pred)
+            test_metrics = _calculate_classification_metrics(y_test.values, y_test_pred)
+            cv_scoring = 'accuracy'
+        
+        # Cross-validation
+        cv_scores = cross_val_score(model, X_scaled, y, cv=5, scoring=cv_scoring)
+        
+        # Predictions on full dataset
+        y_pred_full = model.predict(X_scaled)
+        
+        return {
+            "model_type": "svm",
+            "task_type": task_type,
+            "target_variable": target_variable,
+            "features": features,
+            "kernel": kernel,
+            "C": C,
+            "coefficients": None,  # SVM doesn't have simple coefficients
+            "metrics": {
+                "train": train_metrics,
+                "test": test_metrics,
+                "cross_validation": {
+                    f"mean_{cv_scoring}": float(cv_scores.mean()),
+                    f"std_{cv_scoring}": float(cv_scores.std())
+                }
+            },
+            "predictions": y_pred_full.tolist(),
+            "feature_importance": None,  # SVM doesn't have feature importance
+            "n_samples": len(X),
+            "n_train": len(X_train),
+            "n_test": len(X_test)
+        }
+    except Exception as e:
+        raise ValueError(f"Error training SVM: {str(e)}")
+
+
+def train_knn(
+    data: List[Dict[str, Any]],
+    target_variable: str,
+    features: List[str],
+    n_neighbors: int = 5,
+    test_size: float = 0.2,
+    random_state: int = 42
+) -> Dict[str, Any]:
+    """Train a K-Nearest Neighbors model (regression or classification)."""
+    try:
+        X, y = _prepare_data(data, target_variable, features)
+        
+        # Determine task type
+        task_type = _determine_task_type(y)
+        
+        # Scale features for KNN (important for distance-based algorithms)
+        scaler = StandardScaler()
+        X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns, index=X.index)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=test_size, random_state=random_state,
+            stratify=y if task_type == "classification" and y.nunique() > 1 else None
+        )
+        
+        # Train model
+        if task_type == "regression":
+            model = KNeighborsRegressor(n_neighbors=n_neighbors)
+        else:
+            model = KNeighborsClassifier(n_neighbors=n_neighbors)
+        
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        y_train_pred = model.predict(X_train)
+        y_test_pred = model.predict(X_test)
+        
+        # Metrics
+        if task_type == "regression":
+            train_metrics = _calculate_regression_metrics(y_train.values, y_train_pred)
+            test_metrics = _calculate_regression_metrics(y_test.values, y_test_pred)
+            cv_scoring = 'r2'
+        else:
+            train_metrics = _calculate_classification_metrics(y_train.values, y_train_pred)
+            test_metrics = _calculate_classification_metrics(y_test.values, y_test_pred)
+            cv_scoring = 'accuracy'
+        
+        # Cross-validation
+        cv_scores = cross_val_score(model, X_scaled, y, cv=5, scoring=cv_scoring)
+        
+        # Predictions on full dataset
+        y_pred_full = model.predict(X_scaled)
+        
+        return {
+            "model_type": "knn",
+            "task_type": task_type,
+            "target_variable": target_variable,
+            "features": features,
+            "n_neighbors": n_neighbors,
+            "coefficients": None,  # KNN doesn't have coefficients
+            "metrics": {
+                "train": train_metrics,
+                "test": test_metrics,
+                "cross_validation": {
+                    f"mean_{cv_scoring}": float(cv_scores.mean()),
+                    f"std_{cv_scoring}": float(cv_scores.std())
+                }
+            },
+            "predictions": y_pred_full.tolist(),
+            "feature_importance": None,  # KNN doesn't have feature importance
+            "n_samples": len(X),
+            "n_train": len(X_train),
+            "n_test": len(X_test)
+        }
+    except Exception as e:
+        raise ValueError(f"Error training KNN: {str(e)}")

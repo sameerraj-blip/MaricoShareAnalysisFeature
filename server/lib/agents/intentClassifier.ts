@@ -28,7 +28,7 @@ export const analysisIntentSchema = z.object({
   }).optional(),
   customRequest: z.string().optional(),
   requiresClarification: z.boolean().optional(),
-  modelType: z.enum(['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree']).optional(),
+  modelType: z.enum(['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree', 'gradient_boosting', 'elasticnet', 'svm', 'knn']).optional(),
 });
 
 export type AnalysisIntent = z.infer<typeof analysisIntentSchema> & {
@@ -39,7 +39,7 @@ export type AnalysisIntent = z.infer<typeof analysisIntentSchema> & {
   targetType?: string;
   limit?: number;
   // Extended fields for ML model requests
-  modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree';
+  modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn';
 };
 
 /**
@@ -105,7 +105,7 @@ export async function classifyIntent(
 
   const prompt = `You are an intent classifier for a data analysis AI assistant. Analyze the user's question and extract their intent.
 
-QUESTION: ${question}
+CURRENT QUESTION: ${question}
 ${historyContext}
 
 AVAILABLE DATA:
@@ -115,11 +115,20 @@ AVAILABLE DATA:
 - Numeric columns: ${numericColumns}
 ${dateColumns ? `- Date columns: ${dateColumns}` : ''}
 
+CRITICAL: USE CONVERSATION HISTORY FOR CONTEXT
+The conversation history is ESSENTIAL for understanding follow-up questions. If the previous messages discuss a specific topic (modeling, analysis, etc.), the current question likely relates to that context.
+
+CONTEXT-AWARE CLASSIFICATION:
+- If previous messages show MODEL RESULTS (coefficients, accuracy, R², RMSE, predictions), and user asks about "improving", "testing features", "alternative features", "better accuracy" → classify as "ml_model"
+- Questions about model performance, feature selection, improving metrics after a model was built → classify as "ml_model"
+- Short affirmative responses ("yes", "ok", "try it") → use the context from previous messages
+
 CLASSIFICATION RULES:
-1. "ml_model" - User wants to build/train/create a machine learning model
+1. "ml_model" - User wants to build/train/create a machine learning model OR improve/modify an existing model
    * HIGH PRIORITY: Questions like "build a linear model", "train a model", "create a [model type] model", "build a model choosing X as target and Y, Z as independent variables"
-   * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model"
-   * Model types: linear, logistic, ridge, lasso, random forest, decision tree
+   * ALSO HIGH PRIORITY (follow-ups): "test alternative features", "improve accuracy", "try different features", "which features should we use", "can we improve the model", "should we test X as a feature"
+   * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model", "test features", "improve accuracy", "better metrics"
+   * Model types: linear, logistic, ridge, lasso, random forest, decision tree, gradient boosting, elasticnet, svm, knn
    * Set confidence to 0.9+ for these patterns
 2. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
    * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
@@ -137,7 +146,17 @@ IMPORTANT: Questions like "which month had the highest X?", "which was the best 
 
 EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
 - For ML_MODEL intent type:
-  * Extract modelType: "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree" from phrases like "linear model", "logistic regression", "ridge model", "lasso model", "random forest", "decision tree"
+  * Extract modelType from phrases. Supported types:
+    - "linear" - Linear Regression
+    - "logistic" - Logistic Regression (classification)
+    - "ridge" - Ridge Regression (L2 regularization)
+    - "lasso" - Lasso Regression (L1 regularization)
+    - "random_forest" - Random Forest
+    - "decision_tree" - Decision Tree
+    - "gradient_boosting" - Gradient Boosting (also matches "gbm", "xgboost")
+    - "elasticnet" - ElasticNet (L1+L2 regularization)
+    - "svm" - Support Vector Machine (also matches "support vector")
+    - "knn" - K-Nearest Neighbors (also matches "k-nearest", "nearest neighbor")
   * If no model type specified, default to "linear"
   * Extract targetVariable: The variable to predict (from phrases like "X as target", "predicting X", "target variable X", "dependent variable X")
   * Extract variables array: Independent variables/features (from phrases like "a, b, c as independent variables", "using X, Y, Z as features", "predictors: X, Y, Z")
@@ -207,7 +226,7 @@ OUTPUT FORMAT (JSON only, no markdown):
   } | null,
   "customRequest": "original question" | null,
   "requiresClarification": true | false,
-  "modelType": "linear" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree" | null  // Only for ml_model type
+  "modelType": "linear" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree" | "gradient_boosting" | "elasticnet" | "svm" | "knn" | null  // Only for ml_model type
 }`;
 
   let lastError: Error | null = null;

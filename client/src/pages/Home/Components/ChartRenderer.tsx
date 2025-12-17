@@ -165,6 +165,11 @@ export function ChartRenderer({
     const forceCategoricalKeys: string[] = [];
     const forceNumericKeys: string[] = [];
     const forceDateKeys: string[] = [];
+    // Exclude Y-axis from filters - only show X-axis filters
+    const excludeKeys: string[] = [];
+    if (typeof y === 'string') {
+      excludeKeys.push(y);
+    }
 
     // Check if X-axis is a date column (for time-based charts)
     if (typeof x === 'string') {
@@ -195,11 +200,9 @@ export function ChartRenderer({
         forceCategoricalKeys.push(x);
       }
     }
-    if (typeof y === 'string') {
-      forceNumericKeys.push(y);
-    }
 
     return deriveChartFilterDefinitions(originalData, {
+      excludeKeys,
       forceCategoricalKeys,
       forceNumericKeys,
       forceDateKeys,

@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { Insight } from '@/shared/schema';
 import { Card } from '@/components/ui/card';
-import { Lightbulb } from 'lucide-react';
+import { Lightbulb, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface InsightCardProps {
   insights: Insight[];
@@ -117,7 +118,14 @@ const parseInsightSubPoints = (text: string) => {
 };
 
 export function InsightCard({ insights }: InsightCardProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  
   if (!insights || insights.length === 0) return null;
+
+  const INITIAL_DISPLAY_COUNT = 3;
+  const hasMoreInsights = insights.length > INITIAL_DISPLAY_COUNT;
+  const displayedInsights = isExpanded ? insights : insights.slice(0, INITIAL_DISPLAY_COUNT);
+  const hiddenCount = insights.length - INITIAL_DISPLAY_COUNT;
 
   return (
     <Card className="bg-primary/5 border-l-4 border-l-primary shadow-sm" data-testid="insight-card">
@@ -125,9 +133,14 @@ export function InsightCard({ insights }: InsightCardProps) {
         <div className="flex items-center gap-2 mb-4">
           <Lightbulb className="w-5 h-5 text-primary" />
           <h3 className="text-lg font-semibold text-foreground">Key Insights</h3>
+          {hasMoreInsights && (
+            <span className="text-xs text-muted-foreground ml-auto">
+              {insights.length} insights
+            </span>
+          )}
         </div>
         <ul className="space-y-4">
-          {insights.map((insight) => {
+          {displayedInsights.map((insight) => {
             const subPoints = parseInsightSubPoints(insight.text);
             
             return (
@@ -148,6 +161,24 @@ export function InsightCard({ insights }: InsightCardProps) {
             );
           })}
         </ul>
+        {hasMoreInsights && (
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="mt-4 w-full flex items-center justify-center gap-2 text-sm text-primary hover:text-primary/80 transition-colors py-2 border-t border-primary/10"
+          >
+            {isExpanded ? (
+              <>
+                <ChevronUp className="w-4 h-4" />
+                Show less
+              </>
+            ) : (
+              <>
+                <ChevronDown className="w-4 h-4" />
+                Show {hiddenCount} more insight{hiddenCount > 1 ? 's' : ''}
+              </>
+            )}
+          </button>
+        )}
       </div>
     </Card>
   );

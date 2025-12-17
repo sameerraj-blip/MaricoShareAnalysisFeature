@@ -228,13 +228,16 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     }
 
     // Save messages only if client is still connected
+    // Use targetTimestamp for the user message to match the frontend's timestamp
+    // This prevents duplicate messages when the SSE polling picks up the saved messages
     try {
       const userEmail = username?.toLowerCase();
+      const userMessageTimestamp = targetTimestamp || Date.now();
       await addMessagesBySessionId(sessionId, [
         {
           role: 'user',
           content: message,
-          timestamp: Date.now(),
+          timestamp: userMessageTimestamp,
           userEmail: userEmail,
         },
         {

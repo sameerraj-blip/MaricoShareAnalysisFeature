@@ -92,14 +92,19 @@ interface ConvertTypeResponse {
 
 interface TrainModelRequest {
   data: Record<string, any>[];
-  model_type: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree';
+  model_type: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn';
   target_variable: string;
   features: string[];
   test_size?: number;
   random_state?: number;
   alpha?: number;
+  l1_ratio?: number;  // For ElasticNet
   n_estimators?: number;
   max_depth?: number;
+  learning_rate?: number;  // For Gradient Boosting
+  kernel?: string;  // For SVM
+  C?: number;  // For SVM
+  n_neighbors?: number;  // For KNN
 }
 
 interface TrainModelResponse {
@@ -341,15 +346,20 @@ export async function convertDataType(
  */
 export async function trainMLModel(
   data: Record<string, any>[],
-  modelType: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree',
+  modelType: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn',
   targetVariable: string,
   features: string[],
   options?: {
     testSize?: number;
     randomState?: number;
     alpha?: number;
+    l1Ratio?: number;  // For ElasticNet
     nEstimators?: number;
     maxDepth?: number;
+    learningRate?: number;  // For Gradient Boosting
+    kernel?: string;  // For SVM
+    C?: number;  // For SVM
+    nNeighbors?: number;  // For KNN
   }
 ): Promise<TrainModelResponse> {
   try {
@@ -381,6 +391,42 @@ export async function trainMLModel(
     if (modelType === 'decision_tree') {
       if (options?.maxDepth !== undefined) {
         request.max_depth = options.maxDepth;
+      }
+    }
+    
+    if (modelType === 'gradient_boosting') {
+      if (options?.nEstimators !== undefined) {
+        request.n_estimators = options.nEstimators;
+      }
+      if (options?.maxDepth !== undefined) {
+        request.max_depth = options.maxDepth;
+      }
+      if (options?.learningRate !== undefined) {
+        request.learning_rate = options.learningRate;
+      }
+    }
+    
+    if (modelType === 'elasticnet') {
+      if (options?.alpha !== undefined) {
+        request.alpha = options.alpha;
+      }
+      if (options?.l1Ratio !== undefined) {
+        request.l1_ratio = options.l1Ratio;
+      }
+    }
+    
+    if (modelType === 'svm') {
+      if (options?.kernel !== undefined) {
+        request.kernel = options.kernel;
+      }
+      if (options?.C !== undefined) {
+        request.C = options.C;
+      }
+    }
+    
+    if (modelType === 'knn') {
+      if (options?.nNeighbors !== undefined) {
+        request.n_neighbors = options.nNeighbors;
       }
     }
     
