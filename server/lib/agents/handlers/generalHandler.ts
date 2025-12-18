@@ -29,14 +29,22 @@ export class GeneralHandler extends BaseHandler {
       }
     }
 
+    // Build question from intent
+    let question = intent.customRequest || intent.originalQuestion || '';
+    
+    // Check if this is an advice question about models (should get simple response, no charts)
+    const isAdviceQuestion = this.isAdviceQuestion(question);
+    
+    if (isAdviceQuestion) {
+      console.log('💡 Detected advice question, providing simple conversational response');
+      return this.handleAdviceQuestion(question, context);
+    }
+
     // If intent has axisMapping with y2 (secondary Y-axis), handle it intelligently
     if (intent.axisMapping?.y2) {
       console.log('📊 Secondary Y-axis detected in intent:', intent.axisMapping);
       return this.handleSecondaryYAxis(intent, context);
     }
-
-    // Build question from intent
-    let question = intent.customRequest || intent.originalQuestion || '';
     
     // If intent has specific information, enhance the question
     if (intent.targetVariable) {
@@ -73,6 +81,96 @@ export class GeneralHandler extends BaseHandler {
         intent,
         this.findSimilarColumns(intent.targetVariable || '', context.summary)
       );
+    }
+  }
+
+  /**
+   * Check if question is asking for advice/suggestions rather than performing an action
+   */
+  private isAdviceQuestion(question: string): boolean {
+    const lower = question.toLowerCase();
+    const advicePatterns = [
+      /how\s+can\s+we\s+improve/i,
+      /how\s+to\s+improve/i,
+      /what\s+should\s+we\s+do/i,
+      /what\s+would\s+help/i,
+      /suggestions?\s+for/i,
+      /recommendations?\s+for/i,
+      /advice\s+on/i,
+      /how\s+do\s+we\s+improve/i,
+      /what\s+can\s+we\s+do\s+to/i,
+      /how\s+should\s+we/i,
+    ];
+    
+    return advicePatterns.some(pattern => pattern.test(lower));
+  }
+
+  /**
+   * Handle advice questions with simple conversational responses (no charts)
+   */
+  private async handleAdviceQuestion(
+    question: string,
+    context: HandlerContext
+  ): Promise<HandlerResponse> {
+    const { getModelForTask } = await import('../models.js');
+    const { openai } = await import('../../openai.js');
+    
+    // Build context from recent chat history
+    const recentHistory = context.chatHistory
+      .slice(-5)
+      .filter(msg => msg.content && msg.content.length < 1000)
+      .map((msg) => `${msg.role}: ${msg.content}`)
+      .join('\n');
+
+    const historyContext = recentHistory ? `\n\nCONVERSATION HISTORY:\n${recentHistory}` : '';
+
+    const prompt = `You are a helpful data analyst assistant. The user is asking for advice or suggestions about their data analysis or models.
+
+User question: "${question}"
+${historyContext}
+
+Provide a helpful, conversational response with practical suggestions. Keep it concise (2-4 sentences). 
+- If they're asking about improving a model, suggest things like: trying different features, feature engineering, different model types, hyperparameter tuning, or getting more data
+- If they're asking about data analysis, suggest relevant approaches
+- Be friendly and actionable
+
+Do NOT generate charts or visualizations. Just provide text advice.
+
+Respond naturally and conversationally.`;
+
+    try {
+      const model = getModelForTask('generation');
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a helpful data analyst assistant. Provide concise, actionable advice without generating charts.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.7,
+        max_tokens: 300,
+      });
+
+      const answer = response.choices[0].message.content?.trim() || 
+        'I can help you improve your analysis. Could you provide more details about what you\'d like to improve?';
+
+      return {
+        answer,
+        charts: [], // Explicitly no charts for advice questions
+        insights: [],
+      };
+    } catch (error) {
+      console.error('Error generating advice response:', error);
+      return {
+        answer: 'I can help you improve your analysis. Could you provide more details about what specific aspect you\'d like to improve?',
+        charts: [],
+        insights: [],
+      };
     }
   }
 

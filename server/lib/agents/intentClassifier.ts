@@ -124,12 +124,12 @@ CONTEXT-AWARE CLASSIFICATION:
 - Short affirmative responses ("yes", "ok", "try it") → use the context from previous messages
 
 CLASSIFICATION RULES:
-1. "ml_model" - User wants to build/train/create a machine learning model OR improve/modify an existing model
+1. "ml_model" - User wants to build/train/create a machine learning model OR improve/modify an existing model (including advice questions about model performance)
    * HIGH PRIORITY: Questions like "build a linear model", "train a model", "create a [model type] model", "build a model choosing X as target and Y, Z as independent variables"
-   * ALSO HIGH PRIORITY (follow-ups): "test alternative features", "improve accuracy", "try different features", "which features should we use", "can we improve the model", "should we test X as a feature"
-   * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model", "test features", "improve accuracy", "better metrics"
+   * ALSO HIGH PRIORITY (follow-ups and advice): "test alternative features", "improve accuracy", "try different features", "which features should we use", "can we improve the model", "how can we improve the model performance", "how can we improve the random forest model performance"
+   * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model", "test features", "try features", "improve the model"
    * Model types: linear, logistic, ridge, lasso, random forest, decision tree, gradient boosting, elasticnet, svm, knn
-   * Set confidence to 0.9+ for these patterns
+   * Set confidence to 0.9+ for these patterns (including advice-style questions about models)
 2. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
    * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
    * These are correlation queries even if the target variable (X) is not immediately recognizable
@@ -139,6 +139,7 @@ CLASSIFICATION RULES:
 5. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
 6. "conversational" - Greetings, thanks, casual chat, questions about the bot
 7. "custom" - Doesn't fit other categories
+   * Also includes general yes/no questions that are not clearly about modeling, correlation, charts, or statistics
 
 IMPORTANT: Questions like "what is the best competitor to X?" or "which product is best for Y?" should be classified as "comparison", NOT "correlation" or "custom".
 

@@ -997,6 +997,28 @@ export async function parseDataOpsIntent(
     }
   }
   
+  // Detect advice-style questions about models (should NOT trigger train_model here)
+  const isModelAdviceQuestion =
+    (
+      lowerMessage.includes('how can we improve') ||
+      lowerMessage.includes('how do we improve') ||
+      lowerMessage.includes('how to improve') ||
+      lowerMessage.includes('what should we do') ||
+      lowerMessage.includes('what can we do to') ||
+      lowerMessage.includes('what would help') ||
+      lowerMessage.includes('suggestions for') ||
+      lowerMessage.includes('recommendations for') ||
+      lowerMessage.includes('advice on')
+    ) &&
+    lowerMessage.includes('model');
+
+  if (isModelAdviceQuestion) {
+    return {
+      operation: 'unknown',
+      requiresClarification: false
+    };
+  }
+
   // ML Model training intent (regex fallback)
   if (lowerMessage.includes('build') && (lowerMessage.includes('model') || lowerMessage.includes('linear') || lowerMessage.includes('regression'))) {
     return {
@@ -1022,6 +1044,7 @@ export async function parseDataOpsIntent(
   // Follow-up / conversational model requests (regex fallback)
   if (
     lowerMessage.includes('model') &&
+    !isModelAdviceQuestion && // Avoid treating pure advice questions as train_model
     (
       lowerMessage.includes('less variance') ||
       lowerMessage.includes('lowest variance') ||
@@ -1752,16 +1775,19 @@ function extractPreviousModelParams(chatHistory: Message[]): { targetVariable?: 
       if (content.includes('Model Summary') && content.includes('Target Variable')) {
         console.log(`📋 Found potential model result at message index ${i}`);
         
-        // Try multiple patterns for target variable
-        const targetMatch = content.match(/Target Variable:\s*([^\n]+)/i) || 
+        // Try multiple patterns for target variable (handle markdown format with dashes)
+        const targetMatch = content.match(/[-*]\s*Target Variable:\s*([^\n]+)/i) || 
+                           content.match(/Target Variable:\s*([^\n]+)/i) ||
                            content.match(/target[:\s]+([^\n]+)/i);
         
-        // Try multiple patterns for features
-        const featuresMatch = content.match(/Features:\s*([^\n]+)/i) ||
+        // Try multiple patterns for features (handle markdown format with dashes)
+        const featuresMatch = content.match(/[-*]\s*Features:\s*([^\n]+)/i) ||
+                             content.match(/Features:\s*([^\n]+)/i) ||
                              content.match(/features[:\s]+([^\n]+)/i);
         
         // Try multiple patterns for model type
         const modelTypeMatch = content.match(/trained a (\w+(?:\s+\w+)?)\s+model/i) ||
+                              content.match(/successfully trained a (\w+(?:\s+\w+)?)\s+model/i) ||
                               content.match(/(\w+(?:\s+\w+)?)\s+model/i) ||
                               content.match(/model type[:\s]+(\w+(?:\s+\w+)?)/i);
         
@@ -1830,10 +1856,14 @@ async function extractMLModelDetails(
     // Check if user is referencing previous model
     const messageLower = message.toLowerCase();
     const referencesPrevious = messageLower.includes('for above') || 
+                               messageLower.includes('for the above') ||
                                messageLower.includes('that model') || 
                                messageLower.includes('previous model') ||
                                messageLower.includes('the above') ||
-                               messageLower.includes('same') && messageLower.includes('model');
+                               messageLower.includes('above model') ||
+                               (messageLower.includes('same') && messageLower.includes('model')) ||
+                               (messageLower.includes('less variance') && previousModelParams) ||
+                               (messageLower.includes('reduce variance') && previousModelParams);
     
     // Determine model type based on user request
     let suggestedModelType = 'linear';
@@ -2953,6 +2983,12 @@ export async function executeDataOperation(
       
       const previousModelParams = extractPreviousModelParams(chatHistoryForContext);
       
+      if (previousModelParams) {
+        console.log(`✅ Found previous model context: target="${previousModelParams.targetVariable}", features=[${previousModelParams.features?.join(', ')}], type=${previousModelParams.modelType || 'unknown'}`);
+      } else {
+        console.log(`⚠️ No previous model context found in ${chatHistoryForContext.length} messages`);
+      }
+      
       // Check if user wants less variance (Ridge/Lasso)
       const messageText = originalMessage || sessionDoc?.messages?.slice().reverse().find(m => m.role === 'user')?.content || '';
       const messageLower = messageText.toLowerCase();
@@ -2960,10 +2996,21 @@ export async function executeDataOperation(
                                 messageLower.includes('reduce variance') || 
                                 messageLower.includes('lower variance');
       
+      console.log(`📝 Processing model request: message="${messageText}", wantsLessVariance=${wantsLessVariance}, hasPreviousParams=${!!previousModelParams}`);
+      
       // If user wants less variance and we have previous model, default to Ridge
       if (wantsLessVariance && previousModelParams && !intent.modelType) {
         modelType = 'ridge';
         console.log(`🎯 User wants less variance, using Ridge model`);
+        // Also use previous model params if not provided
+        if (!targetVariable && previousModelParams.targetVariable) {
+          targetVariable = previousModelParams.targetVariable;
+          console.log(`📋 Using previous target variable: ${targetVariable}`);
+        }
+        if (features.length === 0 && previousModelParams.features && previousModelParams.features.length > 0) {
+          features = previousModelParams.features;
+          console.log(`📋 Using previous features: ${features.join(', ')}`);
+        }
       }
       
       // If not provided, try to extract from message using AI
@@ -2978,9 +3025,9 @@ export async function executeDataOperation(
           features = features.length > 0 ? features : (extraction.features || []);
         }
         
-        // If still missing and we have previous model params, use them
+        // If still missing and we have previous model params, use them (strong fallback)
         if ((!targetVariable || features.length === 0) && previousModelParams) {
-          console.log(`📋 Using previous model parameters from chat history`);
+          console.log(`📋 Using previous model parameters from chat history as fallback`);
           targetVariable = targetVariable || previousModelParams.targetVariable;
           features = features.length > 0 ? features : (previousModelParams.features || []);
         }

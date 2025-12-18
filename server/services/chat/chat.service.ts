@@ -35,19 +35,7 @@ export interface ProcessChatMessageResult {
 export async function processChatMessage(params: ProcessChatMessageParams): Promise<ProcessChatMessageResult> {
   const { sessionId, message, chatHistory, targetTimestamp, username } = params;
 
-  // If targetTimestamp is provided, this is an edit operation
-  if (targetTimestamp) {
-    console.log('✏️ Editing message with targetTimestamp:', targetTimestamp);
-    try {
-      await updateMessageAndTruncate(sessionId, targetTimestamp, message);
-      console.log('✅ Message updated and messages truncated in database');
-    } catch (truncateError) {
-      console.error('⚠️ Failed to update message and truncate:', truncateError);
-      // Continue with the chat request even if truncation fails
-    }
-  }
-
-  // Get chat document
+  // Get chat document FIRST (with full history) so processing uses complete context
   console.log('🔍 Fetching chat document for sessionId:', sessionId);
   const chatDocument = await getChatBySessionIdForUser(sessionId, username);
 
@@ -67,11 +55,17 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
     ? chatDocument.insights
     : undefined;
 
+  // For edited messages, use full history from database for processing (same as new messages)
+  // This ensures context-aware processing works correctly
+  const processingChatHistory = targetTimestamp 
+    ? (chatDocument.messages || []) // Use full history from database for edits
+    : (chatHistory || []); // Use provided history for new messages
+
   // Answer the question using the latest data
   const result = await answerQuestion(
     latestData,
     message,
-    chatHistory || [],
+    processingChatHistory,
     chatDocument.dataSummary,
     sessionId,
     chatLevelInsights
@@ -85,12 +79,25 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
   // Validate and enrich response
   const validated = validateAndEnrichResponse(result, chatDocument, chatLevelInsights);
 
+  // If targetTimestamp is provided, this is an edit operation
+  // Truncate history AFTER processing (so processing had full context)
+  if (targetTimestamp) {
+    console.log('✏️ Editing message with targetTimestamp:', targetTimestamp);
+    try {
+      await updateMessageAndTruncate(sessionId, targetTimestamp, message);
+      console.log('✅ Message updated and messages truncated in database');
+    } catch (truncateError) {
+      console.error('⚠️ Failed to update message and truncate:', truncateError);
+      // Continue with the chat request even if truncation fails
+    }
+  }
+
   // Generate AI suggestions
   let suggestions: string[] = [];
   try {
     const updatedChatHistory = [
-      ...(chatHistory || []),
-      { role: 'user' as const, content: message, timestamp: Date.now() },
+      ...processingChatHistory,
+      { role: 'user' as const, content: message, timestamp: targetTimestamp || Date.now() },
       { role: 'assistant' as const, content: validated.answer, timestamp: Date.now() }
     ];
     suggestions = await generateAISuggestions(

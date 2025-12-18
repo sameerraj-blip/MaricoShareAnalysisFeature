@@ -289,6 +289,13 @@ export class CorrelationHandler extends BaseHandler {
       const topNMatch = originalQuestion.match(/\btop\s+(\d+)\b/i);
       const maxResults = topNMatch ? parseInt(topNMatch[1], 10) : undefined;
       
+      // Detect yes/no style correlation questions, e.g.:
+      // "Should we analyze PA TOM's correlation with PA nGRP Adstocked?"
+      const isYesNoCorrelationQuestion =
+        /\bshould\s+we\s+analy[sz]e\b/i.test(originalQuestion) ||
+        /\bshould\s+i\s+analy[sz]e\b/i.test(originalQuestion) ||
+        /\bshould\s+we\s+look\s+at\s+the\s+correlation\b/i.test(originalQuestion);
+
       // Call correlation analyzer
       let { charts, insights } = await analyzeCorrelations(
         context.data,
@@ -356,28 +363,76 @@ export class CorrelationHandler extends BaseHandler {
       }
 
       // Build answer
-      let answer = `I've analyzed what affects ${targetCol}. `;
-      
-      if (maxResults) {
-        answer += `I've limited the analysis to the top ${maxResults} variables as requested. `;
-      }
-      
-      if (filter === 'positive') {
-        answer += `I've filtered to show only positive correlations as requested. `;
-      } else if (filter === 'negative') {
-        answer += `I've filtered to show only negative correlations as requested. `;
-      }
-      
-      if (mentionsNegativeImpact && variablesToFilterNegative.length > 0) {
-        answer += `As requested, I've excluded negative correlations for the specified variables (${variablesToFilterNegative.join(', ')}). `;
-      }
+      let answer: string;
 
-      if (charts.length > 0) {
-        answer += `I've created ${charts.length} visualization${charts.length > 1 ? 's' : ''} showing the key relationships. `;
-      }
+      if (isYesNoCorrelationQuestion && filteredComparisonColumns.length === 1) {
+        const comparedVar = filteredComparisonColumns[0];
 
-      if (insights.length > 0) {
-        answer += `Here are the key insights:`;
+        // Try to extract the correlation coefficient r from the scatter chart title, if available
+        let rValueText: string | null = null;
+        let strengthText: string | null = null;
+
+        const scatterChart = charts.find(
+          (c) => c.type === 'scatter' && typeof c.title === 'string' && c.title.includes('r=')
+        );
+
+        if (scatterChart && scatterChart.title) {
+          const match = scatterChart.title.match(/r\s*=\s*([-+]?\d*\.?\d+)/i);
+          if (match) {
+            const rVal = parseFloat(match[1]);
+            if (!Number.isNaN(rVal)) {
+              const absR = Math.abs(rVal);
+              rValueText = rVal.toFixed(2);
+              if (absR < 0.2) {
+                strengthText = 'very weak';
+              } else if (absR < 0.4) {
+                strengthText = 'weak';
+              } else if (absR < 0.6) {
+                strengthText = 'moderate';
+              } else {
+                strengthText = 'strong';
+              }
+            }
+          }
+        }
+
+        if (rValueText && strengthText) {
+          answer = `Yes – based on your data, the correlation between ${comparedVar} and ${targetCol} is r ≈ ${rValueText}, which is a ${strengthText} relationship. `;
+        } else {
+          answer = `Yes – we can analyze the correlation between ${comparedVar} and ${targetCol} using your dataset. `;
+        }
+
+        if (charts.length > 0) {
+          answer += `I've included ${charts.length} visualization${charts.length > 1 ? 's' : ''} to show this relationship. `;
+        }
+        if (insights.length > 0) {
+          answer += `Here are the key insights:`;
+        }
+      } else {
+        // Default explanatory style for general correlation questions
+        answer = `I've analyzed what affects ${targetCol}. `;
+
+        if (maxResults) {
+          answer += `I've limited the analysis to the top ${maxResults} variables as requested. `;
+        }
+        
+        if (filter === 'positive') {
+          answer += `I've filtered to show only positive correlations as requested. `;
+        } else if (filter === 'negative') {
+          answer += `I've filtered to show only negative correlations as requested. `;
+        }
+        
+        if (mentionsNegativeImpact && variablesToFilterNegative.length > 0) {
+          answer += `As requested, I've excluded negative correlations for the specified variables (${variablesToFilterNegative.join(', ')}). `;
+        }
+
+        if (charts.length > 0) {
+          answer += `I've created ${charts.length} visualization${charts.length > 1 ? 's' : ''} showing the key relationships. `;
+        }
+        
+        if (insights.length > 0) {
+          answer += `Here are the key insights:`;
+        }
       }
 
       return {

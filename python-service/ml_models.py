@@ -244,14 +244,30 @@ def train_logistic_regression(
         
         # Determine if classification is needed
         task_type = _determine_task_type(y)
-        if task_type != "classification":
-            # Convert to binary classification if needed
+        
+        # Handle binary target conversion
+        unique_values = sorted(y.unique())
+        is_binary = len(unique_values) == 2
+        
+        if is_binary and set(unique_values).issubset({0, 1}):
+            # Already binary (0/1), use as-is
+            task_type = "classification"
+        elif is_binary:
+            # Binary but not 0/1, convert to 0/1
+            y = y.map({unique_values[0]: 0, unique_values[1]: 1})
+            task_type = "classification"
+        elif task_type != "classification":
+            # Convert continuous to binary using median threshold
             median = y.median()
             y = (y > median).astype(int)
+            task_type = "classification"
+        
+        # Use stratify for binary classification to maintain class distribution
+        use_stratify = len(y.unique()) == 2 and min(y.value_counts()) >= 2
         
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state, stratify=y if task_type == "classification" else None
+            X, y, test_size=test_size, random_state=random_state, stratify=y if use_stratify else None
         )
         
         # Train model

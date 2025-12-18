@@ -17,6 +17,13 @@ export class MLModelHandler extends BaseHandler {
   async handle(intent: AnalysisIntent, context: HandlerContext): Promise<HandlerResponse> {
     console.log('🤖 MLModelHandler processing intent:', intent.type);
     
+    // Check if this is an advice question (should not train model, just provide advice)
+    const userQuestion = intent.customRequest || intent.originalQuestion || '';
+    if (this.isAdviceQuestion(userQuestion)) {
+      console.log('💡 Detected advice question in MLModelHandler, providing simple response');
+      return this.handleAdviceQuestion(userQuestion, context);
+    }
+    
     const validation = this.validateData(intent, context);
     if (!validation.valid && validation.errors.some(e => e.includes('No data'))) {
       return this.createErrorResponse(
@@ -33,32 +40,32 @@ export class MLModelHandler extends BaseHandler {
       modelType = intent.modelType as typeof modelType;
     } else {
       // Try to extract from question
-      const question = (intent.originalQuestion || intent.customRequest || '').toLowerCase();
-      if (question.includes('logistic')) {
+      const questionLower = (intent.originalQuestion || intent.customRequest || '').toLowerCase();
+      if (questionLower.includes('logistic')) {
         modelType = 'logistic';
-      } else if (question.includes('ridge')) {
+      } else if (questionLower.includes('ridge')) {
         modelType = 'ridge';
-      } else if (question.includes('lasso')) {
+      } else if (questionLower.includes('lasso')) {
         modelType = 'lasso';
-      } else if (question.includes('random forest') || question.includes('randomforest')) {
+      } else if (questionLower.includes('random forest') || questionLower.includes('randomforest')) {
         modelType = 'random_forest';
-      } else if (question.includes('decision tree') || question.includes('decisiontree')) {
+      } else if (questionLower.includes('decision tree') || questionLower.includes('decisiontree')) {
         modelType = 'decision_tree';
-      } else if (question.includes('gradient boosting') || question.includes('gradientboosting') || question.includes('gbm') || question.includes('xgboost')) {
+      } else if (questionLower.includes('gradient boosting') || questionLower.includes('gradientboosting') || questionLower.includes('gbm') || questionLower.includes('xgboost')) {
         modelType = 'gradient_boosting';
-      } else if (question.includes('elastic net') || question.includes('elasticnet')) {
+      } else if (questionLower.includes('elastic net') || questionLower.includes('elasticnet')) {
         modelType = 'elasticnet';
-      } else if (question.includes('svm') || question.includes('support vector')) {
+      } else if (questionLower.includes('svm') || questionLower.includes('support vector')) {
         modelType = 'svm';
-      } else if (question.includes('knn') || question.includes('k-nearest') || question.includes('k nearest') || question.includes('nearest neighbor')) {
+      } else if (questionLower.includes('knn') || questionLower.includes('k-nearest') || questionLower.includes('k nearest') || questionLower.includes('nearest neighbor')) {
         modelType = 'knn';
       }
     }
 
     // Check if this is a follow-up question about modeling (e.g., "test alternative features", "improve accuracy")
-    const question = (intent.originalQuestion || intent.customRequest || '').toLowerCase();
-    const isFollowUpQuestion = /\b(test|try|alternative|different|other|improve|better|change|switch|more)\s*(features?|variables?|accuracy|metrics?|model)\b/i.test(question) ||
-                               /\b(should we|can we|let's|what if)\b/i.test(question);
+    const questionText = (intent.originalQuestion || intent.customRequest || '').toLowerCase();
+    const isFollowUpQuestion = /\b(test|try|alternative|different|other|improve|better|change|switch|more)\s*(features?|variables?|accuracy|metrics?|model)\b/i.test(questionText) ||
+                               /\b(should we|can we|let's|what if)\b/i.test(questionText);
     
     // Extract target variable
     let targetVariable = intent.targetVariable;
@@ -695,6 +702,124 @@ Return ONLY the Python code, no explanations before or after.`;
     }
     
     return { target, features, modelType };
+  }
+
+  /**
+   * Check if question is asking for advice/suggestions rather than performing an action
+   */
+  private isAdviceQuestion(question: string): boolean {
+    const lower = question.toLowerCase();
+    const advicePatterns = [
+      /how\s+can\s+we\s+improve/i,
+      /how\s+to\s+improve/i,
+      /what\s+should\s+we\s+do/i,
+      /what\s+would\s+help/i,
+      /suggestions?\s+for/i,
+      /recommendations?\s+for/i,
+      /advice\s+on/i,
+      /how\s+do\s+we\s+improve/i,
+      /what\s+can\s+we\s+do\s+to/i,
+      /how\s+should\s+we/i,
+    ];
+    
+    return advicePatterns.some(pattern => pattern.test(lower));
+  }
+
+  /**
+   * Handle advice questions with simple conversational responses (no charts, no new model training)
+   * Uses the most recent model summary from chat history plus dataset summary for context.
+   */
+  private async handleAdviceQuestion(
+    question: string,
+    context: HandlerContext
+  ): Promise<HandlerResponse> {
+    const { getModelForTask } = await import('../models.js');
+    const { openai } = await import('../../openai.js');
+
+    // Find the most recent assistant message that looks like a model summary
+    const recentMessages = [...context.chatHistory].reverse();
+    let lastModelSummary: string | null = null;
+
+    for (const msg of recentMessages) {
+      if (msg.role === 'assistant' && msg.content) {
+        if (
+          msg.content.includes("I've successfully trained a") ||
+          msg.content.includes('Model Summary:') ||
+          msg.content.includes('Model Performance:')
+        ) {
+          lastModelSummary = msg.content;
+          break;
+        }
+      }
+    }
+
+    const dataSummaryText = [
+      `Rows: ${context.summary.rowCount}`,
+      `Columns: ${context.summary.columns.map(c => c.name).join(', ')}`,
+      context.summary.numericColumns?.length
+        ? `Numeric columns: ${context.summary.numericColumns.join(', ')}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const modelContext = lastModelSummary
+      ? `\n\nMOST RECENT MODEL SUMMARY (from previous answer):\n${lastModelSummary}`
+      : '\n\nMOST RECENT MODEL SUMMARY: (none found in chat history)';
+
+    const prompt = `You are a helpful data analyst assistant. The user is asking for advice or suggestions about improving their machine learning model.
+
+USER QUESTION:
+${question}
+
+DATASET SUMMARY:
+${dataSummaryText}
+${modelContext}
+
+TASK:
+- Give practical, concrete suggestions for improving this specific model, based on the metrics and feature importance above.
+- Reference the target variable and key features if they appear in the model summary.
+- Mention ideas like: trying additional features, removing weak/noisy features, feature engineering, hyperparameter tuning, trying regularized models (ridge/lasso) or different algorithms, cross-validation, and collecting more data.
+- Keep the answer short and clear (3–6 bullet points or 2–4 sentences).
+- Do NOT train a new model or describe training steps. Focus only on advice using the existing results.`;
+
+    try {
+      const model = getModelForTask('generation');
+      const response = await openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a helpful data analyst assistant. Provide concise, actionable advice about improving models using the existing model summary and dataset, without training new models or generating charts.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.7,
+        max_tokens: 400,
+      });
+
+      const answer =
+        response.choices[0].message.content?.trim() ||
+        'Based on the current model performance, you could try testing additional relevant features, engineering new variables, and tuning the model hyperparameters (e.g., max depth, number of trees) to see if the fit improves.';
+
+      return {
+        answer,
+        charts: [], // Explicitly no charts for advice questions
+        insights: [],
+      };
+    } catch (error) {
+      console.error('Error generating advice response:', error);
+      return {
+        answer:
+          'Looking at the current model performance, you could try: (1) adding or removing features based on their importance, (2) doing feature engineering, and (3) tuning hyperparameters like depth, number of trees, or regularization strength to improve the fit.',
+        charts: [],
+        insights: [],
+      };
+    }
   }
 }
 

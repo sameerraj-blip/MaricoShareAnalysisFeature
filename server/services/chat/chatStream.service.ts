@@ -64,18 +64,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
   });
 
   try {
-    // If targetTimestamp is provided, this is an edit operation
-    if (targetTimestamp) {
-      console.log('✏️ Editing message with targetTimestamp:', targetTimestamp);
-      try {
-        await updateMessageAndTruncate(sessionId, targetTimestamp, message);
-        console.log('✅ Message updated and messages truncated in database');
-      } catch (truncateError) {
-        console.error('⚠️ Failed to update message and truncate:', truncateError);
-      }
-    }
-
-    // Get chat document
+    // Get chat document FIRST (with full history) so processing uses complete context
     console.log('🔍 Fetching chat document for sessionId:', sessionId);
     const chatDocument = await getChatBySessionIdForUser(sessionId, username);
 
@@ -111,6 +100,12 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       return;
     }
 
+    // For edited messages, use full history from database for mode detection (same as new messages)
+    // This ensures context-aware mode detection works correctly
+    const modeDetectionChatHistory = targetTimestamp 
+      ? (chatDocument.messages || []) // Use full history from database for edits
+      : (chatHistory || []); // Use provided history for new messages
+
     // Determine mode: use provided mode (user override) or auto-detect
     // Treat 'general' the same as no mode (auto-detect)
     const shouldAutoDetect = !mode || mode === 'general';
@@ -127,7 +122,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
         
         const modeClassification = await classifyMode(
           message,
-          chatHistory || [],
+          modeDetectionChatHistory,
           chatDocument.dataSummary
         );
         
@@ -155,11 +150,17 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       console.log(`🎯 Using user-specified mode: ${mode}`);
     }
 
+    // For edited messages, use full history from database for processing (same as new messages)
+    // This ensures context-aware processing works correctly
+    const processingChatHistory = targetTimestamp 
+      ? (chatDocument.messages || []) // Use full history from database for edits
+      : (chatHistory || []); // Use provided history for new messages
+    
     // Answer the question with streaming using the latest data
     const result = await answerQuestion(
       latestData,
       message,
-      chatHistory || [],
+      processingChatHistory,
       chatDocument.dataSummary,
       sessionId,
       chatLevelInsights,
@@ -225,6 +226,18 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     if (!checkConnection()) {
       console.log('🚫 Client disconnected, skipping message save');
       return;
+    }
+
+    // If targetTimestamp is provided, this is an edit operation
+    // Truncate history AFTER processing (so processing had full context)
+    if (targetTimestamp) {
+      console.log('✏️ Editing message with targetTimestamp:', targetTimestamp);
+      try {
+        await updateMessageAndTruncate(sessionId, targetTimestamp, message);
+        console.log('✅ Message updated and messages truncated in database');
+      } catch (truncateError) {
+        console.error('⚠️ Failed to update message and truncate:', truncateError);
+      }
     }
 
     // Save messages only if client is still connected
