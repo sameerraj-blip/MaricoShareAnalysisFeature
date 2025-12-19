@@ -155,7 +155,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     const processingChatHistory = targetTimestamp 
       ? (chatDocument.messages || []) // Use full history from database for edits
       : (chatHistory || []); // Use provided history for new messages
-    
+
     // Answer the question with streaming using the latest data
     const result = await answerQuestion(
       latestData,

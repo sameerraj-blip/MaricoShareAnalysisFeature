@@ -7,6 +7,8 @@ import { removeNulls, getDataPreview, getDataSummary, convertDataType, createDer
 import { saveModifiedData } from './dataPersistence.js';
 import { getChatBySessionIdEfficient, updateChatDocument, ChatDocument } from '../../models/chat.model.js';
 import { openai } from '../openai.js';
+import { getFileFromBlob } from '../blobStorage.js';
+import { parseFile, convertDashToZeroForNumericColumns } from '../fileParser.js';
 
 /**
  * Get preview data from saved rawData (first 50 rows)
@@ -26,7 +28,26 @@ async function getPreviewFromSavedData(sessionId: string, fallbackData: Record<s
 }
 
 export interface DataOpsIntent {
-  operation: 'remove_nulls' | 'preview' | 'summary' | 'convert_type' | 'count_nulls' | 'describe' | 'create_derived_column' | 'create_column' | 'modify_column' | 'normalize_column' | 'remove_column' | 'remove_rows' | 'add_row' | 'train_model' | 'replace_value' | 'unknown';
+  operation:
+    | 'remove_nulls'
+    | 'preview'
+    | 'summary'
+    | 'convert_type'
+    | 'count_nulls'
+    | 'describe'
+    | 'create_derived_column'
+    | 'create_column'
+    | 'modify_column'
+    | 'normalize_column'
+    | 'remove_column'
+    | 'remove_rows'
+    | 'add_row'
+    | 'aggregate'
+    | 'pivot'
+    | 'train_model'
+    | 'replace_value'
+    | 'revert'
+    | 'unknown';
   column?: string;
   method?: 'delete' | 'mean' | 'median' | 'mode' | 'custom';
   customValue?: any;
@@ -45,6 +66,16 @@ export interface DataOpsIntent {
   rowCount?: number; // For removing multiple rows from start/end
   oldValue?: any; // For replace_value operation - the value to replace
   newValue?: any; // For replace_value operation - the value to replace with
+  // Aggregation / pivot fields
+  groupByColumn?: string; // For aggregate
+  aggColumns?: string[];  // Optional explicit aggregation columns
+  aggFunc?: 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'; // Aggregation function (default: sum)
+  aggFuncs?: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'>; // Per-column aggregation functions
+  orderByColumn?: string; // For sorting aggregated results
+  orderByDirection?: 'asc' | 'desc'; // Sort direction (default: asc)
+  pivotIndex?: string;    // For pivot - index column
+  pivotValues?: string[]; // For pivot - value columns
+  pivotFuncs?: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'>; // Per-column aggregation functions for pivot
   requiresClarification: boolean;
   clarificationType?: 'column' | 'method' | 'target_type';
   clarificationMessage?: string;
@@ -237,6 +268,155 @@ export async function parseDataOpsIntent(
       oldValue: replaceIntent.oldValue,
       newValue: replaceIntent.newValue,
       requiresClarification: false
+    };
+  }
+  
+  // ---------------------------------------------------------------------------
+  // STEP 0b: Explicit revert pattern (high confidence - should be checked early)
+  // ---------------------------------------------------------------------------
+
+  // Pattern: "revert to original", "restore original data", "revert table", etc.
+  if (lowerMessage.includes('revert') || lowerMessage.includes('restore') || 
+      (lowerMessage.includes('original') && (lowerMessage.includes('back') || lowerMessage.includes('to') || lowerMessage.includes('form')))) {
+    return {
+      operation: 'revert',
+      requiresClarification: false,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // STEP 0c: Explicit aggregation / pivot patterns (high confidence)
+  // ---------------------------------------------------------------------------
+
+  // Pattern: "aggregate X, group by Y, order by Z DESC" (e.g., "aggregate risk value, group by SKU Desc, order by risk value DESC")
+  if (lowerMessage.includes('aggregate') && (lowerMessage.includes('group by') || lowerMessage.includes('groupby'))) {
+    // Extract aggregation columns (before "group by")
+    const groupByMatch = message.match(/\baggregate\s+(.+?)\s*,\s*group\s+by\s+/i) || 
+                         message.match(/\baggregate\s+(.+?)\s+group\s+by\s+/i);
+    
+    if (groupByMatch) {
+      const rawAggCols = groupByMatch[1].trim();
+      const aggColumns = rawAggCols.split(',').map(c => {
+        const col = c.trim();
+        return findMentionedColumn(col, availableColumns) || col;
+      });
+
+      // Extract group by column (between "group by" and "order by" or end)
+      const orderByMatch = message.match(/group\s+by\s+([^,]+?)(?:\s*,\s*order\s+by|$)/i);
+      let groupByColumn: string | undefined;
+      if (orderByMatch) {
+        const rawGroupBy = orderByMatch[1].trim();
+        groupByColumn = findMentionedColumn(rawGroupBy, availableColumns) || rawGroupBy;
+      }
+
+      // Extract order by column and direction
+      const orderByRegex = /order\s+by\s+([a-zA-Z0-9_\s]+?)(?:\s+(asc|desc|ascending|descending))?/i;
+      const orderByMatch2 = message.match(orderByRegex);
+      let orderByColumn: string | undefined;
+      let orderByDirection: 'asc' | 'desc' = 'asc';
+      
+      if (orderByMatch2) {
+        const rawOrderBy = orderByMatch2[1].trim();
+        orderByColumn = findMentionedColumn(rawOrderBy, availableColumns) || rawOrderBy;
+        const direction = orderByMatch2[2]?.toLowerCase();
+        if (direction === 'desc' || direction === 'descending') {
+          orderByDirection = 'desc';
+        }
+      }
+
+      if (groupByColumn && aggColumns.length > 0) {
+        console.log(`✅ Matched aggregate with group by: ${aggColumns.join(', ')} grouped by ${groupByColumn}${orderByColumn ? `, ordered by ${orderByColumn} ${orderByDirection}` : ''}`);
+        return {
+          operation: 'aggregate',
+          groupByColumn,
+          aggColumns,
+          orderByColumn,
+          orderByDirection,
+          requiresClarification: false,
+        };
+      }
+    }
+  }
+
+  // Pattern: "aggregate X on Y" (e.g., "aggregate RISK_VOLUME on DEPOT")
+  // More flexible pattern to handle various formats including underscores
+  const aggregateOnRegex = /\baggregate\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)\s+on\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)(?:\s|$|\.|,)/i;
+  const aggregateOnMatch = aggregateOnRegex.exec(message);
+  if (aggregateOnMatch) {
+    const rawAggColumn = aggregateOnMatch[1].trim();
+    const rawGroupBy = aggregateOnMatch[2].trim();
+    
+    const aggColumn = findMentionedColumn(rawAggColumn, availableColumns) || rawAggColumn;
+    const groupByColumn = findMentionedColumn(rawGroupBy, availableColumns) || rawGroupBy;
+
+    console.log(`✅ Regex matched aggregate pattern: aggregate ${aggColumn} on ${groupByColumn}`);
+    return {
+      operation: 'aggregate',
+      groupByColumn,
+      aggColumns: [aggColumn],
+      requiresClarification: false,
+    };
+  }
+
+  // Simpler catch-all: if message contains "aggregate" and "on", try to extract columns
+  if (lowerMessage.includes('aggregate') && lowerMessage.includes(' on ')) {
+    const parts = message.split(/\s+on\s+/i);
+    if (parts.length === 2) {
+      const beforeOn = parts[0].replace(/^aggregate\s+/i, '').trim();
+      const afterOn = parts[1].split(/\s|,|\./)[0].trim(); // Take first word after "on"
+      
+      if (beforeOn && afterOn) {
+        const aggColumn = findMentionedColumn(beforeOn, availableColumns) || beforeOn;
+        const groupByColumn = findMentionedColumn(afterOn, availableColumns) || afterOn;
+        
+        console.log(`✅ Fallback pattern matched: aggregate ${aggColumn} on ${groupByColumn}`);
+        return {
+          operation: 'aggregate',
+          groupByColumn,
+          aggColumns: [aggColumn],
+          requiresClarification: false,
+        };
+      }
+    }
+  }
+
+  // Pattern: "aggregate by X column" or "aggregate by X"
+  const aggregateByRegex = /\baggregate\s+by\s+([a-zA-Z0-9_ ]+?)(?:\s+column|\?|$)/i;
+  const aggregateMatch = aggregateByRegex.exec(message);
+  if (aggregateMatch) {
+    const rawGroupBy = aggregateMatch[1].trim();
+    const groupByColumn =
+      findMentionedColumn(rawGroupBy, availableColumns) || rawGroupBy;
+
+    return {
+      operation: 'aggregate',
+      groupByColumn,
+      requiresClarification: false,
+    };
+  }
+
+  // Pattern: "create a pivot on X showing A, B, C fields"
+  const pivotRegex =
+    /\bcreate\s+(?:a\s+)?pivot\s+on\s+([a-zA-Z0-9_ ]+?)\s+showing\s+([a-zA-Z0-9_,&\s]+?)\s*(?:fields?|columns?)?(?:\?|$)/i;
+  const pivotMatch = pivotRegex.exec(message);
+  if (pivotMatch) {
+    const rawIndex = pivotMatch[1].trim();
+    const rawValues = pivotMatch[2].trim();
+
+    const pivotIndex =
+      findMentionedColumn(rawIndex, availableColumns) || rawIndex;
+
+    const pivotValues = rawValues
+      .split(/[,&]/)
+      .map(v => v.trim())
+      .filter(v => v.length > 0)
+      .map(v => findMentionedColumn(v, availableColumns) || v);
+
+    return {
+      operation: 'pivot',
+      pivotIndex,
+      pivotValues,
+      requiresClarification: false,
     };
   }
   
@@ -1094,7 +1274,7 @@ Available columns: ${columnsList}
 
 Determine the intent and return JSON with this structure:
 {
-    "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "train_model" | "replace_value" | "unknown",
+  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "aggregate" | "pivot" | "train_model" | "replace_value" | "revert" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
   "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
   "customValue": any (if method is "custom", the value to use for imputation),
@@ -1113,6 +1293,15 @@ Determine the intent and return JSON with this structure:
   "rowCount": number (if removing multiple rows, e.g., "remove first 5 rows" or "remove last 3 rows"),
   "oldValue": any (if replace_value operation, the value to replace, null otherwise),
   "newValue": any (if replace_value operation, the value to replace with, null otherwise),
+  "groupByColumn": "column_name" (if aggregate operation, the column to group by, null otherwise),
+  "aggColumns": ["col1", "col2"] (if aggregate operation, columns to aggregate, null otherwise),
+  "aggFunc": "sum" | "avg" | "mean" | "min" | "max" | "count" (if aggregate operation, default aggregation function, null otherwise),
+  "aggFuncs": {"col1": "sum", "col2": "avg"} (if aggregate operation, per-column aggregation functions, null otherwise),
+  "orderByColumn": "column_name" (if aggregate operation, column to sort results by, null otherwise),
+  "orderByDirection": "asc" | "desc" (if aggregate operation, sort direction, null otherwise),
+  "pivotIndex": "column_name" (if pivot operation, index column, null otherwise),
+  "pivotValues": ["col1", "col2"] (if pivot operation, value columns, null otherwise),
+  "pivotFuncs": {"col1": "sum", "col2": "avg"} (if pivot operation, per-column aggregation functions, null otherwise),
   "requiresClarification": false,
   "clarificationMessage": null
 }
@@ -1163,6 +1352,30 @@ Operations:
 - "summary": User wants statistics summary
 - "remove_nulls": User wants to remove/handle nulls. IMPORTANT: If user says "fill null with mean/median/mode" or "impute null", set method to "mean"/"median"/"mode" and requiresClarification to false. If user says "remove null" or "delete null" without specifying fill/impute, default to asking for clarification.
 - "convert_type": User wants to convert column type
+- "aggregate": User wants to group data by a column and summarize other columns
+  * Patterns: "aggregate by X", "aggregate X on Y", "aggregate X, group by Y, order by Z DESC", "aggregate by Month column", "aggregate by Brand"
+  * Extract groupByColumn: the column to group by (e.g., "Month", "Brand", "DEPOT", "SKU Desc")
+  * Extract aggColumns: optional list of columns to aggregate (if not specified, use all numeric columns)
+    * For "aggregate X on Y" pattern, X is the column to aggregate and Y is the group by column
+    * For "aggregate X, group by Y" pattern, X is the column(s) to aggregate and Y is the group by column
+  * Extract orderByColumn: optional column to sort results by (e.g., "risk value", "Sales")
+  * Extract orderByDirection: "asc" or "desc" (default: "asc")
+  * Extract aggFunc: default aggregation function ("sum", "avg", "mean", "min", "max", "count") - default is "sum"
+  * Extract aggFuncs: per-column aggregation functions if user specifies different functions for different columns
+  * Examples: 
+    - "aggregate by Month" → groupByColumn: "Month"
+    - "aggregate RISK_VOLUME on DEPOT" → groupByColumn: "DEPOT", aggColumns: ["RISK_VOLUME"]
+    - "aggregate risk value, group by SKU Desc, order by risk value DESC" → groupByColumn: "SKU Desc", aggColumns: ["risk value"], orderByColumn: "risk value", orderByDirection: "desc"
+    - "aggregate by Brand showing Total Sales (sum) and Avg Spend (avg)" → groupByColumn: "Brand", aggColumns: ["Sales", "Spend"], aggFuncs: {"Sales": "sum", "Spend": "avg"}
+- "pivot": User wants to create a pivot table (e.g., "create a pivot on Brand showing Sales, Spend, ROI")
+  * Extract pivotIndex: the column to use as pivot index/rows (e.g., "Brand", "Month")
+  * Extract pivotValues: array of columns to show as metrics (e.g., ["Sales", "Spend", "ROI"])
+  * Extract pivotFuncs: per-column aggregation functions if user specifies (e.g., {"Sales": "sum", "Spend": "sum", "ROI": "avg"})
+  * Default aggregation function is "sum" if not specified
+  * Examples: "create a pivot on Brand showing Sales, Spend, ROI", "pivot on Month showing Total Sales (sum) and Avg Spend (avg)"
+- "revert": User wants to restore the data to its original form (e.g., "revert to original", "restore original data", "revert table", "go back to original")
+  * This will load the original uploaded file and restore it, undoing all data operations
+  * Examples: "revert to original", "restore original data", "revert table", "go back to original", "revert to original form"
 - "unknown": Cannot determine intent
 
 Return ONLY valid JSON, no other text.`;
@@ -2172,6 +2385,8 @@ export async function executeDataOperation(
   preview?: Record<string, any>[];
   summary?: any[];
   saved?: boolean;
+  // For operations like aggregate/pivot that only return a table,
+  // the table will be included in "data" and "saved" will be false.
 }> {
   // Check if user explicitly requested preview (except for 'preview' operation which always shows data)
   const shouldShowPreview = intent.operation === 'preview' || userRequestedPreview(originalMessage);
@@ -2697,6 +2912,458 @@ export async function executeDataOperation(
       };
     }
 
+    case 'aggregate': {
+      // Group by a column and aggregate numeric columns with support for multiple aggregation functions
+      const groupBy =
+        intent.groupByColumn ||
+        intent.column ||
+        findMentionedColumn(originalMessage || '', Object.keys(data[0] || {}));
+
+      if (!groupBy) {
+        return {
+          answer:
+            'Please specify which column to aggregate by. For example: "Aggregate by Month column".',
+        };
+      }
+
+      if (data.length > 0 && !(groupBy in data[0])) {
+        return {
+          answer: `Column "${groupBy}" was not found. Available columns: ${Object.keys(
+            data[0] || {},
+          ).join(', ')}`,
+        };
+      }
+
+      // Determine which columns to aggregate: use explicit list or all numeric columns except groupBy
+      const numericCols = new Set<string>();
+      for (const row of data) {
+        for (const [key, value] of Object.entries(row)) {
+          if (key === groupBy) continue;
+          if (typeof value === 'number') {
+            numericCols.add(key);
+          }
+        }
+      }
+
+      const aggColumns =
+        intent.aggColumns && intent.aggColumns.length > 0
+          ? intent.aggColumns
+          : Array.from(numericCols);
+
+      if (aggColumns.length === 0) {
+        return {
+          answer: `I couldn't find any numeric columns to aggregate (other than "${groupBy}").`,
+        };
+      }
+
+      // Parse aggregation functions from user message or use defaults
+      const message = (originalMessage || '').toLowerCase();
+      const aggFuncs: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'> = intent.aggFuncs || {};
+      
+      // Try to infer aggregation functions from column names or message
+      for (const col of aggColumns) {
+        if (!aggFuncs[col]) {
+          const colLower = col.toLowerCase();
+          // Check if column name or message mentions specific aggregation
+          // Patterns: "Total Sales" -> sum, "Avg Spend" -> avg, "Sales (Sum)" -> sum, etc.
+          if (message.includes(`total ${colLower}`) || message.includes(`${colLower} (sum`) || 
+              message.includes(`sum ${colLower}`) || message.includes(`sum of ${colLower}`)) {
+            aggFuncs[col] = 'sum';
+          } else if (message.includes(`avg ${colLower}`) || message.includes(`average ${colLower}`) ||
+              message.includes(`${colLower} (avg`) || message.includes(`${colLower} (mean`) || 
+              message.includes(`mean ${colLower}`) || message.includes(`avg of ${colLower}`)) {
+            aggFuncs[col] = 'avg';
+          } else if (message.includes(`min ${colLower}`) || message.includes(`minimum ${colLower}`) ||
+              message.includes(`${colLower} (min`)) {
+            aggFuncs[col] = 'min';
+          } else if (message.includes(`max ${colLower}`) || message.includes(`maximum ${colLower}`) ||
+              message.includes(`${colLower} (max`)) {
+            aggFuncs[col] = 'max';
+          } else if (message.includes(`count ${colLower}`) || message.includes(`count of ${colLower}`) ||
+              message.includes(`${colLower} (count`)) {
+            aggFuncs[col] = 'count';
+          } else {
+            // Default to sum
+            aggFuncs[col] = intent.aggFunc || 'sum';
+          }
+        }
+      }
+
+      // Track aggregation data: for sum/avg we need sum and count, for min/max we track min/max values
+      type AggBucket = {
+        sum?: number;
+        count: number;
+        min?: number;
+        max?: number;
+        values: number[];
+      };
+
+      const aggMap = new Map<string, Record<string, AggBucket>>();
+
+      for (const row of data) {
+        const key = String(row[groupBy]);
+        if (!aggMap.has(key)) {
+          aggMap.set(key, {});
+        }
+        const bucket = aggMap.get(key)!;
+
+        for (const col of aggColumns) {
+          if (!bucket[col]) {
+            bucket[col] = { count: 0, values: [] };
+          }
+
+          const rawVal = row[col];
+          const numVal =
+            typeof rawVal === 'number'
+              ? rawVal
+              : typeof rawVal === 'string' && rawVal.trim() !== ''
+              ? Number(rawVal)
+              : NaN;
+
+          if (!Number.isNaN(numVal)) {
+            const func = aggFuncs[col];
+            const b = bucket[col];
+            b.count++;
+            b.values.push(numVal);
+
+            if (func === 'sum' || func === 'avg' || func === 'mean') {
+              b.sum = (b.sum || 0) + numVal;
+            }
+            if (func === 'min') {
+              b.min = b.min === undefined ? numVal : Math.min(b.min, numVal);
+            }
+            if (func === 'max') {
+              b.max = b.max === undefined ? numVal : Math.max(b.max, numVal);
+            }
+          }
+        }
+      }
+
+      // Build aggregated data with proper column names showing aggregation function
+      const aggregatedData: Record<string, any>[] = [];
+      const columnNames: string[] = [groupBy];
+
+      for (const [key, bucket] of aggMap.entries()) {
+        const row: Record<string, any> = { [groupBy]: key };
+        
+        for (const col of aggColumns) {
+          const b = bucket[col];
+          if (!b || b.count === 0) continue;
+
+          const func = aggFuncs[col];
+          let value: number;
+          let displayName: string;
+
+          switch (func) {
+            case 'avg':
+            case 'mean':
+              value = b.sum! / b.count;
+              displayName = `${col} (Avg)`;
+              break;
+            case 'min':
+              value = b.min!;
+              displayName = `${col} (Min)`;
+              break;
+            case 'max':
+              value = b.max!;
+              displayName = `${col} (Max)`;
+              break;
+            case 'count':
+              value = b.count;
+              displayName = `${col} (Count)`;
+              break;
+            case 'sum':
+            default:
+              value = b.sum || 0;
+              displayName = `${col} (Sum)`;
+              break;
+          }
+
+          row[displayName] = Math.round(value * 100) / 100;
+          if (!columnNames.includes(displayName)) {
+            columnNames.push(displayName);
+          }
+        }
+        aggregatedData.push(row);
+      }
+
+      // Apply sorting if orderByColumn is specified
+      if (intent.orderByColumn) {
+        // Find the display name for the order by column (it might be aggregated)
+        let sortColumn = intent.orderByColumn;
+        
+        // Check if it's an aggregated column (has a display name)
+        const matchingDisplayName = columnNames.find(name => 
+          name.toLowerCase().includes(intent.orderByColumn!.toLowerCase())
+        );
+        if (matchingDisplayName) {
+          sortColumn = matchingDisplayName;
+        } else {
+          // Fallback: try to find by exact match or partial match
+          const exactMatch = columnNames.find(name => 
+            name.toLowerCase() === intent.orderByColumn!.toLowerCase()
+          );
+          if (exactMatch) {
+            sortColumn = exactMatch;
+          }
+        }
+
+        const direction = intent.orderByDirection || 'asc';
+        aggregatedData.sort((a, b) => {
+          const aVal = a[sortColumn];
+          const bVal = b[sortColumn];
+          
+          // Handle null/undefined
+          if (aVal == null && bVal == null) return 0;
+          if (aVal == null) return direction === 'asc' ? -1 : 1;
+          if (bVal == null) return direction === 'asc' ? 1 : -1;
+          
+          // Numeric comparison
+          if (typeof aVal === 'number' && typeof bVal === 'number') {
+            return direction === 'asc' ? aVal - bVal : bVal - aVal;
+          }
+          
+          // String comparison
+          const aStr = String(aVal);
+          const bStr = String(bVal);
+          const comparison = aStr.localeCompare(bStr);
+          return direction === 'asc' ? comparison : -comparison;
+        });
+      }
+
+      const funcSummary = Object.values(aggFuncs).reduce((acc, f) => {
+        acc[f] = (acc[f] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      const funcDesc = Object.entries(funcSummary)
+        .map(([f, c]) => `${c} ${f}`)
+        .join(', ');
+
+      // Save aggregated data to session (this changes the data structure permanently)
+      const saveResult = await saveModifiedData(
+        sessionId,
+        aggregatedData,
+        'aggregate',
+        `Aggregated data by "${groupBy}" using ${funcDesc} for ${aggColumns.length} column${aggColumns.length === 1 ? '' : 's'}`,
+        sessionDoc
+      );
+
+      let answer = `✅ I've aggregated the data by "${groupBy}" using ${funcDesc} for ${aggColumns.length} column${aggColumns.length === 1 ? '' : 's'}.`;
+      if (intent.orderByColumn) {
+        answer += ` Results are sorted by ${intent.orderByColumn} ${intent.orderByDirection === 'desc' ? 'descending' : 'ascending'}.`;
+      }
+      answer += ` The data structure has been updated - you now have ${aggregatedData.length} row${aggregatedData.length === 1 ? '' : 's'} grouped by "${groupBy}".`;
+
+      // Get preview from saved data
+      const previewData = await getPreviewFromSavedData(sessionId, aggregatedData);
+
+      return {
+        answer,
+        data: aggregatedData,
+        preview: previewData,
+        saved: true,
+      };
+    }
+
+    case 'pivot': {
+      // Pivot is a specialized aggregate: group by index and aggregate selected value columns
+      const indexCol =
+        intent.pivotIndex ||
+        intent.groupByColumn ||
+        intent.column ||
+        findMentionedColumn(originalMessage || '', Object.keys(data[0] || {}));
+
+      if (!indexCol) {
+        return {
+          answer:
+            'Please specify which column to use as the pivot index. For example: "Create a pivot on Brand showing Sales, Spend, ROI fields".',
+        };
+      }
+
+      if (data.length > 0 && !(indexCol in data[0])) {
+        return {
+          answer: `Column "${indexCol}" was not found. Available columns: ${Object.keys(
+            data[0] || {},
+          ).join(', ')}`,
+        };
+      }
+
+      const allColumns = Object.keys(data[0] || {});
+      let valueColumns =
+        intent.pivotValues && intent.pivotValues.length > 0
+          ? intent.pivotValues
+          : allColumns.filter(c => c !== indexCol);
+
+      if (valueColumns.length === 0) {
+        return {
+          answer: `Please specify at least one value column for the pivot (e.g., "showing Sales, Spend").`,
+        };
+      }
+
+      // Parse aggregation functions from user message or use defaults
+      const message = (originalMessage || '').toLowerCase();
+      const pivotFuncs: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'> = intent.pivotFuncs || {};
+      
+      // Try to infer aggregation functions from column names or message
+      for (const col of valueColumns) {
+        if (!pivotFuncs[col]) {
+          const colLower = col.toLowerCase();
+          // Check if column name or message mentions specific aggregation
+          // Patterns: "Total Sales" -> sum, "Avg Spend" -> avg, "Sales (Sum)" -> sum, etc.
+          if (message.includes(`total ${colLower}`) || message.includes(`${colLower} (sum`) || 
+              message.includes(`sum ${colLower}`) || message.includes(`sum of ${colLower}`)) {
+            pivotFuncs[col] = 'sum';
+          } else if (message.includes(`avg ${colLower}`) || message.includes(`average ${colLower}`) ||
+              message.includes(`${colLower} (avg`) || message.includes(`${colLower} (mean`) || 
+              message.includes(`mean ${colLower}`) || message.includes(`avg of ${colLower}`)) {
+            pivotFuncs[col] = 'avg';
+          } else if (message.includes(`min ${colLower}`) || message.includes(`minimum ${colLower}`) ||
+              message.includes(`${colLower} (min`)) {
+            pivotFuncs[col] = 'min';
+          } else if (message.includes(`max ${colLower}`) || message.includes(`maximum ${colLower}`) ||
+              message.includes(`${colLower} (max`)) {
+            pivotFuncs[col] = 'max';
+          } else if (message.includes(`count ${colLower}`) || message.includes(`count of ${colLower}`) ||
+              message.includes(`${colLower} (count`)) {
+            pivotFuncs[col] = 'count';
+          } else {
+            // Default to sum for pivot
+            pivotFuncs[col] = 'sum';
+          }
+        }
+      }
+
+      // Track aggregation data: for sum/avg we need sum and count, for min/max we track min/max values
+      type AggBucket = {
+        sum?: number;
+        count: number;
+        min?: number;
+        max?: number;
+        values: number[];
+      };
+
+      const aggMap = new Map<string, Record<string, AggBucket>>();
+
+      for (const row of data) {
+        const key = String(row[indexCol]);
+        if (!aggMap.has(key)) {
+          aggMap.set(key, {});
+        }
+        const bucket = aggMap.get(key)!;
+
+        for (const col of valueColumns) {
+          if (!bucket[col]) {
+            bucket[col] = { count: 0, values: [] };
+          }
+
+          const rawVal = row[col];
+          const numVal =
+            typeof rawVal === 'number'
+              ? rawVal
+              : typeof rawVal === 'string' && rawVal.trim() !== ''
+              ? Number(rawVal)
+              : NaN;
+
+          if (!Number.isNaN(numVal)) {
+            const func = pivotFuncs[col];
+            const b = bucket[col];
+            b.count++;
+            b.values.push(numVal);
+
+            if (func === 'sum' || func === 'avg' || func === 'mean') {
+              b.sum = (b.sum || 0) + numVal;
+            }
+            if (func === 'min') {
+              b.min = b.min === undefined ? numVal : Math.min(b.min, numVal);
+            }
+            if (func === 'max') {
+              b.max = b.max === undefined ? numVal : Math.max(b.max, numVal);
+            }
+          }
+        }
+      }
+
+      // Build pivot data with proper column names showing aggregation function
+      const pivotData: Record<string, any>[] = [];
+      const columnNames: string[] = [indexCol];
+
+      for (const [key, bucket] of aggMap.entries()) {
+        const row: Record<string, any> = { [indexCol]: key };
+        
+        for (const col of valueColumns) {
+          const b = bucket[col];
+          if (!b || b.count === 0) continue;
+
+          const func = pivotFuncs[col];
+          let value: number;
+          let displayName: string;
+
+          switch (func) {
+            case 'avg':
+            case 'mean':
+              value = b.sum! / b.count;
+              displayName = `${col} (Avg)`;
+              break;
+            case 'min':
+              value = b.min!;
+              displayName = `${col} (Min)`;
+              break;
+            case 'max':
+              value = b.max!;
+              displayName = `${col} (Max)`;
+              break;
+            case 'count':
+              value = b.count;
+              displayName = `${col} (Count)`;
+              break;
+            case 'sum':
+            default:
+              value = b.sum || 0;
+              displayName = `${col} (Sum)`;
+              break;
+          }
+
+          row[displayName] = Math.round(value * 100) / 100;
+          if (!columnNames.includes(displayName)) {
+            columnNames.push(displayName);
+          }
+        }
+        pivotData.push(row);
+      }
+
+      const funcSummary = Object.values(pivotFuncs).reduce((acc, f) => {
+        acc[f] = (acc[f] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      const funcDesc = Object.entries(funcSummary)
+        .map(([f, c]) => `${c} ${f}`)
+        .join(', ');
+
+      // Save pivot data to session (this changes the data structure permanently)
+      const saveResult = await saveModifiedData(
+        sessionId,
+        pivotData,
+        'pivot',
+        `Created pivot on "${indexCol}" showing ${valueColumns.join(', ')} (aggregated using ${funcDesc})`,
+        sessionDoc
+      );
+
+      let answer = `✅ I've created a pivot on "${indexCol}" showing ${valueColumns.join(
+        ', ',
+      )} (aggregated using ${funcDesc}).`;
+      answer += ` The data structure has been updated - you now have ${pivotData.length} row${pivotData.length === 1 ? '' : 's'} grouped by "${indexCol}".`;
+
+      // Get preview from saved data
+      const previewData = await getPreviewFromSavedData(sessionId, pivotData);
+
+      return {
+        answer,
+        data: pivotData,
+        preview: previewData,
+        saved: true,
+      };
+    }
+
     case 'remove_rows': {
       if (data.length === 0) {
         return { answer: 'There are no rows to remove.' };
@@ -3130,10 +3797,70 @@ export async function executeDataOperation(
       }
     }
     
+    case 'revert': {
+      // Load original data from blob
+      if (!sessionDoc) {
+        return {
+          answer: 'Unable to revert: session not found. Please refresh and try again.',
+        };
+      }
+
+      if (!sessionDoc.blobInfo?.blobName) {
+        return {
+          answer: 'Unable to revert: original data not found. The original file may have been deleted.',
+        };
+      }
+
+      try {
+        // Load original file from blob
+        const blobBuffer = await getFileFromBlob(sessionDoc.blobInfo.blobName);
+        
+        // Parse the file
+        let originalData = await parseFile(blobBuffer, sessionDoc.fileName);
+        
+        if (!originalData || originalData.length === 0) {
+          return {
+            answer: 'Unable to revert: original data file is empty or could not be parsed.',
+          };
+        }
+
+        // Convert "-" to 0 for numeric columns (same as upload processing)
+        const numericColumns = sessionDoc.dataSummary?.numericColumns || [];
+        originalData = convertDashToZeroForNumericColumns(originalData, numericColumns);
+
+        // Save the original data back to session
+        const saveResult = await saveModifiedData(
+          sessionId,
+          originalData,
+          'revert',
+          'Reverted data to original form',
+          sessionDoc
+        );
+
+        // Get preview from saved data
+        const previewData = await getPreviewFromSavedData(sessionId, originalData);
+
+        return {
+          answer: `✅ Successfully reverted the data to its original form. The table now has ${originalData.length} rows with the original structure.`,
+          data: originalData,
+          preview: previewData,
+          saved: true,
+        };
+      } catch (error) {
+        console.error('Error reverting data:', error);
+        return {
+          answer: `Failed to revert data: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again or contact support.`,
+        };
+      }
+    }
+    
     default:
       // For unknown operations, try to provide a helpful response
       return {
         answer: 'I can help you with data operations like:\n\n' +
+          '• **Revert data**: "Revert to original" or "Restore original data"\n' +
+          '• **Aggregate data**: "Aggregate by Month" or "Aggregate RISK_VOLUME on DEPOT"\n' +
+          '• **Create pivot tables**: "Create a pivot on Brand showing Sales, Spend, ROI"\n' +
           '• **Remove columns**: "Remove column X" or "Delete column Y"\n' +
           '• **Create columns**: "Create column XYZ = A + B" or "Add column Status with value Active"\n' +
           '• **Adjust column values**: "Increase column X by 50" or "Reduce column Y by 100"\n' +

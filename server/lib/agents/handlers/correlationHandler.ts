@@ -411,27 +411,27 @@ export class CorrelationHandler extends BaseHandler {
       } else {
         // Default explanatory style for general correlation questions
         answer = `I've analyzed what affects ${targetCol}. `;
+      
+      if (maxResults) {
+        answer += `I've limited the analysis to the top ${maxResults} variables as requested. `;
+      }
+      
+      if (filter === 'positive') {
+        answer += `I've filtered to show only positive correlations as requested. `;
+      } else if (filter === 'negative') {
+        answer += `I've filtered to show only negative correlations as requested. `;
+      }
+      
+      if (mentionsNegativeImpact && variablesToFilterNegative.length > 0) {
+        answer += `As requested, I've excluded negative correlations for the specified variables (${variablesToFilterNegative.join(', ')}). `;
+      }
 
-        if (maxResults) {
-          answer += `I've limited the analysis to the top ${maxResults} variables as requested. `;
-        }
-        
-        if (filter === 'positive') {
-          answer += `I've filtered to show only positive correlations as requested. `;
-        } else if (filter === 'negative') {
-          answer += `I've filtered to show only negative correlations as requested. `;
-        }
-        
-        if (mentionsNegativeImpact && variablesToFilterNegative.length > 0) {
-          answer += `As requested, I've excluded negative correlations for the specified variables (${variablesToFilterNegative.join(', ')}). `;
-        }
+      if (charts.length > 0) {
+        answer += `I've created ${charts.length} visualization${charts.length > 1 ? 's' : ''} showing the key relationships. `;
+      }
 
-        if (charts.length > 0) {
-          answer += `I've created ${charts.length} visualization${charts.length > 1 ? 's' : ''} showing the key relationships. `;
-        }
-        
-        if (insights.length > 0) {
-          answer += `Here are the key insights:`;
+      if (insights.length > 0) {
+        answer += `Here are the key insights:`;
         }
       }
 

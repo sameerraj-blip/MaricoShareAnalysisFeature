@@ -81,10 +81,11 @@ CRITICAL: CONTEXT-AWARE CLASSIFICATION
 The conversation history is EXTREMELY important. Short responses like "yes", "ok", "sure", "do it", "proceed", "go ahead", "that one", "the first one", "try it" are FOLLOW-UP responses that should be routed based on the PREVIOUS conversation context.
 
 CONTEXT RULES:
-- If the previous messages discuss MODELING (models, predictions, training, linear/logistic/random forest), route to "modeling"
+- If the previous messages discuss MODELING (models, predictions, training, linear/logistic/random forest, polynomial regression), route to "modeling"
 - If the previous messages discuss DATA OPERATIONS (adding columns, filtering, cleaning), route to "dataOps"  
 - If the previous messages discuss ANALYSIS (correlations, charts, statistics, insights), route to "analysis"
 - Short affirmative responses (yes, ok, sure, proceed, go ahead) should ALWAYS use the context from previous messages
+- Responses like "create it for all variables", "use all variables", "all variables", "no create it for all variables" after a modeling question → route to "modeling"
 
 CLASSIFICATION RULES:
 
@@ -92,8 +93,9 @@ CLASSIFICATION RULES:
    * HIGH PRIORITY: Questions about adding, removing, or modifying columns/rows, OR viewing data structure/preview
    * Patterns: "add column", "remove column", "delete column", "filter rows", "remove rows", 
      "transform", "clean data", "merge", "join", "split", "rename column", "change column type",
-     "replace values", "fill missing", "drop duplicates", "sort data", "group by", "pivot",
-     "data preview", "data summary", "show me data", "display data", "view data", "see data",
+     "replace values", "fill missing", "drop duplicates", "sort data", "group by", "aggregate",
+     "aggregate by", "aggregate X on Y", "pivot", "create pivot", "revert", "revert to original",
+     "restore original", "data preview", "data summary", "show me data", "display data", "view data", "see data",
      "show columns", "list columns", "data structure", "data overview", "preview data",
      "show rows", "display rows", "data sample", "sample data"
    * Set confidence to 0.9+ for clear data operation requests
@@ -103,7 +105,9 @@ CLASSIFICATION RULES:
    * Patterns: "build a model", "train a model", "create a model", "predict", "machine learning",
      "linear model", "logistic model", "random forest", "decision tree", "regression", "classification",
      "which model", "best model", "compare models", "evaluate model", "model performance"
-   * ALSO applies to follow-up questions in a modeling conversation (e.g., "yes" after discussing models)
+   * ALSO applies to follow-up questions in a modeling conversation:
+     - "yes", "ok", "sure", "do it", "proceed" (after model training question)
+     - "create it for all variables", "use all variables", "all variables", "all features", "for all", "no create it for all variables" (after model training question)
    * Set confidence to 0.9+ for clear modeling requests or follow-ups in modeling context
 
 3. "analysis" - Everything else (default mode)
@@ -115,6 +119,8 @@ IMPORTANT: For short/ambiguous queries, ALWAYS check the conversation history to
 
 Examples with context:
 - Previous: "Build a linear model" → Current: "yes" → Route to "modeling" (continuing modeling conversation)
+- Previous: "Train a polynomial regression model for PA TOM" → Current: "no create it for all variables" → Route to "modeling" (user wants to proceed with all variables as features)
+- Previous: "Train a model for X" → Current: "create it for all variables" → Route to "modeling" (user wants to use all variables as features)
 - Previous: "What's the correlation?" → Current: "show me a chart" → Route to "analysis"
 - Previous: "Add a column X" → Current: "ok do it" → Route to "dataOps"
 - Previous: "Which model is best?" → Current: "try the random forest" → Route to "modeling"

@@ -2,6 +2,9 @@ import { BaseHandler, HandlerContext, HandlerResponse } from './baseHandler.js';
 import { AnalysisIntent } from '../intentClassifier.js';
 import { generateGeneralAnswer } from '../../dataAnalyzer.js';
 import type { ChartSpec } from '../../../shared/schema.js';
+import { findMatchingColumn } from '../utils/columnMatcher.js';
+import { processChartData } from '../../chartGenerator.js';
+import { generateChartInsights } from '../../insightGenerator.js';
 
 /**
  * General Handler
@@ -31,6 +34,12 @@ export class GeneralHandler extends BaseHandler {
 
     // Build question from intent
     let question = intent.customRequest || intent.originalQuestion || '';
+    
+    // Check if this is a trend over time request (should create a line chart)
+    if (intent.type === 'chart' && (intent.chartType === 'line' || this.isTrendOverTimeRequest(question))) {
+      console.log('📈 Detected trend over time request, creating line chart');
+      return this.handleTrendOverTime(intent, context, question);
+    }
     
     // Check if this is an advice question about models (should get simple response, no charts)
     const isAdviceQuestion = this.isAdviceQuestion(question);
@@ -82,6 +91,105 @@ export class GeneralHandler extends BaseHandler {
         this.findSimilarColumns(intent.targetVariable || '', context.summary)
       );
     }
+  }
+
+  /**
+   * Check if question is asking for trends over time
+   */
+  private isTrendOverTimeRequest(question: string): boolean {
+    const lower = question.toLowerCase();
+    return /\b(trends?\s+in|trends?\s+for|trend\s+line|over\s+time|analyze\s+trends?)\b/i.test(lower);
+  }
+
+  /**
+   * Handle trend over time requests by creating a line chart
+   */
+  private async handleTrendOverTime(
+    intent: AnalysisIntent,
+    context: HandlerContext,
+    question: string
+  ): Promise<HandlerResponse> {
+    const allColumns = context.summary.columns.map(c => c.name);
+    const numericColumns = context.summary.numericColumns || [];
+    
+    // Extract target variable from question or intent
+    let targetVariable = intent.targetVariable;
+    
+    if (!targetVariable) {
+      // Try to extract from question patterns like "trends in X", "X over time"
+      const trendMatch = question.match(/\b(?:trends?\s+in|trends?\s+for|analyze\s+trends?\s+in)\s+([a-zA-Z0-9_\s]+?)(?:\s+over\s+time|$)/i);
+      if (trendMatch && trendMatch[1]) {
+        targetVariable = trendMatch[1].trim();
+      } else {
+        // Try "X over time" pattern
+        const overTimeMatch = question.match(/([a-zA-Z0-9_\s]+?)\s+over\s+time/i);
+        if (overTimeMatch && overTimeMatch[1]) {
+          targetVariable = overTimeMatch[1].trim();
+        }
+      }
+    }
+    
+    // Match target variable to actual column
+    const yColumn = targetVariable 
+      ? findMatchingColumn(targetVariable, numericColumns) || findMatchingColumn(targetVariable, allColumns)
+      : null;
+    
+    if (!yColumn || !numericColumns.includes(yColumn)) {
+      return {
+        answer: `I couldn't find a numeric column matching "${targetVariable || 'the specified variable'}" for the trend line. Available numeric columns: ${numericColumns.slice(0, 10).join(', ')}${numericColumns.length > 10 ? '...' : ''}`,
+        requiresClarification: true,
+        suggestions: numericColumns.slice(0, 5),
+      };
+    }
+    
+    // Find time/date column for X-axis
+    const xColumn = intent.axisMapping?.x
+      ? findMatchingColumn(intent.axisMapping.x, allColumns)
+      : context.summary.dateColumns[0] || 
+        findMatchingColumn('Month', allColumns) || 
+        findMatchingColumn('Date', allColumns) ||
+        findMatchingColumn('Time', allColumns) ||
+        allColumns[0]; // Fallback to first column
+    
+    if (!xColumn) {
+      return {
+        answer: 'I couldn\'t find a time or date column for the X-axis. Please specify which column should represent time.',
+        requiresClarification: true,
+      };
+    }
+    
+    console.log(`📈 Creating trend line chart: X=${xColumn}, Y=${yColumn}`);
+    
+    const chartSpec: ChartSpec = {
+      type: 'line',
+      title: `Trend of ${yColumn} Over Time`,
+      x: xColumn,
+      y: yColumn,
+      xLabel: xColumn,
+      yLabel: yColumn,
+      aggregate: 'none',
+    };
+    
+    const chartData = processChartData(context.data, chartSpec);
+    
+    if (chartData.length === 0) {
+      return {
+        answer: `No valid data points found for trend line. Please check that columns "${xColumn}" and "${yColumn}" contain valid data.`,
+        requiresClarification: true,
+      };
+    }
+    
+    const insights = await generateChartInsights(chartSpec, chartData, context.summary, context.chatInsights);
+    
+    return {
+      answer: `I've created a trend line showing ${yColumn} over time (${xColumn}).`,
+      charts: [{
+        ...chartSpec,
+        data: chartData,
+        keyInsight: insights.keyInsight,
+      }],
+      insights: [],
+    };
   }
 
   /**

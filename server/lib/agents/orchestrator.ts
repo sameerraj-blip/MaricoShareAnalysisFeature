@@ -224,7 +224,7 @@ export class AgentOrchestrator {
       this.emitThinkingStep(onThinkingStep, "Figuring out the best way to answer", "completed");
 
       // Step 3: Check if clarification needed
-      // For correlation queries, try to proceed even with low confidence if we can extract target from question
+      // For correlation and ml_model queries, try to proceed even with low confidence if we can extract target from question
       if (intent.type === 'conversational') {
         console.log(`💬 Conversational query detected, skipping clarification check`);
       } else if (intent.type === 'correlation') {
@@ -236,6 +236,36 @@ export class AgentOrchestrator {
         if (hasTargetInQuestion && (intent.requiresClarification || intent.confidence < 0.5)) {
           console.log(`⚠️ Low confidence correlation query, but target may be extractable from question - proceeding to handler`);
           // Don't return early - let the handler try to extract and process
+        } else if (intent.requiresClarification || intent.confidence < 0.5) {
+          console.log(`❓ Low confidence (${intent.confidence.toFixed(2)}) or clarification required, asking for clarification`);
+          this.emitThinkingStep(onThinkingStep, "Checking if I need more details", "active");
+          return askClarifyingQuestion(intent, summary);
+        }
+      } else if (intent.type === 'ml_model') {
+        // For ML model queries, if target variable is specified, proceed even without features
+        // The handler will automatically use all numeric columns as features (even if some features are specified)
+        const hasTargetVariable = intent.targetVariable && intent.targetVariable.trim().length > 0;
+        const question = intent.originalQuestion || intent.customRequest || '';
+        // Check if this is a confirmation response (yes, yes can you the above, etc.)
+        const isConfirmationResponse = /^\s*(yes|ok|sure|do it|proceed|go ahead)\s*(can you|do|use|with|proceed with)?\s*(the\s+)?(above|that|it)?\s*$/i.test(question.trim()) ||
+                                      /^\s*yes\s+(can you|do|use|proceed with)\s+(the\s+)?(above|that)\s*$/i.test(question.trim());
+        // Also check if target can be extracted from question patterns
+        // Pattern 1: "for X" or "predicting X" anywhere in question
+        // Pattern 2: "train/build/create [model type] model (optional params) for X"
+        const hasTargetInQuestion = /(?:for|predicting|target|choosing)\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)/i.test(question) ||
+                                     /(?:train|build|create)\s+(?:a\s+)?[\w\s]+\s+model(?:\s*\([^)]+\))?\s+(?:for|predicting)\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)/i.test(question) ||
+                                     /(?:train|build|create)\s+(?:a\s+)?[\w\s]+\s+model\s+(?:for|predicting)\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)/i.test(question);
+        
+        // CRITICAL: If target is detected (either in intent or question), NEVER ask for clarification
+        // The handler will use ALL numeric columns as features regardless of what features are specified
+        if (hasTargetVariable || hasTargetInQuestion || isConfirmationResponse) {
+          if (isConfirmationResponse) {
+            console.log(`✅ Confirmation response detected for ml_model - proceeding to handler (will extract context from history)`);
+          } else {
+            console.log(`✅ Target variable detected for ml_model - proceeding to handler (will auto-use all numeric columns as features, ignoring specified features if any)`);
+          }
+          // Don't return early - proceed to handler even if requiresClarification is true
+          // The handler will use all numeric columns as features
         } else if (intent.requiresClarification || intent.confidence < 0.5) {
           console.log(`❓ Low confidence (${intent.confidence.toFixed(2)}) or clarification required, asking for clarification`);
           this.emitThinkingStep(onThinkingStep, "Checking if I need more details", "active");

@@ -34,25 +34,135 @@ export class MLModelHandler extends BaseHandler {
     }
 
     // Extract model type
-    let modelType: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn' = 'linear';
+    type ModelType = 
+      | 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
+      | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn'
+      | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie'
+      | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp'
+      | 'multinomial_logistic' | 'naive_bayes_gaussian' | 'naive_bayes_multinomial' | 'naive_bayes_bernoulli'
+      | 'lda' | 'qda'
+      | 'kmeans' | 'dbscan' | 'hierarchical_clustering'
+      | 'pca' | 'tsne' | 'umap'
+      | 'arima' | 'sarima' | 'exponential_smoothing' | 'lstm' | 'gru'
+      | 'isolation_forest' | 'one_class_svm' | 'local_outlier_factor' | 'elliptic_envelope'
+      | 'matrix_factorization'
+      | 'cox_proportional_hazards' | 'kaplan_meier';
+    
+    let modelType: ModelType = 'linear';
     
     if (intent.modelType) {
-      modelType = intent.modelType as typeof modelType;
+      modelType = intent.modelType as ModelType;
     } else {
       // Try to extract from question
       const questionLower = (intent.originalQuestion || intent.customRequest || '').toLowerCase();
-      if (questionLower.includes('logistic')) {
+      
+      // Regression models
+      if (questionLower.includes('polynomial')) {
+        modelType = 'polynomial';
+      } else if (questionLower.includes('bayesian')) {
+        modelType = 'bayesian';
+      } else if (questionLower.includes('quantile')) {
+        modelType = 'quantile';
+      } else if (questionLower.includes('poisson')) {
+        modelType = 'poisson';
+      } else if (questionLower.includes('gamma')) {
+        modelType = 'gamma';
+      } else if (questionLower.includes('tweedie')) {
+        modelType = 'tweedie';
+      } else if (questionLower.includes('gaussian process')) {
+        modelType = 'gaussian_process';
+      } else if (questionLower.includes('neural network') || questionLower.includes('mlp') || questionLower.includes('multilayer perceptron')) {
+        modelType = 'mlp';
+      }
+      // Classification models
+      else if (questionLower.includes('multinomial logistic')) {
+        modelType = 'multinomial_logistic';
+      } else if (questionLower.includes('naive bayes')) {
+        if (questionLower.includes('multinomial')) {
+          modelType = 'naive_bayes_multinomial';
+        } else if (questionLower.includes('bernoulli')) {
+          modelType = 'naive_bayes_bernoulli';
+        } else {
+          modelType = 'naive_bayes_gaussian';
+        }
+      } else if (questionLower.includes('lda') || questionLower.includes('linear discriminant')) {
+        modelType = 'lda';
+      } else if (questionLower.includes('qda') || questionLower.includes('quadratic discriminant')) {
+        modelType = 'qda';
+      }
+      // Ensemble models
+      else if (questionLower.includes('xgboost') || questionLower.includes('xgb')) {
+        modelType = 'xgboost';
+      } else if (questionLower.includes('lightgbm') || questionLower.includes('lgbm')) {
+        modelType = 'lightgbm';
+      } else if (questionLower.includes('catboost') || questionLower.includes('cat boost')) {
+        modelType = 'catboost';
+      } else if (questionLower.includes('extra trees') || questionLower.includes('extremely randomized')) {
+        modelType = 'extra_trees';
+      } else if (questionLower.includes('gradient boosting') || questionLower.includes('gradientboosting') || questionLower.includes('gbm')) {
+        modelType = 'gradient_boosting';
+      } else if (questionLower.includes('random forest') || questionLower.includes('randomforest')) {
+        modelType = 'random_forest';
+      }
+      // Clustering
+      else if (questionLower.includes('k-means') || questionLower.includes('kmeans')) {
+        modelType = 'kmeans';
+      } else if (questionLower.includes('dbscan')) {
+        modelType = 'dbscan';
+      } else if (questionLower.includes('hierarchical clustering') || questionLower.includes('agglomerative')) {
+        modelType = 'hierarchical_clustering';
+      }
+      // Dimensionality reduction
+      else if (questionLower.includes('pca') || questionLower.includes('principal component')) {
+        modelType = 'pca';
+      } else if (questionLower.includes('t-sne') || questionLower.includes('tsne')) {
+        modelType = 'tsne';
+      } else if (questionLower.includes('umap')) {
+        modelType = 'umap';
+      }
+      // Time series models
+      else if (questionLower.includes('arima') || questionLower.includes('auto-regressive')) {
+        if (questionLower.includes('seasonal') || questionLower.includes('sarima')) {
+          modelType = 'sarima';
+        } else {
+          modelType = 'arima';
+        }
+      } else if (questionLower.includes('exponential smoothing') || questionLower.includes('holt-winters')) {
+        modelType = 'exponential_smoothing';
+      } else if (questionLower.includes('lstm') || questionLower.includes('long short-term memory')) {
+        modelType = 'lstm';
+      } else if (questionLower.includes('gru') || questionLower.includes('gated recurrent')) {
+        modelType = 'gru';
+      }
+      // Anomaly detection
+      else if (questionLower.includes('isolation forest') || questionLower.includes('anomaly detection')) {
+        modelType = 'isolation_forest';
+      } else if (questionLower.includes('one-class svm') || questionLower.includes('one class svm')) {
+        modelType = 'one_class_svm';
+      } else if (questionLower.includes('local outlier factor') || questionLower.includes('lof')) {
+        modelType = 'local_outlier_factor';
+      } else if (questionLower.includes('elliptic envelope')) {
+        modelType = 'elliptic_envelope';
+      }
+      // Recommendation systems
+      else if (questionLower.includes('matrix factorization') || questionLower.includes('recommendation')) {
+        modelType = 'matrix_factorization';
+      }
+      // Survival analysis
+      else if (questionLower.includes('cox') || questionLower.includes('proportional hazards')) {
+        modelType = 'cox_proportional_hazards';
+      } else if (questionLower.includes('kaplan-meier') || questionLower.includes('kaplan meier')) {
+        modelType = 'kaplan_meier';
+      }
+      // Original models
+      else if (questionLower.includes('logistic')) {
         modelType = 'logistic';
       } else if (questionLower.includes('ridge')) {
         modelType = 'ridge';
       } else if (questionLower.includes('lasso')) {
         modelType = 'lasso';
-      } else if (questionLower.includes('random forest') || questionLower.includes('randomforest')) {
-        modelType = 'random_forest';
       } else if (questionLower.includes('decision tree') || questionLower.includes('decisiontree')) {
         modelType = 'decision_tree';
-      } else if (questionLower.includes('gradient boosting') || questionLower.includes('gradientboosting') || questionLower.includes('gbm') || questionLower.includes('xgboost')) {
-        modelType = 'gradient_boosting';
       } else if (questionLower.includes('elastic net') || questionLower.includes('elasticnet')) {
         modelType = 'elasticnet';
       } else if (questionLower.includes('svm') || questionLower.includes('support vector')) {
@@ -67,6 +177,15 @@ export class MLModelHandler extends BaseHandler {
     const isFollowUpQuestion = /\b(test|try|alternative|different|other|improve|better|change|switch|more)\s*(features?|variables?|accuracy|metrics?|model)\b/i.test(questionText) ||
                                /\b(should we|can we|let's|what if)\b/i.test(questionText);
     
+    // Check if this is a confirmation response (e.g., "yes", "yes can you the above", "yes do the above")
+    const isConfirmationResponse = /^\s*(yes|ok|sure|do it|proceed|go ahead)\s*(can you|do|use|with|proceed with)?\s*(the\s+)?(above|that|it)?\s*$/i.test(questionText.trim()) ||
+                                    /^\s*yes\s+(can you|do|use|proceed with)\s+(the\s+)?(above|that)\s*$/i.test(questionText.trim());
+    
+    // Check if this is a follow-up response about using all variables (e.g., "create it for all variables", "use all variables")
+    const isAllVariablesResponse = /\b(create|use|with|for)\s+(it\s+)?(for\s+)?all\s+(variables?|features?|columns?)\b/i.test(questionText) ||
+                                    /\b(all\s+(variables?|features?|columns?))\b/i.test(questionText) ||
+                                    /\b(no\s+)?create\s+it\s+for\s+all\s+(variables?|features?)\b/i.test(questionText);
+    
     // Extract target variable
     let targetVariable = intent.targetVariable;
     if (!targetVariable) {
@@ -78,32 +197,90 @@ export class MLModelHandler extends BaseHandler {
       }
     }
     
-    // If no target and this looks like a follow-up, try to extract from chat history
-    if (!targetVariable && isFollowUpQuestion && context.chatHistory && context.chatHistory.length > 0) {
+    // If no target and this looks like a follow-up (including confirmations and "all variables" responses), try to extract from chat history
+    if (!targetVariable && (isFollowUpQuestion || isAllVariablesResponse || isConfirmationResponse) && context.chatHistory && context.chatHistory.length > 0) {
       const previousContext = this.extractModelContextFromHistory(context.chatHistory, context.summary.columns.map(c => c.name));
       if (previousContext.target) {
         targetVariable = previousContext.target;
         console.log(`📌 Extracted target from chat history: ${targetVariable}`);
+      }
+      // Also extract model type from history if not in intent
+      if (!intent.modelType && previousContext.modelType) {
+        modelType = previousContext.modelType as typeof modelType;
+        console.log(`📌 Extracted model type from chat history: ${modelType}`);
+      }
+    }
+    
+    // Special handling for confirmation responses: if we still don't have target, look more aggressively in history
+    if (!targetVariable && isConfirmationResponse && context.chatHistory && context.chatHistory.length > 0) {
+      // Look for the user message BEFORE the assistant's clarification
+      const recentMessages = context.chatHistory.slice(-5);
+      for (let i = recentMessages.length - 1; i >= 0; i--) {
+        const msg = recentMessages[i];
+        if (msg.role === 'user' && msg.content) {
+          // Try to extract model training request from this user message
+          const modelMatch = msg.content.match(/(?:train|build|create)\s+(?:a\s+)?(polynomial|linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp)\s+(?:regression\s+)?model(?:\s*\([^)]+\))?\s+for\s+([a-zA-Z0-9_\s]+)/i);
+          if (modelMatch) {
+            const possibleTarget = modelMatch[2].trim();
+            const matched = context.summary.columns.map(c => c.name).find(col => 
+              col.toLowerCase() === possibleTarget.toLowerCase() ||
+              col.toLowerCase().includes(possibleTarget.toLowerCase()) ||
+              possibleTarget.toLowerCase().includes(col.toLowerCase())
+            );
+            if (matched) {
+              targetVariable = matched;
+              console.log(`📌 Extracted target from previous user message: ${targetVariable}`);
+              break;
+            }
+          }
+        }
       }
     }
 
     if (!targetVariable) {
       const allColumns = context.summary.columns.map(c => c.name);
       
-      // If this is a follow-up question, give a more contextual response
-      if (isFollowUpQuestion) {
+      // If this is a confirmation response, we should have extracted target from history
+      // If we still don't have it, something went wrong - but don't ask for clarification again
+      if (isConfirmationResponse) {
+        // Try one more time to extract from history with more aggressive search
+        const recentMessages = context.chatHistory.slice(-10);
+        for (const msg of recentMessages.reverse()) {
+          if (msg.role === 'user' && msg.content) {
+            const modelMatch = msg.content.match(/(?:train|build|create)\s+(?:a\s+)?[\w\s]+\s+model(?:\s*\([^)]+\))?\s+for\s+([a-zA-Z0-9_\s]+)/i);
+            if (modelMatch) {
+              const possibleTarget = modelMatch[1].trim();
+              const matched = allColumns.find(col => 
+                col.toLowerCase() === possibleTarget.toLowerCase() ||
+                col.toLowerCase().includes(possibleTarget.toLowerCase()) ||
+                possibleTarget.toLowerCase().includes(col.toLowerCase())
+              );
+              if (matched) {
+                targetVariable = matched;
+                console.log(`📌 Extracted target from history (aggressive search): ${targetVariable}`);
+                break;
+              }
+            }
+          }
+        }
+      }
+      
+      // If still no target, ask for clarification (but only if not a confirmation)
+      if (!targetVariable) {
+        if (isFollowUpQuestion) {
+          return {
+            answer: `I'd be happy to help you test alternative features! To do that, I need to know which variable you're trying to predict. Could you specify the target variable? For example: "Test alternative features for predicting PA TOM"`,
+            requiresClarification: true,
+            suggestions: allColumns.slice(0, 5),
+          };
+        }
+        
         return {
-          answer: `I'd be happy to help you test alternative features! To do that, I need to know which variable you're trying to predict. Could you specify the target variable? For example: "Test alternative features for predicting PA TOM"`,
+          answer: `I need to know which variable you'd like to use as the target (dependent variable). For example: 'Build a linear model choosing x as target variable and a, b, c as independent variables'`,
           requiresClarification: true,
           suggestions: allColumns.slice(0, 5),
         };
       }
-      
-      return {
-        answer: `I need to know which variable you'd like to use as the target (dependent variable). For example: 'Build a linear model choosing x as target variable and a, b, c as independent variables'`,
-        requiresClarification: true,
-        suggestions: allColumns.slice(0, 5),
-      };
     }
 
     // Find matching target column
@@ -128,13 +305,24 @@ export class MLModelHandler extends BaseHandler {
       // Try to extract from question
       const question = intent.originalQuestion || intent.customRequest || '';
       
-      // Pattern 1: "a, b, c, d, & e variables as independent"
-      const featuresMatch1 = question.match(/(?:and|using|with|features|independent variables|predictors?)\s+([a-zA-Z0-9_]+(?:\s*[,\s&]+\s*[a-zA-Z0-9_]+)*)/i);
-      if (featuresMatch1 && featuresMatch1[1]) {
-        features = featuresMatch1[1]
+      // Pattern 1: "with X" or "with X, Y, Z" (most common pattern)
+      const featuresMatchWith = question.match(/\bwith\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*(?:\s*[,\s&]+\s*[a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)*)/i);
+      if (featuresMatchWith && featuresMatchWith[1]) {
+        features = featuresMatchWith[1]
           .split(/[,\s&]+/)
           .map(f => f.trim())
           .filter(f => f.length > 0);
+      }
+      
+      // Pattern 2: "a, b, c, d, & e variables as independent" or "using X, Y, Z"
+      if (features.length === 0) {
+        const featuresMatch1 = question.match(/(?:and|using|features|independent variables|predictors?)\s+([a-zA-Z0-9_]+(?:\s*[,\s&]+\s*[a-zA-Z0-9_]+)*)/i);
+        if (featuresMatch1 && featuresMatch1[1]) {
+          features = featuresMatch1[1]
+            .split(/[,\s&]+/)
+            .map(f => f.trim())
+            .filter(f => f.length > 0);
+        }
       }
       
       // Pattern 2: "a, b, c, d, & e" after "independent variables"
@@ -149,10 +337,15 @@ export class MLModelHandler extends BaseHandler {
       }
     }
 
-    // If no features and this is a follow-up, try to get from history or suggest alternatives
-    if (features.length === 0 && isFollowUpQuestion && context.chatHistory && context.chatHistory.length > 0) {
+    // If no features and this is a follow-up (including confirmations and "all variables" responses), try to get from history or suggest alternatives
+    if (features.length === 0 && (isFollowUpQuestion || isAllVariablesResponse || isConfirmationResponse) && context.chatHistory && context.chatHistory.length > 0) {
       const previousContext = this.extractModelContextFromHistory(context.chatHistory, allColumns);
-      if (previousContext.features.length > 0) {
+      
+      // If user explicitly says "all variables", skip history features and use all numeric columns
+      if (isAllVariablesResponse) {
+        // Don't use previous features - user wants all variables
+        console.log(`📌 User requested all variables - will use all numeric columns as features`);
+      } else if (previousContext.features.length > 0) {
         // User wants to test alternative features - suggest different ones
         const numericColumns = context.summary.numericColumns.filter(col => col !== targetCol);
         const unusedFeatures = numericColumns.filter(col => !previousContext.features.includes(col));
@@ -164,33 +357,30 @@ export class MLModelHandler extends BaseHandler {
         } else {
           features = previousContext.features; // Use same features if no alternatives
         }
-        
-        // Also get model type from history if not specified
-        if (!intent.modelType && previousContext.modelType) {
-          modelType = previousContext.modelType as typeof modelType;
-        }
+      }
+      
+      // Also get model type from history if not specified
+      if (!intent.modelType && previousContext.modelType) {
+        modelType = previousContext.modelType as typeof modelType;
+        console.log(`📌 Extracted model type from chat history: ${modelType}`);
       }
     }
 
-    if (features.length === 0) {
-      // Suggest all numeric columns except target
-      const numericColumns = context.summary.numericColumns.filter(col => col !== targetCol);
-      
-      // For follow-up questions, be more helpful
-      if (isFollowUpQuestion) {
-        return {
-          answer: `I'd be happy to test alternative features for predicting ${targetCol}! Here are some options you could try:\n\n${numericColumns.slice(0, 5).map(c => `- ${c}`).join('\n')}\n\nWhich features would you like to test? Or say "use all" to test with all available features.`,
-          requiresClarification: true,
-          suggestions: numericColumns.slice(0, 5),
-        };
-      }
-      
+    // CRITICAL: When target is provided, ALWAYS use ALL numeric columns as features
+    // Even if user specifies some features, we use all numeric columns (the specified ones are just hints)
+    // This matches user requirement: "if i give one column and dont give rest then consider the rest of the left columns as feature"
+    const numericColumns = context.summary.numericColumns.filter(col => col !== targetCol);
+    
+    if (numericColumns.length === 0) {
       return {
-        answer: `I need to know which variables to use as independent variables (features). For example: 'Build a linear model choosing ${targetCol} as target variable and ${numericColumns.slice(0, 3).join(', ')} as independent variables'`,
+        answer: `I couldn't find any numeric columns to use as features. Your dataset needs at least one numeric column besides the target variable "${targetCol}".`,
         requiresClarification: true,
-        suggestions: numericColumns.slice(0, 5),
       };
     }
+    
+    // Always use all numeric columns as features when target is provided
+    features = numericColumns;
+    console.log(`📌 Using all ${features.length} numeric columns as features: ${features.slice(0, 5).join(', ')}${features.length > 5 ? '...' : ''}`);
 
     // Match feature names to actual columns
     const matchedFeatures = features
@@ -652,13 +842,106 @@ Return ONLY the Python code, no explanations before or after.`;
     chatHistory: { role: string; content: string }[],
     availableColumns: string[]
   ): { target: string | null; features: string[]; modelType: string | null } {
-    // Look at recent assistant messages for model results
+    // Look at recent messages (both user and assistant) for model context
     const recentMessages = chatHistory.slice(-10);
     
     let target: string | null = null;
     let features: string[] = [];
     let modelType: string | null = null;
     
+    // First, check user messages for model training requests
+    for (const msg of recentMessages.reverse()) {
+      if (msg.role === 'user' && msg.content) {
+        const content = msg.content;
+        
+        // Look for model training patterns in user messages
+        // Pattern: "train a [model type] model (degree N) for [target]"
+        const userModelMatch = content.match(/(?:train|build|create)\s+(?:a\s+)?(polynomial|linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp|neural\s*network)\s+(?:regression\s+)?model(?:\s*\([^)]+\))?\s+for\s+([a-zA-Z0-9_\s]+)/i);
+        if (userModelMatch && !target) {
+          const typeStr = userModelMatch[1].toLowerCase().replace(/\s+/g, '_');
+          const possibleTarget = userModelMatch[2].trim();
+          
+          // Map common model type names
+          const modelTypeMap: Record<string, string> = {
+            'polynomial': 'polynomial',
+            'linear': 'linear',
+            'logistic': 'logistic',
+            'ridge': 'ridge',
+            'lasso': 'lasso',
+            'random_forest': 'random_forest',
+            'decision_tree': 'decision_tree',
+            'gradient_boosting': 'gradient_boosting',
+            'elasticnet': 'elasticnet',
+            'svm': 'svm',
+            'knn': 'knn',
+            'bayesian': 'bayesian',
+            'xgboost': 'xgboost',
+            'lightgbm': 'lightgbm',
+            'catboost': 'catboost',
+            'mlp': 'mlp',
+            'neural_network': 'mlp'
+          };
+          
+          if (modelTypeMap[typeStr] && !modelType) {
+            modelType = modelTypeMap[typeStr];
+          }
+          
+          // Verify target is a valid column
+          const matched = availableColumns.find(col => 
+            col.toLowerCase() === possibleTarget.toLowerCase() ||
+            col.toLowerCase().includes(possibleTarget.toLowerCase()) ||
+            possibleTarget.toLowerCase().includes(col.toLowerCase())
+          );
+          if (matched) {
+            target = matched;
+          }
+        }
+        
+        // Also check for simpler patterns: "[model type] model for [target]"
+        if (!target) {
+          const simpleMatch = content.match(/(polynomial|linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp|neural\s*network)\s+(?:regression\s+)?model\s+for\s+([a-zA-Z0-9_\s]+)/i);
+          if (simpleMatch) {
+            const typeStr = simpleMatch[1].toLowerCase().replace(/\s+/g, '_');
+            const possibleTarget = simpleMatch[2].trim();
+            
+            const modelTypeMap: Record<string, string> = {
+              'polynomial': 'polynomial',
+              'linear': 'linear',
+              'logistic': 'logistic',
+              'ridge': 'ridge',
+              'lasso': 'lasso',
+              'random_forest': 'random_forest',
+              'decision_tree': 'decision_tree',
+              'gradient_boosting': 'gradient_boosting',
+              'elasticnet': 'elasticnet',
+              'svm': 'svm',
+              'knn': 'knn',
+              'bayesian': 'bayesian',
+              'xgboost': 'xgboost',
+              'lightgbm': 'lightgbm',
+              'catboost': 'catboost',
+              'mlp': 'mlp',
+              'neural_network': 'mlp'
+            };
+            
+            if (modelTypeMap[typeStr] && !modelType) {
+              modelType = modelTypeMap[typeStr];
+            }
+            
+            const matched = availableColumns.find(col => 
+              col.toLowerCase() === possibleTarget.toLowerCase() ||
+              col.toLowerCase().includes(possibleTarget.toLowerCase()) ||
+              possibleTarget.toLowerCase().includes(col.toLowerCase())
+            );
+            if (matched) {
+              target = matched;
+            }
+          }
+        }
+      }
+    }
+    
+    // Then check assistant messages for model results (for follow-up questions)
     for (const msg of recentMessages.reverse()) {
       if (msg.role === 'assistant' && msg.content) {
         const content = msg.content;
@@ -688,10 +971,11 @@ Return ONLY the Python code, no explanations before or after.`;
         }
         
         // Look for model type
-        const modelMatch = content.match(/(linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn)\s*(regression|model|classification)?/i);
+        const modelMatch = content.match(/(linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|polynomial|bayesian|xgboost|lightgbm|catboost|mlp)\s*(regression|model|classification)?/i);
         if (modelMatch && !modelType) {
           const type = modelMatch[1].toLowerCase().replace(/\s+/g, '_');
-          if (['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree', 'gradient_boosting', 'elasticnet', 'svm', 'knn'].includes(type)) {
+          const validTypes = ['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree', 'gradient_boosting', 'elasticnet', 'svm', 'knn', 'polynomial', 'bayesian', 'xgboost', 'lightgbm', 'catboost', 'mlp'];
+          if (validTypes.includes(type)) {
             modelType = type;
           }
         }

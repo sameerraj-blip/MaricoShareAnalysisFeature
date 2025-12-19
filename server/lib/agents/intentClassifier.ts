@@ -120,6 +120,13 @@ The conversation history is ESSENTIAL for understanding follow-up questions. If 
 
 CONTEXT-AWARE CLASSIFICATION:
 - If previous messages show MODEL RESULTS (coefficients, accuracy, R², RMSE, predictions), and user asks about "improving", "testing features", "alternative features", "better accuracy" → classify as "ml_model"
+- If previous messages discuss MODEL TRAINING (build model, train model, create model, polynomial regression, etc.), and user responds with:
+  * "yes", "ok", "sure", "do it", "proceed", "go ahead" → classify as "ml_model" (continue previous model training)
+  * "yes can you the above", "yes do the above", "yes use the above", "yes proceed with the above" → classify as "ml_model" (user confirming to proceed with previous suggestion)
+  * "create it for all variables", "use all variables", "all variables", "all features", "for all" → classify as "ml_model" (use all numeric columns as features)
+  * "no create it for all variables" → classify as "ml_model" (user wants to proceed with all variables as features)
+  * IMPORTANT: These responses should NEVER be classified as "correlation" - they are always "ml_model" when previous context is about model training
+- If previous assistant message asks about using "other numeric columns as features" or "all numeric columns", and user responds "yes" or "yes can you the above" → classify as "ml_model" and extract targetVariable from the PREVIOUS user message (before the assistant's clarification)
 - Questions about model performance, feature selection, improving metrics after a model was built → classify as "ml_model"
 - Short affirmative responses ("yes", "ok", "try it") → use the context from previous messages
 
@@ -127,14 +134,22 @@ CLASSIFICATION RULES:
 1. "ml_model" - User wants to build/train/create a machine learning model OR improve/modify an existing model (including advice questions about model performance)
    * HIGH PRIORITY: Questions like "build a linear model", "train a model", "create a [model type] model", "build a model choosing X as target and Y, Z as independent variables"
    * ALSO HIGH PRIORITY (follow-ups and advice): "test alternative features", "improve accuracy", "try different features", "which features should we use", "can we improve the model", "how can we improve the model performance", "how can we improve the random forest model performance"
+   * CRITICAL FOLLOW-UP PATTERNS (when previous message was about model training):
+     - "create it for all variables", "use all variables", "all variables", "all features", "for all", "no create it for all variables" → These mean "use all numeric columns as features for the model"
+     - "yes", "ok", "sure", "do it", "proceed" (after model training question) → Continue with model training using all numeric columns as features
    * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model", "test features", "try features", "improve the model"
-   * Model types: linear, logistic, ridge, lasso, random forest, decision tree, gradient boosting, elasticnet, svm, knn
-   * Set confidence to 0.9+ for these patterns (including advice-style questions about models)
+   * Model types: linear, logistic, ridge, lasso, random forest, decision tree, gradient boosting, elasticnet, svm, knn, polynomial, bayesian, xgboost, lightgbm, catboost, etc.
+   * Set confidence to 0.9+ for these patterns (including advice-style questions about models and follow-up responses in modeling context)
 2. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
    * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
    * These are correlation queries even if the target variable (X) is not immediately recognizable
    * Set confidence to 0.9+ for these patterns
+   * IMPORTANT: Questions about "trends in X over time" or "X over time" should be classified as "chart", NOT "correlation"
 3. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area)
+   * HIGH PRIORITY: Questions about "trends in X over time", "X over time", "show trends for X", "trend line for X" should be classified as "chart" with chartType "line"
+   * These are time-series visualization requests, not correlation analysis
+   * Patterns: "trends in X over time", "X over time", "show trends for X", "trend line for X", "analyze trends in X"
+   * Set confidence to 0.9+ for these patterns and extract chartType as "line"
 4. "statistical" - User asks for statistics (mean, median, average, sum, count, max, min, highest, lowest, best, worst) OR asks "which month/row/period has the [highest/lowest/best/worst] [variable]" - these are statistical queries, NOT comparison queries
 5. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
 6. "conversational" - Greetings, thanks, casual chat, questions about the bot
@@ -159,12 +174,18 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
     - "svm" - Support Vector Machine (also matches "support vector")
     - "knn" - K-Nearest Neighbors (also matches "k-nearest", "nearest neighbor")
   * If no model type specified, default to "linear"
-  * Extract targetVariable: The variable to predict (from phrases like "X as target", "predicting X", "target variable X", "dependent variable X")
-  * Extract variables array: Independent variables/features (from phrases like "a, b, c as independent variables", "using X, Y, Z as features", "predictors: X, Y, Z")
+  * Extract targetVariable: The variable to predict (from phrases like "X as target", "predicting X", "target variable X", "dependent variable X", "for X", "model for X")
+  * CRITICAL: If current question is a confirmation ("yes", "yes can you the above", "yes do the above") and previous assistant message asked about using features, look BACK at the PREVIOUS user message to extract targetVariable and modelType
+  * Example: Previous user: "Train a polynomial regression model (degree 2) for PA TOM" → Assistant: "Would you like to predict PA TOM using other numeric columns?" → Current user: "yes can you the above" → Extract targetVariable: "PA TOM", modelType: "polynomial" from the PREVIOUS user message
+  * Extract variables array: Independent variables/features (from phrases like "a, b, c as independent variables", "using X, Y, Z as features", "predictors: X, Y, Z", "with X", "with X, Y, Z")
+  * IMPORTANT: Even if variables array is extracted, the handler will use ALL numeric columns as features when targetVariable is provided
+  * IMPORTANT: If targetVariable is specified but variables array is empty, assume all other numeric columns should be used as features
   * Look for patterns:
     - "build a [MODEL_TYPE] model choosing [TARGET] as target variable and [FEATURES] as independent variables"
     - "train a [MODEL_TYPE] model to predict [TARGET] using [FEATURES]"
     - "create a [MODEL_TYPE] model with [TARGET] as target and [FEATURES] as features"
+    - "train a [MODEL_TYPE] model (degree N) for [TARGET]" → extract TARGET, use all numeric columns as features
+    - "build a [MODEL_TYPE] model for [TARGET]" → extract TARGET, use all numeric columns as features
 - Extract targetVariable: Any entity/variable the user wants to analyze (extract from natural language, don't assume domain)
   * For questions like "what impacts X" or "what affects X", extract X as the targetVariable
   * For questions like "what influences Y", extract Y as the targetVariable
@@ -175,7 +196,10 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
     - "what impacts/affects/influences [TARGET]"
     - "correlation of [TARGET] with all (the other) variables"
     - "correlation between [TARGET] and [OTHER]"
+    - "train/build/create [MODEL_TYPE] model for [TARGET]" → extract TARGET
+    - "[MODEL_TYPE] model for [TARGET]" → extract TARGET
   * IMPORTANT: When user says "correlation of X with all the other variables", extract X as targetVariable (not "X with all the other variables")
+  * IMPORTANT: When user says "train a model for X" or "build a model for X", extract X as targetVariable
 - Extract variables array: Any related entities/variables mentioned
 - Extract chartType: If user explicitly requests a chart type
 - Extract filters (GENERAL constraint system):
@@ -202,6 +226,13 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
   * y2: Column for secondary Y-axis (right axis) - extract from phrases like "add X on secondary Y axis", "X on secondary Y axis", "secondary Y axis: X", "add X to secondary axis"
 - Set confidence: 0.9+ if clear intent, 0.7-0.9 if somewhat clear, <0.7 if ambiguous
 - Set requiresClarification: true if confidence < 0.5
+- IMPORTANT: For ml_model queries, if targetVariable is extracted (even if features/variables are not specified OR if some features are specified), ALWAYS set requiresClarification: false and confidence >= 0.8. The handler will automatically use all numeric columns as features, regardless of whether specific features are mentioned.
+- CRITICAL: For confirmation responses like "yes", "yes can you the above" after an assistant clarification about model training, ALWAYS:
+  * Set type: "ml_model"
+  * Set requiresClarification: false
+  * Set confidence >= 0.8
+  * Extract targetVariable and modelType from the PREVIOUS user message (before the assistant's clarification)
+  * Do NOT ask for clarification again - proceed with the model training
 
 CRITICAL: Do NOT assume domain-specific terminology. Extract relationships and constraints GENERALLY. The AI should understand "X is my brand" and "X is my company" the same way - as defining a primary entity.
 
@@ -322,6 +353,8 @@ OUTPUT FORMAT (JSON only, no markdown):
     fallbackType = 'conversational';
   } else if (questionLower.match(/\b(build|train|create).*model\b/)) {
     fallbackType = 'ml_model';
+  } else if (questionLower.match(/\b(trends?\s+in|trends?\s+for|trend\s+line|over\s+time)\b/)) {
+    fallbackType = 'chart';
   } else if (questionLower.match(/\b(what affects|correlation|relationship|influence)\b/)) {
     fallbackType = 'correlation';
   } else if (questionLower.match(/\b(chart|graph|plot|visualize|show)\b/)) {
