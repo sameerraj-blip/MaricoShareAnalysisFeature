@@ -40,7 +40,14 @@ export async function saveModifiedData(
   // Get username from document
   const username = doc.username;
 
+  // Check if this is a large dataset
+  const isLargeDataset = modifiedData.length > 50000;
+  if (isLargeDataset) {
+    console.log(`📊 Large dataset detected (${modifiedData.length} rows). Saving to blob storage with streaming optimization...`);
+  }
+
   // Save new version to blob
+  // updateProcessedDataBlob handles large datasets efficiently
   const newBlob = await updateProcessedDataBlob(
     sessionId,
     modifiedData,
@@ -89,17 +96,29 @@ export async function saveModifiedData(
   doc.columnStatistics = generateColumnStatistics(modifiedData, doc.dataSummary.numericColumns);
 
   // Update rawData in document
-  doc.rawData = modifiedData.map(row => {
-    const serializedRow: Record<string, any> = {};
-    for (const [key, value] of Object.entries(row)) {
-      if (value instanceof Date) {
-        serializedRow[key] = value.toISOString();
-      } else {
-        serializedRow[key] = value;
+  // For large datasets, don't store in CosmosDB (4MB limit)
+  // Only store if dataset is small enough
+  const estimatedSize = JSON.stringify(modifiedData).length;
+  const MAX_DOCUMENT_SIZE = 3 * 1024 * 1024; // 3MB safety margin
+  
+  if (estimatedSize < MAX_DOCUMENT_SIZE && modifiedData.length < 10000) {
+    doc.rawData = modifiedData.map(row => {
+      const serializedRow: Record<string, any> = {};
+      for (const [key, value] of Object.entries(row)) {
+        if (value instanceof Date) {
+          serializedRow[key] = value.toISOString();
+        } else {
+          serializedRow[key] = value;
+        }
       }
-    }
-    return serializedRow;
-  });
+      return serializedRow;
+    });
+    console.log(`✅ Updated rawData in CosmosDB document (${modifiedData.length} rows)`);
+  } else {
+    // Dataset too large - don't store in CosmosDB, it's already in blob storage
+    console.log(`⚠️ Dataset too large for CosmosDB (${modifiedData.length} rows, ~${(estimatedSize / 1024 / 1024).toFixed(2)}MB). Keeping rawData empty - data is in blob storage.`);
+    doc.rawData = []; // Clear rawData - it's stored in blob
+  }
 
   // Add to version history
   if (!doc.dataVersions) {

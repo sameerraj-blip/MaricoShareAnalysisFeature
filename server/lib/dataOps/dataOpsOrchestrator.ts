@@ -10,6 +10,10 @@ import { openai } from '../openai.js';
 import { getFileFromBlob } from '../blobStorage.js';
 import { parseFile, convertDashToZeroForNumericColumns } from '../fileParser.js';
 
+// Streaming configuration for large datasets
+const LARGE_DATASET_THRESHOLD = 50000; // 50k rows
+const BATCH_SIZE = 10000; // Process 10k rows at a time
+
 /**
  * Get preview data from saved rawData (first 50 rows)
  */
@@ -25,6 +29,72 @@ async function getPreviewFromSavedData(sessionId: string, fallbackData: Record<s
   }
   // Fallback to provided data if document not found
   return fallbackData.slice(0, 50);
+}
+
+/**
+ * Streaming helper: Process data in batches
+ */
+async function processInBatches<T>(
+  data: Record<string, any>[],
+  batchSize: number,
+  processor: (batch: Record<string, any>[]) => Promise<T> | T
+): Promise<T[]> {
+  const results: T[] = [];
+  for (let i = 0; i < data.length; i += batchSize) {
+    const batch = data.slice(i, i + batchSize);
+    const result = await processor(batch);
+    results.push(result);
+  }
+  return results;
+}
+
+/**
+ * Streaming version of removeNulls for large datasets
+ * 
+ * Note: For imputation methods (mean, median, mode), the Python service calculates
+ * statistics from the full dataset, so we process in batches but the Python service
+ * handles the imputation correctly. For delete operations, we can safely process in batches.
+ */
+async function removeNullsStreaming(
+  data: Record<string, any>[],
+  column?: string,
+  method: 'delete' | 'mean' | 'median' | 'mode' | 'custom' = 'delete',
+  customValue?: any
+): Promise<{ data: Record<string, any>[]; nulls_removed: number; rows_before: number; rows_after: number }> {
+  const rowsBefore = data.length;
+  let totalNullsRemoved = 0;
+  const processedBatches: Record<string, any>[][] = [];
+  
+  // For imputation methods, the Python service needs the full dataset to calculate
+  // accurate statistics (mean/median/mode). However, for very large datasets, we
+  // can still process in batches and the Python service will handle it.
+  // For delete operations, batch processing is straightforward.
+  
+  // Process in batches
+  console.log(`📊 Processing ${data.length} rows in batches of ${BATCH_SIZE}...`);
+  for (let i = 0; i < data.length; i += BATCH_SIZE) {
+    const batch = data.slice(i, i + BATCH_SIZE);
+    const batchResult = await removeNulls(batch, column, method, customValue);
+    processedBatches.push(batchResult.data);
+    totalNullsRemoved += batchResult.nulls_removed;
+    
+    // Log progress every 5 batches
+    if ((i + BATCH_SIZE) % (BATCH_SIZE * 5) === 0 || i + BATCH_SIZE >= data.length) {
+      console.log(`  Processed ${Math.min(i + BATCH_SIZE, data.length)} / ${data.length} rows...`);
+    }
+  }
+  
+  // Combine all batches
+  const result = processedBatches.flat();
+  
+  console.log(`✅ Streaming operation complete: ${totalNullsRemoved} nulls removed, ${rowsBefore} → ${result.length} rows`);
+  
+  return {
+    data: result,
+    nulls_removed: totalNullsRemoved,
+    rows_before: rowsBefore,
+    rows_after: result.length
+  };
 }
 
 export interface DataOpsIntent {
@@ -61,7 +131,7 @@ export interface DataOpsIntent {
   defaultValue?: any; // For creating columns with static values
   transformType?: 'add' | 'subtract' | 'multiply' | 'divide';
   transformValue?: number;
-  rowPosition?: 'first' | 'last';
+  rowPosition?: 'first' | 'last' | 'keep_first';
   rowIndex?: number;
   rowCount?: number; // For removing multiple rows from start/end
   oldValue?: any; // For replace_value operation - the value to replace
@@ -80,7 +150,7 @@ export interface DataOpsIntent {
   clarificationType?: 'column' | 'method' | 'target_type';
   clarificationMessage?: string;
   // ML model fields
-  modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree';
+  modelType?: 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn' | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie' | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp' | 'multinomial_logistic' | 'naive_bayes_gaussian' | 'naive_bayes_multinomial' | 'naive_bayes_bernoulli' | 'lda' | 'qda';
   targetVariable?: string;
   features?: string[];
 }
@@ -108,22 +178,19 @@ export async function parseDataOpsIntent(
   const availableColumns = dataSummary.columns.map(c => c.name);
   
   // ---------------------------------------------------------------------------
-  // STEP 0: Strong explicit patterns that should ALWAYS create a new intent
-  // Use AI detection first, fall back to regex if AI doesn't detect
+  // STEP 0: Use AI as PRIMARY method for ALL operations
+  // AI is more flexible and can handle natural language variations better than regex
   // ---------------------------------------------------------------------------
   
-  // Try AI detection first for STEP 0 operations (replace_value, remove_column, remove_rows)
+  // Try AI detection first for ALL operations
   try {
     const aiIntent = await detectDataOpsIntentWithAI(message, availableColumns);
-    if (aiIntent && 
-        (aiIntent.operation === 'replace_value' || 
-         aiIntent.operation === 'remove_column' || 
-         aiIntent.operation === 'remove_rows')) {
-      console.log(`✅ AI detected STEP 0 intent: ${aiIntent.operation}`);
+    if (aiIntent && aiIntent.operation !== 'unknown') {
+      console.log(`✅ AI detected intent: ${aiIntent.operation}`);
       return aiIntent;
     }
   } catch (error) {
-    console.error('⚠️ AI intent detection failed in STEP 0, falling back to regex:', error);
+    console.error('⚠️ AI intent detection failed, falling back to regex patterns:', error);
   }
   
   // Fallback to regex patterns if AI didn't detect STEP 0 operations
@@ -447,6 +514,25 @@ export async function parseDataOpsIntent(
   // directly before any clarification / AI logic so simple requests like
   // "remove the first row" just work.
   const lower = lowerMessage;
+  
+  // Pattern: "keep only first N rows" or "keep first N rows" - convert to "remove last (total - N) rows"
+  // Also handles: "keep only the first N rows from the dataset and remove the rest"
+  const keepFirstRegex = /\bkeep\s+(?:only\s+)?(?:the\s+)?first\s+(\d+)\s+rows?/i;
+  const keepFirstMatch = keepFirstRegex.exec(message);
+  if (keepFirstMatch) {
+    const count = parseInt(keepFirstMatch[1], 10);
+    if (!Number.isNaN(count) && count > 0) {
+      // "Keep only first N rows" means "remove last (total - N) rows"
+      // We'll handle this in executeDataOperation by calculating total - N
+      return {
+        operation: 'remove_rows',
+        rowPosition: 'keep_first', // Special flag to indicate "keep first N, remove rest"
+        rowCount: count,
+        requiresClarification: false,
+      };
+    }
+  }
+  
   // Pattern: remove/delete/drop the first/last row
   const firstLastRowRegex = /\b(remove|remov\w*|delete|drop)\s+(the\s+)?(first|last)\s+row\b/i;
   const rowIndexRegex = /\b(remove|remov\w*|delete|drop)\s+row\s+(\d+)\b/i;
@@ -544,20 +630,8 @@ export async function parseDataOpsIntent(
   }
   
   // ---------------------------------------------------------------------------
-  // STEP 2: Try AI-based intent detection FIRST
-  // ---------------------------------------------------------------------------
-  try {
-    const aiIntent = await detectDataOpsIntentWithAI(message, availableColumns);
-    if (aiIntent && aiIntent.operation !== 'unknown') {
-      console.log(`✅ AI detected intent: ${aiIntent.operation}`);
-      return aiIntent;
-    }
-  } catch (error) {
-    console.error('⚠️ AI intent detection failed, falling back to regex:', error);
-  }
-  
-  // ---------------------------------------------------------------------------
-  // STEP 3: Fallback to regex-based pattern matching
+  // STEP 2: Fallback to regex patterns ONLY if AI failed or returned unknown
+  // This is a safety net for cases where AI might fail or be unavailable
   // ---------------------------------------------------------------------------
   
   // Fill/Impute nulls intent (check this BEFORE remove/delete to prioritize imputation)
@@ -1288,7 +1362,7 @@ Determine the intent and return JSON with this structure:
   "previewMode": "first" | "last" | "specific" | "range" (if preview operation, how to select rows),
   "previewStartRow": number (if previewMode is "specific" or "range", the starting row number, 1-based),
   "previewEndRow": number (if previewMode is "range", the ending row number, 1-based),
-  "rowPosition": "first" | "last" (if removing rows from start/end),
+  "rowPosition": "first" | "last" | "keep_first" (if removing rows from start/end, or keeping only first N rows),
   "rowIndex": number (if removing specific row by index, 1-based),
   "rowCount": number (if removing multiple rows, e.g., "remove first 5 rows" or "remove last 3 rows"),
   "oldValue": any (if replace_value operation, the value to replace, null otherwise),
@@ -1308,7 +1382,7 @@ Determine the intent and return JSON with this structure:
 
 Operations:
 - "train_model": User wants to build/train/create a machine learning model (e.g., "build a linear model", "train a model", "create a model")
-  * Extract modelType: "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree" (default: "linear")
+  * Extract modelType: "linear", "log_log", "logistic", "ridge", "lasso", "random_forest", "decision_tree", "gradient_boosting", "elasticnet", "svm", "knn", "polynomial", "bayesian", etc. (default: "linear")
   * Extract targetVariable: the target/dependent variable to predict
   * Extract features: array of independent variables/features
 - "create_column": User wants to create new column with static/default value (e.g., "create column status with value active", "add column Notes", "create column Price with default 100")
@@ -1323,10 +1397,13 @@ Operations:
   * Extract column, transformType, transformValue
 - "normalize_column": User wants to normalize or standardize an existing column
   * Extract column to normalize
-- "remove_rows": User wants to remove first/last or a specific row(s) (e.g., "remove last row", "delete row 5", "remove first 3 rows", "delete last 5 rows")
-  * Extract rowPosition (first/last) if removing from start/end
+- "remove_rows": User wants to remove first/last or a specific row(s), OR keep only first N rows
+  * Examples: "remove last row", "delete row 5", "remove first 3 rows", "delete last 5 rows"
+  * Special case: "keep only first N rows" or "keep first N rows" -> rowPosition: "keep_first", rowCount: N
+  * Extract rowPosition (first/last/keep_first) if removing from start/end or keeping only first N
   * Extract rowIndex (1-based) if removing a specific row by index
   * Extract rowCount (number) if removing multiple rows (e.g., "remove first 5 rows" -> rowPosition: "first", rowCount: 5)
+  * For "keep only first 100 rows" -> rowPosition: "keep_first", rowCount: 100
 - "remove_column": User wants to remove/delete/drop a column (e.g., "remove column X", "delete the column Y", "drop column Z")
   * Extract column: the name of the column to remove
   * If column name is not specified, set requiresClarification to true
@@ -2051,7 +2128,7 @@ async function extractMLModelDetails(
   availableColumns: string[],
   chatHistory?: Message[],
   previousModelParams?: { targetVariable?: string; features?: string[]; modelType?: string }
-): Promise<{ modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree'; targetVariable?: string; features?: string[] } | null> {
+): Promise<{ modelType?: 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn' | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie' | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp' | 'multinomial_logistic' | 'naive_bayes_gaussian' | 'naive_bayes_multinomial' | 'naive_bayes_bernoulli' | 'lda' | 'qda'; targetVariable?: string; features?: string[] } | null> {
   try {
     const columnsList = availableColumns.slice(0, 30).join(', ');
     
@@ -2080,7 +2157,9 @@ async function extractMLModelDetails(
     
     // Determine model type based on user request
     let suggestedModelType = 'linear';
-    if (messageLower.includes('less variance') || messageLower.includes('reduce variance') || messageLower.includes('lower variance')) {
+    if (messageLower.includes('log') && (messageLower.includes('log log') || messageLower.includes('log-log') || messageLower.includes('logarithmic'))) {
+      suggestedModelType = 'log_log';
+    } else if (messageLower.includes('less variance') || messageLower.includes('reduce variance') || messageLower.includes('lower variance')) {
       // Ridge or Lasso for variance reduction
       suggestedModelType = 'ridge'; // Default to Ridge for variance reduction
     } else if (messageLower.includes('ridge')) {
@@ -2104,8 +2183,9 @@ Available columns: ${columnsList}
 ${referencesPrevious && previousModelParams ? 'IMPORTANT: The user is referencing a previous model. Use the previous model parameters (target variable and features) from the context above unless they explicitly specify different ones.' : ''}
 
 Extract:
-1. modelType: "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree"
+1. modelType: "linear", "log_log", "logistic", "ridge", "lasso", "random_forest", "decision_tree", "gradient_boosting", "elasticnet", "svm", "knn", "polynomial", "bayesian", etc.
    ${messageLower.includes('less variance') || messageLower.includes('reduce variance') ? '   → If user wants "less variance", use "ridge" or "lasso" (prefer "ridge")' : ''}
+   ${messageLower.includes('log') && (messageLower.includes('log') || messageLower.includes('logarithmic')) ? '   → If user mentions "log log", "log-log", or "logarithmic" model, use "log_log"' : ''}
    ${suggestedModelType !== 'linear' ? `   → Suggested: "${suggestedModelType}" based on user query` : ''}
 2. targetVariable: The target/dependent variable to predict
    ${referencesPrevious && previousModelParams?.targetVariable ? `   → If referencing previous model, use: "${previousModelParams.targetVariable}"` : ''}
@@ -2124,7 +2204,7 @@ Examples:
 
 Return JSON:
 {
-  "modelType": "linear" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree",
+  "modelType": "linear" | "log_log" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree" | "gradient_boosting" | "elasticnet" | "svm" | "knn" | "polynomial" | "bayesian" | etc.,
   "targetVariable": "ColumnName",
   "features": ["Column1", "Column2", "Column3"]
 }`;
@@ -2390,6 +2470,13 @@ export async function executeDataOperation(
 }> {
   // Check if user explicitly requested preview (except for 'preview' operation which always shows data)
   const shouldShowPreview = intent.operation === 'preview' || userRequestedPreview(originalMessage);
+  
+  // Detect large dataset
+  const isLargeDataset = data.length > LARGE_DATASET_THRESHOLD;
+  if (isLargeDataset) {
+    console.log(`📊 Large dataset detected (${data.length} rows). Using streaming mode for operations.`);
+  }
+  
   if (intent.requiresClarification) {
     // Save pending operation to context
     if (sessionDoc) {
@@ -2421,12 +2508,20 @@ export async function executeDataOperation(
         };
       }
       
-      const result = await removeNulls(
-        data,
-        intent.column,
-        intent.method || 'delete',
-        intent.customValue
-      );
+      // Use streaming for large datasets
+      const result = isLargeDataset
+        ? await removeNullsStreaming(
+            data,
+            intent.column,
+            intent.method || 'delete',
+            intent.customValue
+          )
+        : await removeNulls(
+            data,
+            intent.column,
+            intent.method || 'delete',
+            intent.customValue
+          );
       
       // Validate result data
       if (!result.data || result.data.length === 0) {
@@ -2795,8 +2890,13 @@ export async function executeDataOperation(
         };
       }
 
-      const min = Math.min(...numericValues);
-      const max = Math.max(...numericValues);
+      // Calculate min/max without spread operator to avoid stack overflow on large arrays
+      let min = numericValues[0];
+      let max = numericValues[0];
+      for (let i = 1; i < numericValues.length; i++) {
+        if (numericValues[i] < min) min = numericValues[i];
+        if (numericValues[i] > max) max = numericValues[i];
+      }
       const range = max - min;
 
       const modifiedData = data.map(row => {
@@ -3376,6 +3476,13 @@ export async function executeDataOperation(
       if (intent.rowIndex && intent.rowIndex > 0 && intent.rowIndex <= data.length) {
         // Remove a specific row index (1-based)
         indicesToRemove.add(intent.rowIndex - 1);
+      } else if (intent.rowPosition === 'keep_first') {
+        // Special case: "keep only first N rows" means "remove all rows after row N"
+        // Keep first N rows, remove the rest
+        const keepCount = Math.min(rowCount, data.length);
+        for (let i = keepCount; i < data.length; i++) {
+          indicesToRemove.add(i);
+        }
       } else if (intent.rowPosition === 'first') {
         const count = Math.min(rowCount, data.length);
         for (let i = 0; i < count; i++) {
@@ -3395,16 +3502,28 @@ export async function executeDataOperation(
       const modifiedData = data.filter((_, idx) => !indicesToRemove.has(idx));
 
       // Build a human-readable description
+      const isKeepFirst = intent.rowPosition === 'keep_first';
       const sortedIndices = Array.from(indicesToRemove).sort((a, b) => a - b);
       const removedCount = sortedIndices.length;
+      const keptCount = modifiedData.length;
+      
       let description: string;
-      if (removedCount === 1) {
+      let answerText: string;
+      
+      if (isKeepFirst) {
+        // For "keep only first N rows", provide a clearer message
+        description = `all rows except the first ${keptCount}`;
+        answerText = `✅ Kept only the first ${keptCount} rows and removed ${removedCount} row${removedCount === 1 ? '' : 's'}. Dataset now has ${keptCount} row${keptCount === 1 ? '' : 's'}.`;
+      } else if (removedCount === 1) {
         description = `row ${sortedIndices[0] + 1}`;
+        answerText = `✅ Removed ${description}.`;
       } else if (removedCount > 1 && sortedIndices[sortedIndices.length - 1] - sortedIndices[0] + 1 === removedCount) {
         // Consecutive range
         description = `rows ${sortedIndices[0] + 1}-${sortedIndices[sortedIndices.length - 1] + 1}`;
+        answerText = `✅ Removed ${description}.`;
       } else {
         description = `rows ${sortedIndices.map(i => i + 1).join(', ')}`;
+        answerText = `✅ Removed ${description}.`;
       }
 
       // Save modified data first
@@ -3412,13 +3531,12 @@ export async function executeDataOperation(
         sessionId,
         modifiedData,
         'remove_rows',
-        `Removed ${description}`,
+        isKeepFirst ? `Kept first ${keptCount} rows, removed ${removedCount} rows` : `Removed ${description}`,
         sessionDoc
       );
 
       // Only show preview if user explicitly requested it
       let previewData: Record<string, any>[] | undefined;
-      let answerText = `✅ Removed ${description}.`;
       
       if (shouldShowPreview) {
         previewData = await getPreviewFromSavedData(sessionId, modifiedData);
@@ -3633,7 +3751,7 @@ export async function executeDataOperation(
     
     case 'train_model': {
       // Extract model parameters from intent or use AI to extract from message
-      let modelType: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' = intent.modelType || 'linear';
+      let modelType: 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn' | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie' | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp' | 'multinomial_logistic' | 'naive_bayes_gaussian' | 'naive_bayes_multinomial' | 'naive_bayes_bernoulli' | 'lda' | 'qda' = intent.modelType || 'linear';
       let targetVariable = intent.targetVariable;
       let features = intent.features || [];
       

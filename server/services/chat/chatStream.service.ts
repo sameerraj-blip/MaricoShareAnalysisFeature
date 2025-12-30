@@ -12,6 +12,7 @@ import {
   getChatBySessionIdEfficient,
   ChatDocument 
 } from "../../models/chat.model.js";
+import { loadChartsFromBlob } from "../../lib/blobStorage.js";
 import { enrichCharts, validateAndEnrichResponse } from "./chatResponse.service.js";
 import { sendSSE, setSSEHeaders } from "../../utils/sse.helper.js";
 import { loadLatestData } from "../../utils/dataLoader.js";
@@ -66,7 +67,24 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
   try {
     // Get chat document FIRST (with full history) so processing uses complete context
     console.log('🔍 Fetching chat document for sessionId:', sessionId);
-    const chatDocument = await getChatBySessionIdForUser(sessionId, username);
+    let chatDocument: ChatDocument | null = null;
+    
+    try {
+      chatDocument = await getChatBySessionIdForUser(sessionId, username);
+    } catch (dbError: any) {
+      // Handle CosmosDB connection errors gracefully
+      const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
+      if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('ETIMEDOUT') || dbError.code === 'ECONNREFUSED') {
+        console.error('❌ CosmosDB connection error, attempting to continue with blob storage data...');
+        sendSSE(res, 'error', { 
+          message: 'Database connection issue. Please try again in a moment. If the problem persists, check your network connection.' 
+        });
+        res.end();
+        return;
+      }
+      // Re-throw non-connection errors
+      throw dbError;
+    }
 
     if (!chatDocument) {
       sendSSE(res, 'error', { message: 'Session not found. Please upload a file first.' });
@@ -230,22 +248,41 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
 
     // If targetTimestamp is provided, this is an edit operation
     // Truncate history AFTER processing (so processing had full context)
+    // Only do this if we're actually editing (message exists), not for new messages
     if (targetTimestamp) {
-      console.log('✏️ Editing message with targetTimestamp:', targetTimestamp);
-      try {
-        await updateMessageAndTruncate(sessionId, targetTimestamp, message);
-        console.log('✅ Message updated and messages truncated in database');
-      } catch (truncateError) {
-        console.error('⚠️ Failed to update message and truncate:', truncateError);
+      // Check if this message actually exists before trying to edit
+      const existingMessage = chatDocument.messages?.find(
+        (msg) => msg.timestamp === targetTimestamp && msg.role === 'user'
+      );
+      
+      if (existingMessage) {
+        console.log('✏️ Editing message with targetTimestamp:', targetTimestamp);
+        try {
+          await updateMessageAndTruncate(sessionId, targetTimestamp, message);
+          console.log('✅ Message updated and messages truncated in database');
+        } catch (truncateError) {
+          console.error('⚠️ Failed to update message and truncate:', truncateError);
+          // Continue - don't fail the entire request
+        }
+      } else {
+        // This is a new message, not an edit - ignore targetTimestamp
+        console.log(`ℹ️ targetTimestamp ${targetTimestamp} provided but message not found. Treating as new message.`);
       }
     }
 
     // Save messages only if client is still connected
     // Use targetTimestamp for the user message to match the frontend's timestamp
     // This prevents duplicate messages when the SSE polling picks up the saved messages
+    // IMPORTANT: Pass FULL charts with data to addMessagesBySessionId
+    // It will handle saving large charts to blob and stripping data from message charts
     try {
       const userEmail = username?.toLowerCase();
       const userMessageTimestamp = targetTimestamp || Date.now();
+      
+      // Pass FULL charts with data - addMessagesBySessionId will:
+      // 1. Save large charts to blob storage
+      // 2. Store charts in top-level session.charts
+      // 3. Strip data from message-level charts to prevent CosmosDB size issues
       await addMessagesBySessionId(sessionId, [
         {
           role: 'user',
@@ -256,7 +293,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
         {
           role: 'assistant',
           content: transformedResponse.answer,
-          charts: transformedResponse.charts,
+          charts: transformedResponse.charts || [], // Pass FULL charts with data
           insights: transformedResponse.insights,
           timestamp: Date.now(),
         },
@@ -306,13 +343,106 @@ export async function streamChatMessages(sessionId: string, username: string, re
   setSSEHeaders(res);
 
   try {
+    // Normalize username for consistent comparison
+    const normalizedUsername = username.trim().toLowerCase();
+    
     // Verify user has access to this session
-    const chatDocument = await getChatBySessionIdForUser(sessionId, username);
+    let chatDocument: ChatDocument | null = null;
+    try {
+      chatDocument = await getChatBySessionIdForUser(sessionId, normalizedUsername);
+    } catch (accessError: any) {
+      // Handle authorization errors
+      if (accessError?.statusCode === 403) {
+        console.warn(`⚠️ Unauthorized SSE access attempt: ${username} tried to access session ${sessionId}`);
+        sendSSE(res, 'error', { message: 'Unauthorized to access this session' });
+        res.end();
+        return;
+      }
+      
+      // Handle CosmosDB connection errors
+      const errorMessage = accessError instanceof Error ? accessError.message : String(accessError);
+      if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('ETIMEDOUT') || accessError.code === 'ECONNREFUSED') {
+        console.error('❌ CosmosDB connection error in streamChatMessages:', errorMessage.substring(0, 100));
+        sendSSE(res, 'error', { 
+          message: 'Database connection issue. Please try again in a moment.' 
+        });
+        res.end();
+        return;
+      }
+      
+      // Re-throw if it's not an authorization or connection error
+      throw accessError;
+    }
+    
     if (!chatDocument) {
-      sendSSE(res, 'error', { message: 'Session not found or unauthorized' });
+      sendSSE(res, 'error', { message: 'Session not found' });
       res.end();
       return;
     }
+
+    // Helper function to enrich messages with chart data
+    const enrichMessagesWithCharts = async (messages: any[], chartsWithData: any[]): Promise<any[]> => {
+      // Build lookup map: chart title+type -> full chart with data
+      const chartLookup = new Map<string, any>();
+      chartsWithData.forEach(chart => {
+        if (chart.title && chart.type) {
+          const key = `${chart.type}::${chart.title}`;
+          chartLookup.set(key, chart);
+        }
+      });
+
+      // Enrich message charts with data from top-level charts
+      return messages.map(msg => {
+        if (!msg.charts || msg.charts.length === 0) {
+          return msg;
+        }
+
+        const enrichedCharts = msg.charts.map((chart: any) => {
+          const key = `${chart.type}::${chart.title}`;
+          const fullChart = chartLookup.get(key);
+          
+          if (fullChart && fullChart.data) {
+            return {
+              ...chart,
+              data: fullChart.data,
+              trendLine: fullChart.trendLine,
+              xDomain: fullChart.xDomain,
+              yDomain: fullChart.yDomain,
+            };
+          }
+          
+          return chart;
+        });
+
+        return {
+          ...msg,
+          charts: enrichedCharts,
+        };
+      });
+    };
+
+    // Load charts from blob if needed
+    let chartsWithData = chatDocument.charts || [];
+    if (chatDocument.chartReferences && chatDocument.chartReferences.length > 0) {
+      try {
+        const chartsFromBlob = await loadChartsFromBlob(chatDocument.chartReferences);
+        if (chartsFromBlob.length > 0) {
+          chartsWithData = chartsFromBlob;
+        }
+      } catch (blobError) {
+        console.error('⚠️ Failed to load charts from blob in SSE:', blobError);
+      }
+    }
+
+    // Also include charts from CosmosDB that might have data
+    (chatDocument.charts || []).forEach(chart => {
+      if (chart.data && chart.title && chart.type) {
+        const key = `${chart.type}::${chart.title}`;
+        if (!chartsWithData.find(c => `${c.type}::${c.title}` === key)) {
+          chartsWithData.push(chart);
+        }
+      }
+    });
 
     let lastMessageCount = chatDocument.messages?.length || 0;
 
@@ -329,6 +459,19 @@ export async function streamChatMessages(sessionId: string, username: string, re
           return true; // Connection still valid, just no chat found
         }
 
+        // Reload charts if needed
+        let currentChartsWithData = currentChat.charts || [];
+        if (currentChat.chartReferences && currentChat.chartReferences.length > 0) {
+          try {
+            const chartsFromBlob = await loadChartsFromBlob(currentChat.chartReferences);
+            if (chartsFromBlob.length > 0) {
+              currentChartsWithData = chartsFromBlob;
+            }
+          } catch (blobError) {
+            // Continue with CosmosDB charts
+          }
+        }
+
         const currentMessageCount = currentChat.messages?.length || 0;
         
         // Only send update if message count changed
@@ -336,8 +479,11 @@ export async function streamChatMessages(sessionId: string, username: string, re
           const newMessages = currentChat.messages?.slice(lastMessageCount) || [];
           lastMessageCount = currentMessageCount;
           
+          // Enrich new messages with chart data
+          const enrichedMessages = await enrichMessagesWithCharts(newMessages, currentChartsWithData);
+          
           const sent = sendSSE(res, 'messages', {
-            messages: newMessages,
+            messages: enrichedMessages,
             totalCount: currentMessageCount,
           });
           
@@ -358,10 +504,16 @@ export async function streamChatMessages(sessionId: string, username: string, re
       }
     };
 
+    // Enrich initial messages with chart data
+    const enrichedInitialMessages = await enrichMessagesWithCharts(
+      chatDocument.messages || [],
+      chartsWithData
+    );
+
     // Send initial message count
     sendSSE(res, 'init', {
       messageCount: lastMessageCount,
-      messages: chatDocument.messages || [],
+      messages: enrichedInitialMessages,
     });
 
     // Set up polling to check for new messages every 2 seconds

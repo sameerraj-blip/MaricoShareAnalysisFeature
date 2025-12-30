@@ -28,7 +28,7 @@ export const analysisIntentSchema = z.object({
   }).optional(),
   customRequest: z.string().optional(),
   requiresClarification: z.boolean().optional(),
-  modelType: z.enum(['linear', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree', 'gradient_boosting', 'elasticnet', 'svm', 'knn']).optional(),
+  modelType: z.enum(['linear', 'log_log', 'logistic', 'ridge', 'lasso', 'random_forest', 'decision_tree', 'gradient_boosting', 'elasticnet', 'svm', 'knn', 'polynomial', 'bayesian', 'quantile', 'poisson', 'gamma', 'tweedie', 'extra_trees', 'xgboost', 'lightgbm', 'catboost', 'gaussian_process', 'mlp', 'multinomial_logistic', 'naive_bayes_gaussian', 'naive_bayes_multinomial', 'naive_bayes_bernoulli', 'lda', 'qda']).optional(),
 });
 
 export type AnalysisIntent = z.infer<typeof analysisIntentSchema> & {
@@ -39,7 +39,7 @@ export type AnalysisIntent = z.infer<typeof analysisIntentSchema> & {
   targetType?: string;
   limit?: number;
   // Extended fields for ML model requests
-  modelType?: 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn';
+  modelType?: 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn' | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie' | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp' | 'multinomial_logistic' | 'naive_bayes_gaussian' | 'naive_bayes_multinomial' | 'naive_bayes_bernoulli' | 'lda' | 'qda';
 };
 
 /**
@@ -138,7 +138,7 @@ CLASSIFICATION RULES:
      - "create it for all variables", "use all variables", "all variables", "all features", "for all", "no create it for all variables" → These mean "use all numeric columns as features for the model"
      - "yes", "ok", "sure", "do it", "proceed" (after model training question) → Continue with model training using all numeric columns as features
    * Patterns: "build a [model type] model", "train a [model type] model", "create a [model type] model", "build a model", "train a model", "test features", "try features", "improve the model"
-   * Model types: linear, logistic, ridge, lasso, random forest, decision tree, gradient boosting, elasticnet, svm, knn, polynomial, bayesian, xgboost, lightgbm, catboost, etc.
+   * Model types: linear, logistic, ridge, lasso, random forest, decision tree, gradient boosting, elasticnet, svm, knn, polynomial, bayesian, quantile, poisson, gamma, tweedie, xgboost, lightgbm, catboost, mlp, naive bayes, lda, qda, etc.
    * Set confidence to 0.9+ for these patterns (including advice-style questions about models and follow-up responses in modeling context)
 2. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
    * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
@@ -164,6 +164,7 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
 - For ML_MODEL intent type:
   * Extract modelType from phrases. Supported types:
     - "linear" - Linear Regression
+    - "log_log" - Log-Log Regression (log transformation of both target and features, also matches "log log", "log-log", "logarithmic")
     - "logistic" - Logistic Regression (classification)
     - "ridge" - Ridge Regression (L2 regularization)
     - "lasso" - Lasso Regression (L1 regularization)
@@ -173,11 +174,29 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
     - "elasticnet" - ElasticNet (L1+L2 regularization)
     - "svm" - Support Vector Machine (also matches "support vector")
     - "knn" - K-Nearest Neighbors (also matches "k-nearest", "nearest neighbor")
+    - "polynomial" - Polynomial Regression
+    - "bayesian" - Bayesian Ridge Regression
+    - "quantile" - Quantile Regression
+    - "poisson" - Poisson Regression (for count data)
+    - "gamma" - Gamma Regression (for positive continuous data)
+    - "tweedie" - Tweedie Regression
+    - "extra_trees" - Extra Trees
+    - "xgboost" - XGBoost
+    - "lightgbm" - LightGBM
+    - "catboost" - CatBoost
+    - "gaussian_process" - Gaussian Process
+    - "mlp" - Multi-Layer Perceptron (neural network)
+    - "multinomial_logistic" - Multinomial Logistic Regression
+    - "naive_bayes_gaussian" - Gaussian Naive Bayes
+    - "naive_bayes_multinomial" - Multinomial Naive Bayes
+    - "naive_bayes_bernoulli" - Bernoulli Naive Bayes
+    - "lda" - Linear Discriminant Analysis
+    - "qda" - Quadratic Discriminant Analysis
   * If no model type specified, default to "linear"
-  * Extract targetVariable: The variable to predict (from phrases like "X as target", "predicting X", "target variable X", "dependent variable X", "for X", "model for X")
+  * Extract targetVariable: The variable to predict (from phrases like "X as target", "predicting X", "target variable X", "dependent variable X", "for X", "model for X", "[MODEL_TYPE] for target variable X", "[MODEL_TYPE] Regression for target variable X")
   * CRITICAL: If current question is a confirmation ("yes", "yes can you the above", "yes do the above") and previous assistant message asked about using features, look BACK at the PREVIOUS user message to extract targetVariable and modelType
   * Example: Previous user: "Train a polynomial regression model (degree 2) for PA TOM" → Assistant: "Would you like to predict PA TOM using other numeric columns?" → Current user: "yes can you the above" → Extract targetVariable: "PA TOM", modelType: "polynomial" from the PREVIOUS user message
-  * Extract variables array: Independent variables/features (from phrases like "a, b, c as independent variables", "using X, Y, Z as features", "predictors: X, Y, Z", "with X", "with X, Y, Z")
+  * Extract variables array: Independent variables/features (from phrases like "a, b, c as independent variables", "using X, Y, Z as features", "predictors: X, Y, Z", "with X", "with X, Y, Z", "with the variable X", "with variable X")
   * IMPORTANT: Even if variables array is extracted, the handler will use ALL numeric columns as features when targetVariable is provided
   * IMPORTANT: If targetVariable is specified but variables array is empty, assume all other numeric columns should be used as features
   * Look for patterns:
@@ -198,6 +217,8 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
     - "correlation between [TARGET] and [OTHER]"
     - "train/build/create [MODEL_TYPE] model for [TARGET]" → extract TARGET
     - "[MODEL_TYPE] model for [TARGET]" → extract TARGET
+    - "[MODEL_TYPE] Regression for target variable [TARGET]" → extract TARGET
+    - "[MODEL_TYPE] for target variable [TARGET]" → extract TARGET
   * IMPORTANT: When user says "correlation of X with all the other variables", extract X as targetVariable (not "X with all the other variables")
   * IMPORTANT: When user says "train a model for X" or "build a model for X", extract X as targetVariable
 - Extract variables array: Any related entities/variables mentioned
@@ -223,7 +244,12 @@ EXTRACTION RULES (GENERAL-PURPOSE - NO DOMAIN ASSUMPTIONS):
 - Extract axisMapping if user specifies axis assignments:
   * x: Column for X-axis (time, date, category, etc.)
   * y: Column for primary Y-axis (left axis)
-  * y2: Column for secondary Y-axis (right axis) - extract from phrases like "add X on secondary Y axis", "X on secondary Y axis", "secondary Y axis: X", "add X to secondary axis"
+  * y2: Column for secondary Y-axis (right axis) - extract from phrases like:
+    - "add X on secondary Y axis", "X on secondary Y axis", "secondary Y axis: X", "add X to secondary axis"
+    - "A with B" pattern (e.g., "PA TOM with PAB nGRP Adstocked") → extract A as y, B as y2
+    - "A and B in one trend line" → extract A as y, B as y2
+    - "compare A with B" → extract A as y, B as y2
+    - "A vs B" → extract A as y, B as y2 (for line charts)
 - Set confidence: 0.9+ if clear intent, 0.7-0.9 if somewhat clear, <0.7 if ambiguous
 - Set requiresClarification: true if confidence < 0.5
 - IMPORTANT: For ml_model queries, if targetVariable is extracted (even if features/variables are not specified OR if some features are specified), ALWAYS set requiresClarification: false and confidence >= 0.8. The handler will automatically use all numeric columns as features, regardless of whether specific features are mentioned.
@@ -258,7 +284,7 @@ OUTPUT FORMAT (JSON only, no markdown):
   } | null,
   "customRequest": "original question" | null,
   "requiresClarification": true | false,
-  "modelType": "linear" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree" | "gradient_boosting" | "elasticnet" | "svm" | "knn" | null  // Only for ml_model type
+  "modelType": "linear" | "log_log" | "logistic" | "ridge" | "lasso" | "random_forest" | "decision_tree" | "gradient_boosting" | "elasticnet" | "svm" | "knn" | "polynomial" | "bayesian" | "quantile" | "poisson" | "gamma" | "tweedie" | "extra_trees" | "xgboost" | "lightgbm" | "catboost" | "gaussian_process" | "mlp" | "multinomial_logistic" | "naive_bayes_gaussian" | "naive_bayes_multinomial" | "naive_bayes_bernoulli" | "lda" | "qda" | null  // Only for ml_model type
 }`;
 
   let lastError: Error | null = null;

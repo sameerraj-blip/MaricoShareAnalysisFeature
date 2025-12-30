@@ -12,6 +12,7 @@ import {
   listSharedAnalysesForUser,
 } from "../models/sharedAnalysis.model.js";
 import type { ChatDocument } from "../models/chat.model.js";
+import { sharedInviteCache } from '../lib/cache.js';
 
 const getUserEmailFromRequest = (req: Request): string | undefined => {
   const headerEmail = req.headers["x-user-email"];
@@ -44,8 +45,9 @@ const toSessionSummary = (chatDocument: ChatDocument): AnalysisSessionSummary =>
 const sanitizeEmail = (value: string) => value.trim().toLowerCase();
 
 // SSE helper function (similar to chatController)
-function sendSSE(res: Response, event: string, data: any): boolean {
-  // Check if connection is still writable
+const ENABLE_SSE_LOGGING = process.env.ENABLE_SSE_LOGGING === 'true';
+
+export function sendSSE(res: Response, event: string, data: any): boolean {
   if (res.writableEnded || res.destroyed || !res.writable) {
     return false;
   }
@@ -53,9 +55,12 @@ function sendSSE(res: Response, event: string, data: any): boolean {
   try {
     const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     res.write(message);
-    // Force flush the response (if supported by the platform)
     if (typeof (res as any).flush === 'function') {
       (res as any).flush();
+    }
+    // Only log in development or when explicitly enabled
+    if (ENABLE_SSE_LOGGING || process.env.NODE_ENV === 'development') {
+      console.log(`📤 SSE sent: ${event}`, data);
     }
     return true;
   } catch (error: any) {
@@ -256,11 +261,25 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
       }
 
       try {
+        // Check cache first
+        const cached = sharedInviteCache.get(userEmail);
+        if (cached) {
+          const sent = sendSSE(res, 'update', {
+            pending: cached.pending,
+            accepted: cached.accepted,
+          });
+          return sent;
+        }
+
+        // Cache miss - fetch from database
         const invitations = await listSharedAnalysesForUser(userEmail);
         const responsePayload = {
           pending: invitations.filter((invite) => invite.status === "pending"),
           accepted: invitations.filter((invite) => invite.status === "accepted"),
         };
+
+        // Cache the result
+        sharedInviteCache.set(userEmail, responsePayload.pending, responsePayload.accepted);
 
         // Validate payload before sending
         sharedAnalysesResponseSchema.parse(responsePayload);
@@ -285,28 +304,65 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
     // Send initial data immediately
     await sendSharedAnalyses();
 
-    // Set up polling to check for new invites every 3 seconds
-    const checkInterval = setInterval(async () => {
-      // Check if connection is still open
-      if (res.writableEnded || res.destroyed || !res.writable) {
-        clearInterval(checkInterval);
-        return;
-      }
+    // Set up adaptive polling using recursive setTimeout
+    let pollInterval = 3000; // Start with 3 seconds
+    let consecutiveNoChanges = 0;
+    let timeoutId: NodeJS.Timeout | null = null;
+    let isActive = true;
 
-      const stillConnected = await sendSharedAnalyses();
-      if (!stillConnected) {
-        clearInterval(checkInterval);
-        try {
-          res.end();
-        } catch (e) {
-          // Ignore errors when ending already closed connection
+    const scheduleNextCheck = () => {
+      if (!isActive) return;
+      
+      timeoutId = setTimeout(async () => {
+        if (res.writableEnded || res.destroyed || !res.writable) {
+          isActive = false;
+          return;
         }
-      }
-    }, 3000); // Check every 3 seconds
+
+        const previousData = sharedInviteCache.get(userEmail);
+        const stillConnected = await sendSharedAnalyses();
+        
+        if (!stillConnected) {
+          isActive = false;
+          try {
+            res.end();
+          } catch (e) {
+            // Ignore
+          }
+          return;
+        }
+
+        // Adaptive polling: increase interval if no changes detected
+        const currentData = sharedInviteCache.get(userEmail);
+        if (previousData && currentData) {
+          const hasChanges = 
+            previousData.pending.length !== currentData.pending.length ||
+            previousData.accepted.length !== currentData.accepted.length;
+          
+          if (hasChanges) {
+            consecutiveNoChanges = 0;
+            pollInterval = 3000; // Reset to base interval
+          } else {
+            consecutiveNoChanges++;
+            // Gradually increase interval up to 10 seconds
+            pollInterval = Math.min(3000 + consecutiveNoChanges * 1000, 10000);
+          }
+        }
+
+        // Schedule next check with adaptive interval
+        scheduleNextCheck();
+      }, pollInterval);
+    };
+
+    // Start the polling loop
+    scheduleNextCheck();
 
     // Clean up on client disconnect
     req.on('close', () => {
-      clearInterval(checkInterval);
+      isActive = false;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       try {
         if (!res.writableEnded && !res.destroyed) {
           res.end();
@@ -322,7 +378,10 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
       if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
         console.error('SSE connection error:', error);
       }
-      clearInterval(checkInterval);
+      isActive = false;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       try {
         if (!res.writableEnded && !res.destroyed) {
           res.end();

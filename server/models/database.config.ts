@@ -14,6 +14,7 @@ const COSMOS_SHARED_ANALYSES_CONTAINER_ID = process.env.COSMOS_SHARED_ANALYSES_C
 const COSMOS_SHARED_DASHBOARDS_CONTAINER_ID = process.env.COSMOS_SHARED_DASHBOARDS_CONTAINER_ID || "shared-dashboards";
 
 // Initialize CosmosDB client
+// Note: Connection retries are handled at the application level via retryOnConnectionError
 const client = new CosmosClient({
   endpoint: COSMOS_ENDPOINT,
   key: COSMOS_KEY,
@@ -29,6 +30,7 @@ let initializationPromise: Promise<void> | null = null;
 
 /**
  * Helper function to safely create a container with fallback if throughput limit is reached
+ * Handles both provisioned and serverless Cosmos DB accounts
  */
 const createContainerSafely = async (
   database: Database,
@@ -37,7 +39,7 @@ const createContainerSafely = async (
   throughput: number = 400
 ): Promise<Container> => {
   try {
-    // Try to create with explicit throughput
+    // Try to create with explicit throughput (for provisioned accounts)
     const { container } = await database.containers.createIfNotExists({
       id: containerId,
       partitionKey,
@@ -46,6 +48,29 @@ const createContainerSafely = async (
     return container;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // If serverless account error, retry without throughput
+    if (errorMessage.includes("serverless") || errorMessage.includes("not supported for serverless")) {
+      console.log(`ℹ️ Serverless account detected for container ${containerId}, creating without throughput...`);
+      try {
+        const { container } = await database.containers.createIfNotExists({
+          id: containerId,
+          partitionKey,
+          // No throughput parameter for serverless accounts
+        });
+        return container;
+      } catch (retryError) {
+        // If container already exists, try to read it
+        try {
+          const { container } = database.container(containerId);
+          await container.read();
+          console.log(`✅ Using existing container: ${containerId}`);
+          return container;
+        } catch (readError) {
+          throw retryError;
+        }
+      }
+    }
     
     // If throughput limit error, try to read existing container
     if (errorMessage.includes("throughput limit") || errorMessage.includes("RU/s")) {
@@ -135,6 +160,12 @@ export const initializeCosmosDB = async (): Promise<void> => {
     } catch (error) {
       console.error("❌ Failed to initialize CosmosDB:", error);
       const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check if error is related to serverless accounts (should be handled by createContainerSafely, but just in case)
+      if (errorMessage.includes("serverless") || errorMessage.includes("not supported for serverless")) {
+        // This should have been handled by createContainerSafely, but if it reaches here, re-throw with context
+        throw new Error(`CosmosDB serverless account detected but initialization failed: ${errorMessage}`);
+      }
       
       // Check if error is related to throughput limits
       if (errorMessage.includes("throughput limit") || errorMessage.includes("RU/s")) {

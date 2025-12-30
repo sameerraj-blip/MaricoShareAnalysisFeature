@@ -5,6 +5,7 @@ import type { ChartSpec } from '../../../shared/schema.js';
 import { findMatchingColumn } from '../utils/columnMatcher.js';
 import { processChartData } from '../../chartGenerator.js';
 import { generateChartInsights } from '../../insightGenerator.js';
+import { calculateSmartDomainsForChart } from '../../axisScaling.js';
 
 /**
  * General Handler
@@ -103,6 +104,7 @@ export class GeneralHandler extends BaseHandler {
 
   /**
    * Handle trend over time requests by creating a line chart
+   * Supports dual-axis charts when y2 is specified or "with" pattern is detected
    */
   private async handleTrendOverTime(
     intent: AnalysisIntent,
@@ -112,8 +114,32 @@ export class GeneralHandler extends BaseHandler {
     const allColumns = context.summary.columns.map(c => c.name);
     const numericColumns = context.summary.numericColumns || [];
     
+    // Check if this is a dual-axis request (has y2 in axisMapping or "with" pattern in question)
+    const hasY2 = intent.axisMapping?.y2;
+    const hasWithPattern = /\s+with\s+/i.test(question);
+    
     // Extract target variable from question or intent
     let targetVariable = intent.targetVariable;
+    let y2Variable = intent.axisMapping?.y2;
+    
+    // If "with" pattern detected, try to extract both variables
+    if (hasWithPattern && !y2Variable) {
+      const withMatch = question.match(/([a-zA-Z0-9_\s]+?)\s+with\s+([a-zA-Z0-9_\s]+?)(?:\s+in\s+one\s+(?:trend\s+)?(?:line|chart)|$)/i);
+      if (withMatch && withMatch.length >= 3) {
+        const var1 = withMatch[1].trim();
+        const var2 = withMatch[2].trim();
+        
+        // Try to match both variables
+        const matchedVar1 = findMatchingColumn(var1, numericColumns) || findMatchingColumn(var1, allColumns);
+        const matchedVar2 = findMatchingColumn(var2, numericColumns) || findMatchingColumn(var2, allColumns);
+        
+        if (matchedVar1 && matchedVar2 && numericColumns.includes(matchedVar1) && numericColumns.includes(matchedVar2)) {
+          targetVariable = matchedVar1;
+          y2Variable = matchedVar2;
+          console.log(`✅ Detected dual-axis pattern: "${var1}" with "${var2}" → y=${matchedVar1}, y2=${matchedVar2}`);
+        }
+      }
+    }
     
     if (!targetVariable) {
       // Try to extract from question patterns like "trends in X", "X over time"
@@ -142,6 +168,16 @@ export class GeneralHandler extends BaseHandler {
       };
     }
     
+    // Match y2 variable if specified
+    let y2Column: string | null = null;
+    if (y2Variable) {
+      y2Column = findMatchingColumn(y2Variable, numericColumns) || findMatchingColumn(y2Variable, allColumns);
+      if (!y2Column || !numericColumns.includes(y2Column)) {
+        console.warn(`⚠️ Could not match y2 variable "${y2Variable}", creating single-series chart`);
+        y2Column = null;
+      }
+    }
+    
     // Find time/date column for X-axis
     const xColumn = intent.axisMapping?.x
       ? findMatchingColumn(intent.axisMapping.x, allColumns)
@@ -158,34 +194,67 @@ export class GeneralHandler extends BaseHandler {
       };
     }
     
-    console.log(`📈 Creating trend line chart: X=${xColumn}, Y=${yColumn}`);
-    
-    const chartSpec: ChartSpec = {
-      type: 'line',
-      title: `Trend of ${yColumn} Over Time`,
-      x: xColumn,
-      y: yColumn,
-      xLabel: xColumn,
-      yLabel: yColumn,
-      aggregate: 'none',
-    };
+    // Create chart spec (dual-axis if y2Column exists)
+    let chartSpec: ChartSpec;
+    if (y2Column) {
+      console.log(`📈 Creating dual-axis trend line chart: X=${xColumn}, Y=${yColumn}, Y2=${y2Column}`);
+      chartSpec = {
+        type: 'line',
+        title: `${yColumn} and ${y2Column} Trends Over Time`,
+        x: xColumn,
+        y: yColumn,
+        y2: y2Column,
+        xLabel: xColumn,
+        yLabel: yColumn,
+        y2Label: y2Column,
+        aggregate: 'none',
+      } as any;
+    } else {
+      console.log(`📈 Creating trend line chart: X=${xColumn}, Y=${yColumn}`);
+      chartSpec = {
+        type: 'line',
+        title: `Trend of ${yColumn} Over Time`,
+        x: xColumn,
+        y: yColumn,
+        xLabel: xColumn,
+        yLabel: yColumn,
+        aggregate: 'none',
+      };
+    }
     
     const chartData = processChartData(context.data, chartSpec);
     
     if (chartData.length === 0) {
       return {
-        answer: `No valid data points found for trend line. Please check that columns "${xColumn}" and "${yColumn}" contain valid data.`,
+        answer: `No valid data points found for trend line. Please check that columns "${xColumn}" and "${yColumn}"${y2Column ? ` and "${y2Column}"` : ''} contain valid data.`,
         requiresClarification: true,
       };
     }
     
+    // Calculate smart axis domains based on statistical measures
+    const smartDomains = calculateSmartDomainsForChart(
+      chartData,
+      xColumn,
+      yColumn,
+      y2Column || undefined,
+      {
+        yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+        y2Options: y2Column ? { useIQR: true, paddingPercent: 5, includeOutliers: true } : undefined,
+      }
+    );
+    
     const insights = await generateChartInsights(chartSpec, chartData, context.summary, context.chatInsights);
     
+    const answer = y2Column
+      ? `I've created a line chart with ${yColumn} on the left axis and ${y2Column} on the right axis, plotted over ${xColumn}.`
+      : `I've created a trend line showing ${yColumn} over time (${xColumn}).`;
+    
     return {
-      answer: `I've created a trend line showing ${yColumn} over time (${xColumn}).`,
+      answer,
       charts: [{
         ...chartSpec,
         data: chartData,
+        ...smartDomains, // Add smart domains (xDomain, yDomain, y2Domain)
         keyInsight: insights.keyInsight,
       }],
       insights: [],
@@ -346,6 +415,18 @@ Respond naturally and conversationally.`;
         };
       }
       
+      // Calculate smart axis domains
+      const smartDomains = calculateSmartDomainsForChart(
+        chartData,
+        updatedChart.x,
+        updatedChart.y,
+        y2Column,
+        {
+          yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+          y2Options: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+        }
+      );
+      
       const insights = await generateChartInsights(updatedChart, chartData, context.summary, context.chatInsights);
       
       return {
@@ -353,6 +434,7 @@ Respond naturally and conversationally.`;
         charts: [{
           ...updatedChart,
           data: chartData,
+          ...smartDomains, // Add smart domains
           keyInsight: insights.keyInsight,
         }],
       };
@@ -388,12 +470,25 @@ Respond naturally and conversationally.`;
       
       const chartData = processChartData(context.data, dualAxisSpec);
       if (chartData.length > 0) {
+        // Calculate smart axis domains
+        const smartDomains = calculateSmartDomainsForChart(
+          chartData,
+          dualAxisSpec.x,
+          dualAxisSpec.y,
+          y2Column,
+          {
+            yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+            y2Options: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+          }
+        );
+        
         const insights = await generateChartInsights(dualAxisSpec, chartData, context.summary, context.chatInsights);
         return {
           answer: `I've created a line chart with ${primaryY} on the left axis and ${y2Column} on the right axis.`,
           charts: [{
             ...dualAxisSpec,
             data: chartData,
+            ...smartDomains, // Add smart domains
             keyInsight: insights.keyInsight,
           }],
         };

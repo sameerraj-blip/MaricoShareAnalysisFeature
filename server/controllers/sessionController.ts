@@ -9,6 +9,7 @@ import {
   updateSessionFileName,
   ChatDocument 
 } from "../models/chat.model.js";
+import { loadChartsFromBlob } from "../lib/blobStorage.js";
 
 // Get all sessions
 export const getAllSessionsEndpoint = async (req: Request, res: Response) => {
@@ -200,17 +201,110 @@ export const getSessionDetailsEndpoint = async (req: Request, res: Response) => 
       return res.status(401).json({ error: 'Missing authenticated user email' });
     }
 
-    // Get session directly from CosmosDB by session ID with access check
-    const session = await getChatBySessionIdForUser(sessionId, requesterEmail as string);
-    
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
+    // Normalize email for consistent comparison
+    const normalizedRequesterEmail = (requesterEmail as string).trim().toLowerCase();
 
-    res.json({
-      session,
-      message: `Retrieved session details for ${sessionId}`
-    });
+    // Get session directly from CosmosDB by session ID with access check
+    try {
+      const session = await getChatBySessionIdForUser(sessionId, normalizedRequesterEmail);
+      
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      // Load charts from blob storage if they're stored there
+      let chartsWithData = session.charts || [];
+      if (session.chartReferences && session.chartReferences.length > 0) {
+        try {
+          const chartsFromBlob = await loadChartsFromBlob(session.chartReferences);
+          // Merge charts from blob with charts in CosmosDB (charts in CosmosDB may have metadata only)
+          // Use charts from blob if available, otherwise use charts from CosmosDB
+          if (chartsFromBlob.length > 0) {
+            chartsWithData = chartsFromBlob;
+            console.log(`✅ Loaded ${chartsFromBlob.length} charts from blob storage`);
+          }
+        } catch (blobError) {
+          console.error('⚠️ Failed to load charts from blob, using charts from CosmosDB:', blobError);
+          // Continue with charts from CosmosDB (may not have data arrays)
+        }
+      }
+
+      // Build a lookup map: chart title+type -> full chart with data
+      // This allows us to enrich message charts with data from top-level charts
+      const chartLookup = new Map<string, any>();
+      chartsWithData.forEach(chart => {
+        if (chart.title && chart.type) {
+          const key = `${chart.type}::${chart.title}`;
+          chartLookup.set(key, chart);
+        }
+      });
+
+      // Also check charts in CosmosDB that might have data (for small charts not in blob)
+      (session.charts || []).forEach(chart => {
+        if (chart.title && chart.type && chart.data) {
+          const key = `${chart.type}::${chart.title}`;
+          if (!chartLookup.has(key)) {
+            chartLookup.set(key, chart);
+          }
+        }
+      });
+
+      // Enrich message charts with data from top-level charts
+      const enrichedMessages = (session.messages || []).map(msg => {
+        if (!msg.charts || msg.charts.length === 0) {
+          return msg;
+        }
+
+        const enrichedCharts = msg.charts.map(chart => {
+          const key = `${chart.type}::${chart.title}`;
+          const fullChart = chartLookup.get(key);
+          
+          if (fullChart && fullChart.data) {
+            // Merge metadata from message chart with data from top-level chart
+            return {
+              ...chart,
+              data: fullChart.data,
+              trendLine: fullChart.trendLine,
+              xDomain: fullChart.xDomain,
+              yDomain: fullChart.yDomain,
+            };
+          }
+          
+          // If no match found, return chart as-is (might have data already or be a small chart)
+          return chart;
+        });
+
+        return {
+          ...msg,
+          charts: enrichedCharts,
+        };
+      });
+
+      console.log(`✅ Enriched ${enrichedMessages.length} messages with chart data`);
+
+      // Return session with charts loaded from blob and messages enriched with chart data
+      const sessionWithCharts = {
+        ...session,
+        charts: chartsWithData,
+        messages: enrichedMessages,
+      };
+
+      res.json({
+        session: sessionWithCharts,
+        message: `Retrieved session details for ${sessionId}`
+      });
+    } catch (accessError: any) {
+      // Handle authorization errors separately
+      if (accessError?.statusCode === 403) {
+        console.warn(`⚠️ Unauthorized access attempt: ${requesterEmail} tried to access session ${sessionId}`);
+        return res.status(403).json({ 
+          error: 'Unauthorized to access this session',
+          message: 'You do not have permission to access this session'
+        });
+      }
+      // Re-throw if it's not an authorization error
+      throw accessError;
+    }
   } catch (error) {
     console.error('Get session details error:', error);
     const statusCode = (error as any)?.statusCode || 500;

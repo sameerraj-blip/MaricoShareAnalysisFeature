@@ -14,8 +14,8 @@ export function FileUpload({ onFileSelect, isUploading, autoOpenTrigger = 0 }: F
   const onDrop = useCallback((acceptedFiles: File[]) => {
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
-      if (file.size > 10 * 1024 * 1024) {
-        alert('File size must be less than 10MB');
+      if (file.size > 500 * 1024 * 1024) {
+        alert('File size must be less than 500MB');
         return;
       }
       onFileSelect(file);
@@ -118,7 +118,7 @@ export function FileUpload({ onFileSelect, isUploading, autoOpenTrigger = 0 }: F
                   <FileSpreadsheet className="w-3 h-3" />
                   <span>Supports CSV, XLS, XLSX</span>
                   <span>•</span>
-                  <span>Max 10MB</span>
+                  <span>Max 500MB</span>
                 </div>
               </>
             )}

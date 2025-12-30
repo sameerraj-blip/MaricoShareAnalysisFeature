@@ -6,6 +6,8 @@ import { DataSummary, Message, ChartSpec, Insight, ThinkingStep } from '../../sh
 import { createErrorResponse, getFallbackSuggestions } from './utils/errorRecovery.js';
 import { askClarifyingQuestion } from './utils/clarification.js';
 import { DataOpsHandler } from './handlers/dataOpsHandler.js';
+import { extractRequiredColumns, extractColumnsFromHistory } from './utils/columnExtractor.js';
+import queryCache from '../cache.js';
 
 export type ThinkingStepCallback = (step: ThinkingStep) => void;
 
@@ -223,6 +225,45 @@ export class AgentOrchestrator {
       console.log(`🎯 Intent: ${intent.type} (confidence: ${intent.confidence.toFixed(2)})`);
       this.emitThinkingStep(onThinkingStep, "Figuring out the best way to answer", "completed");
 
+      // Step 2.5: Extract required columns for optimized data loading
+      // Parse query to get columns from filters, aggregations, etc.
+      let parsedQuery: any = null;
+      try {
+        const { parseUserQuery } = await import('../queryParser.js');
+        parsedQuery = await parseUserQuery(enrichedQuestion, summary, chatHistory);
+      } catch (error) {
+        console.warn('⚠️ Query parsing failed, continuing without structured filters:', error);
+      }
+      
+      // Extract columns from history (previous charts)
+      const historyColumns = extractColumnsFromHistory(chatHistory, summary);
+      
+      // Extract required columns
+      const requiredColumns = extractRequiredColumns(
+        enrichedQuestion,
+        intent,
+        parsedQuery,
+        null, // Chart specs will be extracted from history if needed
+        summary
+      );
+      
+      // Merge with history columns
+      const allRequiredColumns = Array.from(new Set([...requiredColumns, ...historyColumns]));
+      console.log(`📊 Extracted ${allRequiredColumns.length} required columns: ${allRequiredColumns.slice(0, 5).join(', ')}${allRequiredColumns.length > 5 ? '...' : ''}`);
+      
+      // Step 2.6: Check cache before processing
+      if (mode !== 'dataOps') {
+        const cachedResult = queryCache.get<{ answer: string; charts?: ChartSpec[]; insights?: Insight[]; table?: any; operationResult?: any }>(
+          sessionId,
+          enrichedQuestion,
+          allRequiredColumns
+        );
+        if (cachedResult) {
+          console.log(`✅ Returning cached result for query`);
+          return cachedResult;
+        }
+      }
+
       // Step 3: Check if clarification needed
       // For correlation and ml_model queries, try to proceed even with low confidence if we can extract target from question
       if (intent.type === 'conversational') {
@@ -358,13 +399,20 @@ export class AgentOrchestrator {
         
         // Return successful response
         console.log(`✅ Handler returned answer (${response.answer.length} chars)`);
-        return {
+        const result = {
           answer: response.answer,
           charts: response.charts,
           insights: response.insights,
           table: response.table,
           operationResult: response.operationResult,
         };
+        
+        // Cache the result (skip for dataOps as data may change)
+        if (mode !== 'dataOps' && mode !== 'modeling') {
+          queryCache.set(sessionId, enrichedQuestion, allRequiredColumns, result);
+        }
+        
+        return result;
       } catch (handlerError) {
         console.error(`❌ Handler execution failed:`, handlerError);
         const errorMsg = handlerError instanceof Error ? handlerError.message : String(handlerError);

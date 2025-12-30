@@ -181,9 +181,12 @@ export const useHomeMutations = ({
       }
       
       // Send full chat history for context (last 15 messages to maintain conversation flow)
+      // Truncate long messages to reduce token usage
       const chatHistory = currentMessages.slice(-15).map(msg => ({
         role: msg.role,
-        content: msg.content,
+        content: msg.content.length > 500 
+          ? msg.content.substring(0, 500) + '...' 
+          : msg.content,
       }));
       
       console.log('📤 Request payload:', {

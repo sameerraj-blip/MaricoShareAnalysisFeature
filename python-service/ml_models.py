@@ -290,6 +290,131 @@ def train_linear_regression(
         raise ValueError(f"Error training linear regression: {str(e)}")
 
 
+def train_log_log_regression(
+    data: List[Dict[str, Any]],
+    target_variable: str,
+    features: List[str],
+    test_size: float = 0.2,
+    random_state: int = 42,
+    offset: float = 1.0
+) -> Dict[str, Any]:
+    """
+    Train a log-log regression model.
+    
+    A log-log model applies log transformation to both the target variable
+    and all feature variables before training a linear regression. This is useful
+    for modeling multiplicative relationships and elasticity analysis.
+    
+    Args:
+        data: List of dictionaries containing the data
+        target_variable: Name of the target variable
+        features: List of feature variable names
+        test_size: Proportion of data to use for testing
+        random_state: Random seed for reproducibility
+        offset: Offset to add before log transformation (to handle zeros/negatives)
+    
+    Returns:
+        Dictionary containing model results, metrics, and coefficients
+    """
+    try:
+        X, y = _prepare_data(data, target_variable, features)
+        
+        # Check for non-positive values that would cause issues with log transformation
+        # For target variable
+        if (y <= 0).any():
+            negative_or_zero_count = (y <= 0).sum()
+            raise ValueError(
+                f"Log-log model requires all target values to be positive. "
+                f"Found {negative_or_zero_count} non-positive values in '{target_variable}'. "
+                f"Consider using an offset or filtering out non-positive values."
+            )
+        
+        # For feature variables
+        for feature in features:
+            if (X[feature] <= 0).any():
+                negative_or_zero_count = (X[feature] <= 0).sum()
+                raise ValueError(
+                    f"Log-log model requires all feature values to be positive. "
+                    f"Found {negative_or_zero_count} non-positive values in feature '{feature}'. "
+                    f"Consider using an offset or filtering out non-positive values."
+                )
+        
+        # Apply log transformation to target
+        y_log = np.log(y)
+        
+        # Apply log transformation to features
+        X_log = X.copy()
+        for feature in features:
+            X_log[feature] = np.log(X_log[feature])
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_log, y_log, test_size=test_size, random_state=random_state
+        )
+        
+        # Train model on log-transformed data
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+        
+        # Predictions (in log space)
+        y_train_pred_log = model.predict(X_train)
+        y_test_pred_log = model.predict(X_test)
+        
+        # Convert predictions back to original scale (exponential)
+        y_train_pred = np.exp(y_train_pred_log)
+        y_test_pred = np.exp(y_test_pred_log)
+        
+        # Convert actual values back to original scale for metrics
+        y_train_actual = np.exp(y_train.values)
+        y_test_actual = np.exp(y_test.values)
+        
+        # Metrics (calculated in original scale)
+        train_metrics = _calculate_regression_metrics(y_train_actual, y_train_pred)
+        test_metrics = _calculate_regression_metrics(y_test_actual, y_test_pred)
+        
+        # Cross-validation (in log space, then convert metrics)
+        cv_scores = cross_val_score(model, X_log, y_log, cv=5, scoring='r2')
+        
+        # Coefficients (in log-log space)
+        # Interpretation: a 1% change in feature X leads to a (coefficient)% change in target Y
+        coefficients = {
+            "intercept": float(model.intercept_),
+            "features": {
+                feature: float(coef) for feature, coef in zip(features, model.coef_)
+            },
+            "interpretation": "Coefficients represent elasticities: a 1% change in a feature leads to a (coefficient)% change in the target variable"
+        }
+        
+        # Predictions on full dataset (in original scale)
+        y_pred_full_log = model.predict(X_log)
+        y_pred_full = np.exp(y_pred_full_log)
+        
+        return {
+            "model_type": "log_log_regression",
+            "task_type": "regression",
+            "target_variable": target_variable,
+            "features": features,
+            "coefficients": coefficients,
+            "metrics": {
+                "train": train_metrics,
+                "test": test_metrics,
+                "cross_validation": {
+                    "mean_r2": float(cv_scores.mean()),
+                    "std_r2": float(cv_scores.std())
+                }
+            },
+            "predictions": y_pred_full.tolist(),
+            "feature_importance": None,  # Linear regression doesn't have feature importance
+            "n_samples": len(X),
+            "n_train": len(X_train),
+            "n_test": len(X_test),
+            "transformation_applied": "log-log transformation applied to both target and features",
+            "note": "Model coefficients represent elasticities. A coefficient of 0.5 means a 1% increase in the feature leads to a 0.5% increase in the target."
+        }
+    except Exception as e:
+        raise ValueError(f"Error training log-log regression: {str(e)}")
+
+
 def train_logistic_regression(
     data: List[Dict[str, Any]],
     target_variable: str,

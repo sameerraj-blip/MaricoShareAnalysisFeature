@@ -44,11 +44,17 @@ export async function parseFile(buffer: Buffer, filename: string): Promise<Recor
 
 function parseCsv(buffer: Buffer): Record<string, any>[] {
   const content = buffer.toString('utf-8');
+  
+  // For very large files, use streaming parser if available
+  // For now, we use sync parser but optimize memory usage
   const records = parse(content, {
     columns: true,
     skip_empty_lines: true,
     cast: true,
     cast_date: true,
+    // Optimize memory for large files
+    relax_column_count: true,
+    relax_quotes: true,
   });
   
   // Normalize column names: trim whitespace from all column names
@@ -56,45 +62,61 @@ function parseCsv(buffer: Buffer): Record<string, any>[] {
   
   // Post-process: Convert empty values to null and string numbers to actual numbers
   // This handles cases where CSV parser didn't convert formatted numbers (with %, commas, etc.)
-  return normalized.map(row => {
-    const processedRow: Record<string, any> = {};
-    for (const [key, value] of Object.entries(row)) {
-      // Convert empty strings and whitespace-only strings to null
-      if (value === null || value === undefined) {
-        processedRow[key] = null;
-        continue;
-      }
-      
-      if (typeof value === 'string') {
-        const trimmed = value.trim();
-        // Convert empty strings or whitespace-only strings to null
-        if (trimmed === '' || trimmed.length === 0) {
+  // Process in batches for very large datasets to avoid memory spikes
+  const BATCH_SIZE = 10000;
+  const result: Record<string, any>[] = [];
+  
+  for (let i = 0; i < normalized.length; i += BATCH_SIZE) {
+    const batch = normalized.slice(i, i + BATCH_SIZE);
+    const processedBatch = batch.map(row => {
+      const processedRow: Record<string, any> = {};
+      for (const [key, value] of Object.entries(row)) {
+        // Convert empty strings and whitespace-only strings to null
+        if (value === null || value === undefined) {
           processedRow[key] = null;
           continue;
         }
         
-        // Try to convert string numbers
-        const cleaned = trimmed.replace(/[%,$€£¥₹\s]/g, '').trim();
-        const num = Number(cleaned);
-        // Only convert if it's a valid number and the cleaned string is not empty
-        if (cleaned !== '' && !isNaN(num) && isFinite(num)) {
-          processedRow[key] = num;
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          // Convert empty strings or whitespace-only strings to null
+          if (trimmed === '' || trimmed.length === 0) {
+            processedRow[key] = null;
+            continue;
+          }
+          
+          // Try to convert string numbers
+          const cleaned = trimmed.replace(/[%,$€£¥₹\s]/g, '').trim();
+          const num = Number(cleaned);
+          // Only convert if it's a valid number and the cleaned string is not empty
+          if (cleaned !== '' && !isNaN(num) && isFinite(num)) {
+            processedRow[key] = num;
+          } else {
+            processedRow[key] = trimmed; // Keep as string if not numeric
+          }
+        } else if (typeof value === 'number') {
+          // If already a number, keep it
+          if (!isNaN(value) && isFinite(value)) {
+            processedRow[key] = value;
+          } else {
+            processedRow[key] = null; // Convert NaN/Infinity to null
+          }
         } else {
-          processedRow[key] = trimmed; // Keep as string if not numeric
-        }
-      } else if (typeof value === 'number') {
-        // If already a number, keep it
-        if (!isNaN(value) && isFinite(value)) {
           processedRow[key] = value;
-        } else {
-          processedRow[key] = null; // Convert NaN/Infinity to null
         }
-      } else {
-        processedRow[key] = value;
       }
+      return processedRow;
+    });
+    
+    result.push(...processedBatch);
+    
+    // Log progress for very large files
+    if (normalized.length > 50000 && (i + BATCH_SIZE) % 50000 === 0) {
+      console.log(`  Processed ${Math.min(i + BATCH_SIZE, normalized.length)} / ${normalized.length} rows...`);
     }
-    return processedRow;
-  });
+  }
+  
+  return result;
 }
 
 function parseExcel(buffer: Buffer): Record<string, any>[] {

@@ -1,4 +1,5 @@
 import { ChartSpec, Insight, DataSummary } from '../shared/schema.js';
+import { calculateSmartDomainsForChart } from './axisScaling.js';
 import { openai, MODEL } from './openai.js';
 import { generateChartInsights } from './insightGenerator.js';
 
@@ -110,20 +111,63 @@ export async function analyzeCorrelations(
   // IMPORTANT: For correlation/impact questions, target variable ALWAYS goes on Y-axis
   // X-axis = factor variable (what we can change), Y-axis = target variable (what we want to improve)
   const scatterCharts: ChartSpec[] = topCorrelations.slice(0, 3).map((corr, idx) => {
-    const scatterData = data
-      .map((row) => ({
-        [corr.variable]: toNumber(row[corr.variable]),
-        [targetVariable]: toNumber(row[targetVariable]),
-      }))
-      .filter((row) => !isNaN(row[corr.variable]) && !isNaN(row[targetVariable]))
-      .slice(0, 1000);
+    // Helper function to convert Date objects to strings for schema validation
+    const convertValueForSchema = (value: any): string | number | null => {
+      if (value === null || value === undefined) return null;
+      if (value instanceof Date) return value.toISOString();
+      if (typeof value === 'number') return isNaN(value) || !isFinite(value) ? null : value;
+      if (typeof value === 'string') return value;
+      return String(value);
+    };
+
+    let scatterData = data
+      .map((row) => {
+        const factorValue = toNumber(row[corr.variable]);
+        const targetValue = toNumber(row[targetVariable]);
+        const mappedRow: Record<string, any> = {
+          [corr.variable]: isNaN(factorValue) ? null : factorValue,
+          [targetVariable]: isNaN(targetValue) ? null : targetValue,
+        };
+        // Convert any Date objects in other columns to strings (in case they're included)
+        for (const [key, value] of Object.entries(row)) {
+          if (key !== corr.variable && key !== targetVariable && value instanceof Date) {
+            mappedRow[key] = convertValueForSchema(value);
+          }
+        }
+        return mappedRow;
+      })
+      .filter((row) => !isNaN(row[corr.variable]) && !isNaN(row[targetVariable]));
+    
+    // Apply smart downsampling for large datasets (max 2000 points)
+    const MAX_POINTS_CORRELATION = 2000;
+    if (scatterData.length > MAX_POINTS_CORRELATION) {
+      // Sort by x values for better sampling
+      scatterData = scatterData.sort((a, b) => {
+        const aVal = a[corr.variable];
+        const bVal = b[corr.variable];
+        return aVal - bVal;
+      });
+      
+      // Use stratified sampling: divide into buckets and sample evenly
+      const bucketSize = Math.ceil(scatterData.length / MAX_POINTS_CORRELATION);
+      const sampled: typeof scatterData = [];
+      
+      for (let i = 0; i < scatterData.length; i += bucketSize) {
+        const bucket = scatterData.slice(i, Math.min(i + bucketSize, scatterData.length));
+        const index = Math.floor(bucket.length / 2);
+        sampled.push(bucket[index]);
+      }
+      
+      scatterData = sampled.slice(0, MAX_POINTS_CORRELATION);
+      console.log(`   Correlation scatter chart ${idx}: Downsampled to ${scatterData.length} points`);
+    }
     
     // For correlation analysis: X-axis = factor variable, Y-axis = target variable
     // This ensures recommendations are about "how to change X to improve Y"
     const xAxis = corr.variable;  // Factor we can change
     const yAxis = targetVariable; // Target we want to improve
     
-    // Calculate smart axis domains with padding (only if we have valid data)
+    // Calculate smart axis domains based on statistical measures (mean, median, mode, IQR)
     let xDomain: [number, number] | undefined;
     let yDomain: [number, number] | undefined;
     
@@ -131,26 +175,55 @@ export async function analyzeCorrelations(
     let trendLine: Array<Record<string, number>> | undefined;
     
     if (scatterData.length > 0) {
+      // Extract x and y values first (needed for both domain calculation and regression)
       const xValues = scatterData.map(row => row[xAxis]);
       const yValues = scatterData.map(row => row[yAxis]);
       
-      const xMin = Math.min(...xValues);
-      const xMax = Math.max(...xValues);
-      const yMin = Math.min(...yValues);
-      const yMax = Math.max(...yValues);
-      
-      // Add 10% padding to the range (or 1 if range is 0)
-      const xRange = xMax - xMin;
-      const yRange = yMax - yMin;
-      const xPadding = xRange > 0 ? xRange * 0.1 : 1;
-      const yPadding = yRange > 0 ? yRange * 0.1 : 1;
-      
-      // Only set domains if values are finite
-      if (isFinite(xMin) && isFinite(xMax)) {
-        xDomain = [xMin - xPadding, xMax + xPadding];
+      // Calculate min/max values (needed for fallback domain and trend line)
+      // Use loops to avoid stack overflow on large arrays
+      let xMin = xValues[0];
+      let xMax = xValues[0];
+      for (let i = 1; i < xValues.length; i++) {
+        if (xValues[i] < xMin) xMin = xValues[i];
+        if (xValues[i] > xMax) xMax = xValues[i];
       }
-      if (isFinite(yMin) && isFinite(yMax)) {
-        yDomain = [yMin - yPadding, yMax + yPadding];
+      let yMin = yValues[0];
+      let yMax = yValues[0];
+      for (let i = 1; i < yValues.length; i++) {
+        if (yValues[i] < yMin) yMin = yValues[i];
+        if (yValues[i] > yMax) yMax = yValues[i];
+      }
+      
+      // Use smart domain calculation based on statistical measures
+      const smartDomains = calculateSmartDomainsForChart(
+        scatterData,
+        xAxis,
+        yAxis,
+        undefined,
+        {
+          xOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+          yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+        }
+      );
+      
+      xDomain = smartDomains.xDomain;
+      yDomain = smartDomains.yDomain;
+      
+      // Fallback to simple min/max if smart domains failed
+      if (!xDomain || !yDomain) {
+        // Add 10% padding to the range (or 1 if range is 0)
+        const xRange = xMax - xMin;
+        const yRange = yMax - yMin;
+        const xPadding = xRange > 0 ? xRange * 0.1 : 1;
+        const yPadding = yRange > 0 ? yRange * 0.1 : 1;
+        
+        // Only set domains if values are finite
+        if (isFinite(xMin) && isFinite(xMax)) {
+          xDomain = [xMin - xPadding, xMax + xPadding];
+        }
+        if (isFinite(yMin) && isFinite(yMax)) {
+          yDomain = [yMin - yPadding, yMax + yPadding];
+        }
       }
       
       // Calculate linear regression for trend line
@@ -361,16 +434,30 @@ async function generateCorrelationInsights(
       
       if (factorValues.length > 0 && targetValues.length > 0) {
         const factorAvg = factorValues.reduce((a, b) => a + b, 0) / factorValues.length;
-        const factorMin = Math.min(...factorValues);
-        const factorMax = Math.max(...factorValues);
-        const factorP25 = factorValues.sort((a, b) => a - b)[Math.floor(factorValues.length * 0.25)];
-        const factorP75 = factorValues.sort((a, b) => a - b)[Math.floor(factorValues.length * 0.75)];
+        // Calculate min/max without spread operator to avoid stack overflow
+        let factorMin = factorValues[0];
+        let factorMax = factorValues[0];
+        for (let i = 1; i < factorValues.length; i++) {
+          if (factorValues[i] < factorMin) factorMin = factorValues[i];
+          if (factorValues[i] > factorMax) factorMax = factorValues[i];
+        }
+        // Sort once and reuse for percentiles
+        const sortedFactorValues = [...factorValues].sort((a, b) => a - b);
+        const factorP25 = sortedFactorValues[Math.floor(sortedFactorValues.length * 0.25)];
+        const factorP75 = sortedFactorValues[Math.floor(sortedFactorValues.length * 0.75)];
         
         const targetAvg = targetValues.reduce((a, b) => a + b, 0) / targetValues.length;
-        const targetMin = Math.min(...targetValues);
-        const targetMax = Math.max(...targetValues);
-        const targetP75 = targetValues.sort((a, b) => a - b)[Math.floor(targetValues.length * 0.75)];
-        const targetP90 = targetValues.sort((a, b) => a - b)[Math.floor(targetValues.length * 0.9)];
+        // Calculate min/max without spread operator to avoid stack overflow
+        let targetMin = targetValues[0];
+        let targetMax = targetValues[0];
+        for (let i = 1; i < targetValues.length; i++) {
+          if (targetValues[i] < targetMin) targetMin = targetValues[i];
+          if (targetValues[i] > targetMax) targetMax = targetValues[i];
+        }
+        // Sort once and reuse for percentiles
+        const sortedTargetValues = [...targetValues].sort((a, b) => a - b);
+        const targetP75 = sortedTargetValues[Math.floor(sortedTargetValues.length * 0.75)];
+        const targetP90 = sortedTargetValues[Math.floor(sortedTargetValues.length * 0.9)];
         
         // Find factor values for top target performers
         const pairs = data
@@ -385,8 +472,22 @@ async function generateCorrelationInsights(
           .slice(0, Math.min(10, Math.floor(pairs.length * 0.2)));
         
         const optimalFactorRange = topTargetPairs.length > 0 ? {
-          min: Math.min(...topTargetPairs.map(p => p.factor)),
-          max: Math.max(...topTargetPairs.map(p => p.factor)),
+          min: (() => {
+            const factors = topTargetPairs.map(p => p.factor);
+            let min = factors[0];
+            for (let i = 1; i < factors.length; i++) {
+              if (factors[i] < min) min = factors[i];
+            }
+            return min;
+          })(),
+          max: (() => {
+            const factors = topTargetPairs.map(p => p.factor);
+            let max = factors[0];
+            for (let i = 1; i < factors.length; i++) {
+              if (factors[i] > max) max = factors[i];
+            }
+            return max;
+          })(),
           avg: topTargetPairs.reduce((sum, p) => sum + p.factor, 0) / topTargetPairs.length
         } : null;
         

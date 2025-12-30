@@ -27,44 +27,37 @@ function Router() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentFileName, setCurrentFileName] = useState<string | null>(null);
 
-  // Extract mode from URL path
-  const getModeFromPath = (path: string): ModeType => {
-    if (path.startsWith('/data-ops')) return 'dataOps';
-    if (path.startsWith('/modeling')) return 'modeling';
-    return 'analysis'; // default
-  };
-
   // Extract page type from location
   const getCurrentPage = (): PageType => {
     if (location.startsWith('/dashboard')) return 'dashboard';
-    if (location === '/analysis/history' || location.startsWith('/analysis/history')) return 'analysis';
-    // For /analysis, /data-ops, /modeling - these are chat interfaces, so return 'home'
+    if (location === '/history' || location.startsWith('/history')) return 'analysis';
+    // For /analysis and any chat interface routes - return 'home'
     return 'home';
   };
 
   const handleNavigate = (page: PageType) => {
     if (page === 'home') {
-      // Navigate to chat interface (default to analysis mode)
+      // Navigate to chat interface (always /analysis)
       setLocation('/analysis');
     } else if (page === 'dashboard') {
       setLocation('/dashboard');
     } else if (page === 'analysis') {
       // Navigate to analysis history page
-      setLocation('/analysis/history');
+      setLocation('/history');
     }
   };
 
   const handleNewChat = () => {
-    const currentMode = getModeFromPath(location);
-    setLocation(`/${currentMode === 'dataOps' ? 'data-ops' : currentMode === 'modeling' ? 'modeling' : 'analysis'}`);
+    // Always navigate to /analysis regardless of mode
+    setLocation('/analysis');
     setLoadedSessionData(null);
     setCurrentSessionId(null);
     setCurrentFileName(null);
   };
 
   const handleUploadNew = () => {
-    const currentMode = getModeFromPath(location);
-    setLocation(`/${currentMode === 'dataOps' ? 'data-ops' : currentMode === 'modeling' ? 'modeling' : 'analysis'}`);
+    // Always navigate to /analysis regardless of mode
+    setLocation('/analysis');
     setResetTrigger(prev => prev + 1);
     setLoadedSessionData(null);
     setCurrentSessionId(null);
@@ -76,30 +69,24 @@ function Router() {
     // Clear resetTrigger to prevent file dialog from opening when loading a session
     setResetTrigger(0);
     setLoadedSessionData(sessionData);
-    // Navigate to chat interface (default to analysis mode) when loading a session
+    // Navigate to chat interface (always /analysis)
     setLocation('/analysis');
   };
 
   const handleModeChange = (mode: ModeType) => {
-    const basePath = location.split('/').slice(0, -1).join('/') || '';
-    if (mode === 'dataOps') {
-      setLocation('/data-ops');
-    } else if (mode === 'modeling') {
-      setLocation('/modeling');
-    } else {
-      setLocation('/analysis');
-    }
+    // Don't change URL - mode is now state-based, not route-based
+    // The URL will always stay as /analysis
+    // Mode is managed by the Home component's internal state
   };
 
-  // Redirect root to /analysis
+  // Redirect root and old routes to /analysis
   useEffect(() => {
-    if (location === '/') {
+    if (location === '/' || location === '/data-ops' || location === '/modeling') {
       setLocation('/analysis');
     }
   }, [location, setLocation]);
 
   const currentPage = getCurrentPage();
-  const currentMode = getModeFromPath(location);
 
   const handleSessionChange = (sessionId: string | null, fileName: string | null) => {
     setCurrentSessionId(sessionId);
@@ -116,18 +103,22 @@ function Router() {
       fileName={currentFileName}
     >
       <Switch>
-        <Route path="/analysis/history">
+        <Route path="/history">
           <Analysis onNavigate={handleNavigate} onNewChat={handleNewChat} onLoadSession={handleLoadSession} onUploadNew={handleUploadNew} />
+        </Route>
+        <Route path="/dashboard">
+          <Dashboard />
         </Route>
         <Route path="/analysis">
           <Home 
             resetTrigger={resetTrigger} 
             loadedSessionData={loadedSessionData}
-            initialMode="analysis"
+            initialMode="general"
             onModeChange={handleModeChange}
             onSessionChange={handleSessionChange}
           />
         </Route>
+        {/* Old routes - will redirect to /analysis via useEffect above */}
         <Route path="/data-ops">
           <Home 
             resetTrigger={resetTrigger} 
@@ -145,9 +136,6 @@ function Router() {
             onModeChange={handleModeChange}
             onSessionChange={handleSessionChange}
           />
-        </Route>
-        <Route path="/dashboard">
-          <Dashboard />
         </Route>
         <Route>
           <NotFound />

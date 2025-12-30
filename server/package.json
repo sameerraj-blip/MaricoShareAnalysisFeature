@@ -3,9 +3,9 @@
     "version": "1.0.0",
     "type": "module",
     "scripts": {
-        "dev": "NODE_ENV=development tsx index.ts",
+        "dev": "NODE_ENV=development NODE_OPTIONS='--max-old-space-size=4096' tsx index.ts",
         "build": "esbuild index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist --sourcemap",
-        "start": "NODE_ENV=production node dist/index.js",
+        "start": "NODE_ENV=production NODE_OPTIONS='--max-old-space-size=4096' node dist/index.js",
         "preview": "npm run build && npm run start"
     },
     "dependencies": {

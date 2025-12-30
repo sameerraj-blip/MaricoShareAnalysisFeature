@@ -9,8 +9,8 @@ export function createApp() {
   const app = express();
 
   // Middleware (increase payload limits for chat history and chart data)
-  app.use(express.json({ limit: '20mb' }));
-  app.use(express.urlencoded({ extended: false, limit: '20mb' }));
+  app.use(express.json({ limit: '500mb' }));
+  app.use(express.urlencoded({ extended: false, limit: '500mb' }));
 
   // Handle preflight requests explicitly
   app.options('*', corsConfig);

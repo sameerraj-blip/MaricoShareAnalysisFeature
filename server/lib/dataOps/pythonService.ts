@@ -93,7 +93,7 @@ interface ConvertTypeResponse {
 interface TrainModelRequest {
   data: Record<string, any>[];
   model_type: 
-    | 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
+    | 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
     | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn'
     | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie'
     | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp'
@@ -380,7 +380,7 @@ export async function convertDataType(
 export async function trainMLModel(
   data: Record<string, any>[],
   modelType: 
-    | 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
+    | 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
     | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn'
     | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie'
     | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp'
@@ -453,6 +453,8 @@ export async function trainMLModel(
     ];
     const isUnsupervised = unsupervisedModels.includes(modelType);
     
+    console.log(`📤 Preparing train-model request: model_type="${modelType}", target="${targetVariable}", features=[${features.slice(0, 3).join(', ')}${features.length > 3 ? '...' : ''}]`);
+    
     const request: TrainModelRequest = {
       data,
       model_type: modelType,
@@ -460,6 +462,13 @@ export async function trainMLModel(
       test_size: options?.testSize ?? 0.2,
       random_state: options?.randomState ?? 42,
     };
+    
+    // Validate model_type is valid
+    if (!modelType || typeof modelType !== 'string') {
+      throw new Error(`Invalid model type: ${modelType}`);
+    }
+    
+    console.log(`📋 Request payload: model_type="${request.model_type}", target_variable="${request.target_variable}", features count=${request.features.length}`);
     
     // Add target_variable only for supervised models
     if (!isUnsupervised && targetVariable) {
@@ -633,13 +642,28 @@ export async function trainMLModel(
     clearTimeout(timeoutId);
     
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-      throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
+      const errorText = await response.text().catch(() => 'Unknown error');
+      let errorDetail = 'Unknown error';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorDetail = errorJson.detail || errorJson.message || errorText;
+      } catch {
+        errorDetail = errorText || `HTTP ${response.status}: ${response.statusText}`;
+      }
+      console.error(`❌ Python service error (${response.status}):`, errorDetail);
+      throw new Error(errorDetail);
     }
     
-    return await response.json() as TrainModelResponse;
+    const result = await response.json() as TrainModelResponse;
+    console.log(`✅ Python service returned model type: ${result.model_type}`);
+    return result;
   } catch (error) {
-    console.error('Error calling Python service train-model:', error);
+    console.error('❌ Error calling Python service train-model:', {
+      modelType,
+      targetVariable,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    });
     throw error;
   }
 }

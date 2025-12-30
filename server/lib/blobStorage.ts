@@ -205,14 +205,56 @@ export const generateSasUrl = async (
 // Update processed data blob (for data operations)
 export const updateProcessedDataBlob = async (
   sessionId: string,
-  data: Record<string, any>[],
+  data: Record<string, any>[] | Buffer,
   version: number,
   username: string
 ): Promise<{ blobUrl: string; blobName: string }> => {
   try {
-    // Convert data to JSON buffer
-    const jsonData = JSON.stringify(data);
-    const buffer = Buffer.from(jsonData, 'utf-8');
+    let buffer: Buffer;
+    let rowCount: number;
+    
+    // Handle both data array and pre-serialized buffer
+    if (Buffer.isBuffer(data)) {
+      buffer = data;
+      // Try to extract row count from buffer if possible, otherwise estimate
+      try {
+        const parsed = JSON.parse(buffer.toString('utf-8'));
+        rowCount = Array.isArray(parsed) ? parsed.length : 0;
+      } catch {
+        // If we can't parse, estimate based on size (rough estimate)
+        rowCount = Math.floor(buffer.length / 1000); // Rough estimate
+      }
+    } else {
+      // Convert data to JSON buffer
+      const isLargeDataset = data.length > 50000;
+      
+      if (isLargeDataset) {
+        console.log(`📦 Large dataset detected (${data.length} rows). Serializing in chunks for blob upload...`);
+        // For very large datasets, serialize in chunks to avoid memory issues
+        const chunks: string[] = [];
+        chunks.push('[');
+        
+        for (let i = 0; i < data.length; i++) {
+          if (i > 0) chunks.push(',');
+          chunks.push(JSON.stringify(data[i]));
+          
+          // Log progress for very large datasets
+          if ((i + 1) % 10000 === 0) {
+            console.log(`  Serialized ${i + 1} / ${data.length} rows...`);
+          }
+        }
+        
+        chunks.push(']');
+        const jsonData = chunks.join('');
+        buffer = Buffer.from(jsonData, 'utf-8');
+        rowCount = data.length;
+      } else {
+        // Small dataset - serialize normally
+        const jsonData = JSON.stringify(data);
+        buffer = Buffer.from(jsonData, 'utf-8');
+        rowCount = data.length;
+      }
+    }
     
     // Create blob name for processed data
     const sanitizedUsername = username.replace(/[^a-zA-Z0-9]/g, '_');
@@ -231,17 +273,24 @@ export const updateProcessedDataBlob = async (
         version: version.toString(),
         processedBy: username,
         processedAt: new Date().toISOString(),
-        rowCount: data.length.toString(),
+        rowCount: rowCount.toString(),
+        sizeBytes: buffer.length.toString(),
       },
     };
     
     // Upload the data
+    // Azure Blob Storage handles large files efficiently, but we log progress for very large uploads
+    const sizeMB = buffer.length / (1024 * 1024);
+    if (sizeMB > 50) {
+      console.log(`📤 Uploading large blob (${sizeMB.toFixed(2)} MB) to Azure Blob Storage...`);
+    }
+    
     await blockBlobClient.upload(buffer, buffer.length, uploadOptions);
     
     // Generate the blob URL
     const blobUrl = blockBlobClient.url;
     
-    console.log(`✅ Processed data uploaded to blob storage: ${blobName}`);
+    console.log(`✅ Processed data uploaded to blob storage: ${blobName} (${rowCount} rows, ${sizeMB.toFixed(2)} MB)`);
     console.log(`🔗 Blob URL: ${blobUrl}`);
     
     return {
@@ -250,6 +299,137 @@ export const updateProcessedDataBlob = async (
     };
   } catch (error) {
     console.error("❌ Failed to update processed data blob:", error);
+    throw error;
+  }
+};
+
+// Chart storage interface
+export interface ChartReference {
+  chartId: string;
+  blobName: string;
+  blobUrl: string;
+  title: string;
+  type: string;
+  createdAt: number;
+}
+
+// Save charts to blob storage
+export const saveChartsToBlob = async (
+  sessionId: string,
+  charts: any[],
+  username: string
+): Promise<ChartReference[]> => {
+  try {
+    if (!charts || charts.length === 0) {
+      return [];
+    }
+
+    const sanitizedUsername = username.replace(/[^a-zA-Z0-9]/g, '_');
+    const chartReferences: ChartReference[] = [];
+    const timestamp = Date.now();
+
+    // Save each chart individually to blob storage
+    for (let i = 0; i < charts.length; i++) {
+      const chart = charts[i];
+      const chartId = `chart_${timestamp}_${i}`;
+      const blobName = `${sanitizedUsername}/charts/${sessionId}/${chartId}.json`;
+
+      // Serialize chart data
+      const chartData = JSON.stringify(chart);
+      const buffer = Buffer.from(chartData, 'utf-8');
+
+      // Get block blob client
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+
+      // Upload options
+      const uploadOptions = {
+        blobHTTPHeaders: {
+          blobContentType: 'application/json',
+        },
+        metadata: {
+          sessionId,
+          chartId,
+          chartTitle: chart.title || 'Untitled Chart',
+          chartType: chart.type || 'unknown',
+          savedBy: username,
+          savedAt: new Date().toISOString(),
+        },
+      };
+
+      // Upload the chart
+      await blockBlobClient.upload(buffer, buffer.length, uploadOptions);
+      const blobUrl = blockBlobClient.url;
+
+      chartReferences.push({
+        chartId,
+        blobName,
+        blobUrl,
+        title: chart.title || 'Untitled Chart',
+        type: chart.type || 'unknown',
+        createdAt: timestamp,
+      });
+    }
+
+    console.log(`✅ Saved ${chartReferences.length} charts to blob storage for session ${sessionId}`);
+    return chartReferences;
+  } catch (error) {
+    console.error("❌ Failed to save charts to blob storage:", error);
+    throw error;
+  }
+};
+
+// Load charts from blob storage
+export const loadChartsFromBlob = async (
+  chartReferences: ChartReference[]
+): Promise<any[]> => {
+  try {
+    if (!chartReferences || chartReferences.length === 0) {
+      return [];
+    }
+
+    const charts: any[] = [];
+
+    // Load each chart from blob storage
+    for (const ref of chartReferences) {
+      try {
+        const blobBuffer = await getFileFromBlob(ref.blobName);
+        const chartData = JSON.parse(blobBuffer.toString('utf-8'));
+        charts.push(chartData);
+      } catch (error) {
+        console.error(`⚠️ Failed to load chart ${ref.chartId} from blob:`, error);
+        // Continue loading other charts even if one fails
+      }
+    }
+
+    console.log(`✅ Loaded ${charts.length} charts from blob storage`);
+    return charts;
+  } catch (error) {
+    console.error("❌ Failed to load charts from blob storage:", error);
+    throw error;
+  }
+};
+
+// Delete charts from blob storage
+export const deleteChartsFromBlob = async (
+  chartReferences: ChartReference[]
+): Promise<void> => {
+  try {
+    if (!chartReferences || chartReferences.length === 0) {
+      return;
+    }
+
+    for (const ref of chartReferences) {
+      try {
+        await deleteFileFromBlob(ref.blobName);
+      } catch (error) {
+        console.error(`⚠️ Failed to delete chart ${ref.chartId} from blob:`, error);
+        // Continue deleting other charts even if one fails
+      }
+    }
+
+    console.log(`✅ Deleted ${chartReferences.length} charts from blob storage`);
+  } catch (error) {
+    console.error("❌ Failed to delete charts from blob storage:", error);
     throw error;
   }
 };

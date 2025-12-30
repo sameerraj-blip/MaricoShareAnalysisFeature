@@ -8,6 +8,48 @@ import { getChatBySessionIdEfficient, updateChatDocument, ChatDocument } from ".
 
 const normalizeEmail = (value: string) => value?.trim().toLowerCase();
 
+/**
+ * Helper function to retry Cosmos DB operations on connection errors
+ */
+const retryOnConnectionError = async <T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  operationName: string = "Cosmos DB operation"
+): Promise<T> => {
+  let lastError: any;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check if it's a connection error that might be retryable
+      const isRetryableError = 
+        error.code === "ECONNREFUSED" || 
+        error.code === "ETIMEDOUT" || 
+        error.code === "ENOTFOUND" ||
+        error.code === "ECONNRESET" ||
+        errorMessage.includes("ECONNREFUSED") ||
+        errorMessage.includes("ETIMEDOUT") ||
+        errorMessage.includes("ENOTFOUND");
+      
+      if (isRetryableError && attempt < maxRetries) {
+        const delay = attempt * 1000; // Exponential backoff: 1s, 2s, 3s
+        console.warn(`⚠️ ${operationName} connection error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`, errorMessage);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      
+      // If not retryable or max retries reached, throw
+      throw error;
+    }
+  }
+  
+  throw lastError;
+};
+
 const ensureCollaborators = (chatDocument: ChatDocument): string[] => {
   const owner = normalizeEmail(chatDocument.username);
   const collaborators = Array.from(
@@ -167,12 +209,17 @@ export const createSharedAnalysisInvite = async ({
 export const listSharedAnalysesForUser = async (targetEmail: string): Promise<SharedAnalysisInvite[]> => {
   const sharedContainer = await waitForSharedAnalysesContainer();
   const normalizedTarget = normalizeEmail(targetEmail) || targetEmail;
-  const { resources } = await sharedContainer.items.query({
-    query: "SELECT * FROM c WHERE c.targetEmail = @targetEmail ORDER BY c.createdAt DESC",
-    parameters: [{ name: "@targetEmail", value: normalizedTarget }],
-  }).fetchAll();
+  
+  return retryOnConnectionError(async () => {
+    // Use partition key directly - no need for cross-partition query
+    // Since partition key is /targetEmail, query within partition
+    const { resources } = await sharedContainer.items.query({
+      query: "SELECT * FROM c WHERE c.targetEmail = @targetEmail ORDER BY c.createdAt DESC",
+      parameters: [{ name: "@targetEmail", value: normalizedTarget }],
+    }).fetchAll(); // Remove enableCrossPartitionQuery for better performance
 
-  return resources as SharedAnalysisInvite[];
+    return resources as SharedAnalysisInvite[];
+  }, 3, "listSharedAnalysesForUser");
 };
 
 /**
@@ -181,17 +228,20 @@ export const listSharedAnalysesForUser = async (targetEmail: string): Promise<Sh
 export const listSharedAnalysesForOwner = async (ownerEmail: string): Promise<SharedAnalysisInvite[]> => {
   const sharedContainer = await waitForSharedAnalysesContainer();
   const normalizedOwner = normalizeEmail(ownerEmail) || ownerEmail;
-  const { resources } = await sharedContainer.items
-    .query(
-      {
-        query: "SELECT * FROM c WHERE c.ownerEmail = @ownerEmail ORDER BY c.createdAt DESC",
-        parameters: [{ name: "@ownerEmail", value: normalizedOwner }],
-      },
-      { enableCrossPartitionQuery: true }
-    )
-    .fetchAll();
+  
+  return retryOnConnectionError(async () => {
+    const { resources } = await sharedContainer.items
+      .query(
+        {
+          query: "SELECT * FROM c WHERE c.ownerEmail = @ownerEmail ORDER BY c.createdAt DESC",
+          parameters: [{ name: "@ownerEmail", value: normalizedOwner }],
+        },
+        { enableCrossPartitionQuery: true }
+      )
+      .fetchAll();
 
-  return resources as SharedAnalysisInvite[];
+    return resources as SharedAnalysisInvite[];
+  }, 3, "listSharedAnalysesForOwner");
 };
 
 /**
@@ -201,11 +251,14 @@ export const getSharedAnalysisInviteById = async (
   id: string,
   targetEmail: string
 ): Promise<SharedAnalysisInvite | null> => {
+  const sharedContainer = await waitForSharedAnalysesContainer();
+  const normalizedTarget = normalizeEmail(targetEmail) || targetEmail;
+  
   try {
-    const sharedContainer = await waitForSharedAnalysesContainer();
-    const normalizedTarget = normalizeEmail(targetEmail) || targetEmail;
-    const { resource } = await sharedContainer.item(id, normalizedTarget).read();
-    return resource as SharedAnalysisInvite;
+    return await retryOnConnectionError(async () => {
+      const { resource } = await sharedContainer.item(id, normalizedTarget).read();
+      return resource as SharedAnalysisInvite;
+    }, 3, "getSharedAnalysisInviteById");
   } catch (error: any) {
     if (error.code === 404) {
       return null;
