@@ -109,7 +109,8 @@ class UploadQueue {
       const { parseFile, createDataSummary, convertDashToZeroForNumericColumns } = await import('../lib/fileParser.js');
       const { analyzeUpload } = await import('../lib/dataAnalyzer.js');
       const { generateAISuggestions } = await import('../lib/suggestionGenerator.js');
-      const { createChatDocument, generateColumnStatistics } = await import('../models/chat.model.js');
+      const { createChatDocument, generateColumnStatistics, getChatBySessionIdEfficient, updateChatDocument, addMessagesBySessionId } = await import('../models/chat.model.js');
+      const { saveChartsToBlob } = await import('../lib/blobStorage.js');
       const { chunkData, clearVectorStore } = await import('../lib/ragService.js');
       const queryCache = (await import('../lib/cache.js')).default;
 
@@ -228,26 +229,116 @@ class UploadQueue {
       
       let chatDocument;
       try {
-        chatDocument = await createChatDocument(
-          job.username,
-          job.fileName,
-          job.sessionId,
-          summary,
-          sanitizedCharts,
-          data,
-          sampleRows,
-          columnStatistics,
-          job.blobInfo,
-          {
-            totalProcessingTime: processingTime,
-            aiModelUsed: 'gpt-4o',
-            fileSize: job.fileBuffer.length,
-            analysisVersion: '1.0.0'
-          },
-          insights
-        );
+        // Check if a placeholder session already exists (created during upload)
+        const existingSession = await getChatBySessionIdEfficient(job.sessionId);
+        
+        if (existingSession) {
+          // Update existing placeholder session with full data
+          console.log(`🔄 Updating existing placeholder session: ${job.sessionId}`);
+          
+          // Handle chart storage (same logic as createChatDocument)
+          let chartsToStore = sanitizedCharts;
+          let chartReferences = existingSession.chartReferences || [];
+          
+          if (sanitizedCharts && sanitizedCharts.length > 0) {
+            const shouldStoreChartsInBlob = sanitizedCharts.some(chart => {
+              const chartSize = JSON.stringify(chart).length;
+              const hasLargeData = chart.data && Array.isArray(chart.data) && chart.data.length > 1000;
+              return chartSize > 100000 || hasLargeData;
+            });
+            
+            if (shouldStoreChartsInBlob) {
+              console.log(`📊 Charts have large data arrays. Storing in blob storage...`);
+              try {
+                chartReferences = await saveChartsToBlob(job.sessionId, sanitizedCharts, job.username);
+                chartsToStore = sanitizedCharts.map(chart => ({
+                  ...chart,
+                  data: undefined, // Remove data array - stored in blob
+                })) as any;
+                console.log(`✅ Saved ${chartReferences.length} charts to blob storage`);
+              } catch (blobError) {
+                console.error('⚠️ Failed to save charts to blob, storing in CosmosDB:', blobError);
+                chartsToStore = sanitizedCharts; // Fallback
+              }
+            }
+          }
+          
+          // Estimate rawData size and decide if we should store it
+          const estimatedSize = JSON.stringify(data).length;
+          const MAX_DOCUMENT_SIZE = 3 * 1024 * 1024; // 3MB safety margin
+          const shouldStoreRawData = estimatedSize < MAX_DOCUMENT_SIZE && data.length < 10000;
+          
+          if (!shouldStoreRawData) {
+            console.log(`⚠️ Large dataset detected (${data.length} rows, ~${(estimatedSize / 1024 / 1024).toFixed(2)}MB). Storing only sampleRows in CosmosDB.`);
+          }
+          
+          chatDocument = {
+            ...existingSession,
+            dataSummary: summary,
+            charts: chartsToStore,
+            chartReferences: chartReferences.length > 0 ? chartReferences : undefined,
+            rawData: shouldStoreRawData ? data : [],
+            sampleRows,
+            columnStatistics,
+            insights,
+            analysisMetadata: {
+              totalProcessingTime: processingTime,
+              aiModelUsed: 'gpt-4o',
+              fileSize: job.fileBuffer.length,
+              analysisVersion: '1.0.0'
+            },
+            // Update blobInfo if it wasn't set in placeholder
+            blobInfo: job.blobInfo || existingSession.blobInfo,
+          };
+          chatDocument = await updateChatDocument(chatDocument);
+          console.log(`✅ Updated session with processed data: ${chatDocument.id}`);
+          
+          // Create initial assistant message with insights and charts
+          // Only add if messages array is empty (placeholder session)
+          if (!chatDocument.messages || chatDocument.messages.length === 0) {
+            // Use charts with data (not the stripped versions)
+            const chartsWithData = sanitizedCharts.filter(chart => chart.data && chart.data.length > 0);
+            
+            const initialMessage = {
+              role: 'assistant' as const,
+              content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${summary.rowCount} rows and ${summary.columnCount} columns\n🔢 ${summary.numericColumns.length} numeric columns to work with\n📅 ${summary.dateColumns.length} date columns for time-based analysis\n\nI've created ${sanitizedCharts.length} visualizations and ${insights.length} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+              charts: chartsWithData.slice(0, 5), // Include first 5 charts in message (full data)
+              insights: insights,
+              timestamp: Date.now(),
+            };
+            
+            try {
+              await addMessagesBySessionId(job.sessionId, [initialMessage]);
+              console.log(`✅ Added initial assistant message with ${insights.length} insights and ${chartsWithData.length} charts`);
+            } catch (messageError) {
+              console.error('⚠️ Failed to add initial message (non-critical):', messageError);
+              // Non-critical - session is still updated with data
+            }
+          }
+        } else {
+          // No placeholder exists, create new session (backward compatibility)
+          console.log(`📝 No placeholder found, creating new session: ${job.sessionId}`);
+          chatDocument = await createChatDocument(
+            job.username,
+            job.fileName,
+            job.sessionId,
+            summary,
+            sanitizedCharts,
+            data,
+            sampleRows,
+            columnStatistics,
+            job.blobInfo,
+            {
+              totalProcessingTime: processingTime,
+              aiModelUsed: 'gpt-4o',
+              fileSize: job.fileBuffer.length,
+              analysisVersion: '1.0.0'
+            },
+            insights
+          );
+        }
       } catch (cosmosError) {
-        console.error("Failed to create chat document:", cosmosError);
+        console.error("Failed to save chat document:", cosmosError);
       }
 
       // Step 10: Complete

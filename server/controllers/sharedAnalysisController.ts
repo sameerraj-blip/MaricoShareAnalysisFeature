@@ -314,19 +314,19 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
       if (!isActive) return;
       
       timeoutId = setTimeout(async () => {
-        if (res.writableEnded || res.destroyed || !res.writable) {
+      if (res.writableEnded || res.destroyed || !res.writable) {
           isActive = false;
-          return;
-        }
+        return;
+      }
 
         const previousData = sharedInviteCache.get(userEmail);
-        const stillConnected = await sendSharedAnalyses();
+      const stillConnected = await sendSharedAnalyses();
         
-        if (!stillConnected) {
+      if (!stillConnected) {
           isActive = false;
-          try {
-            res.end();
-          } catch (e) {
+        try {
+          res.end();
+        } catch (e) {
             // Ignore
           }
           return;

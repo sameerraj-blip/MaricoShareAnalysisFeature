@@ -258,6 +258,70 @@ export const createChatDocument = async (
 };
 
 /**
+ * Create a placeholder session document immediately when upload is accepted
+ * This ensures the session exists in the database before async processing completes
+ */
+export const createPlaceholderSession = async (
+  username: string,
+  fileName: string,
+  sessionId: string,
+  fileSize: number,
+  blobInfo?: { blobUrl: string; blobName: string }
+): Promise<ChatDocument> => {
+  const timestamp = Date.now();
+  const normalizedUsername = normalizeEmail(username) || username;
+  
+  // Generate unique filename with number suffix if needed
+  const uniqueFileName = await generateUniqueFileName(fileName, normalizedUsername);
+  console.log(`📝 Creating placeholder session: "${fileName}" -> "${uniqueFileName}"`);
+  
+  const chatId = `${uniqueFileName.replace(/[^a-zA-Z0-9]/g, '_')}_${timestamp}`;
+  
+  // Create minimal placeholder document
+  const placeholderDocument: ChatDocument & { fsmrora?: string } = {
+    id: chatId,
+    username: normalizedUsername,
+    fsmrora: normalizedUsername, // Partition key
+    fileName: uniqueFileName,
+    uploadedAt: timestamp,
+    createdAt: timestamp,
+    lastUpdatedAt: timestamp,
+    sessionId,
+    dataSummary: {
+      rowCount: 0,
+      columnCount: 0,
+      columns: [],
+      numericColumns: [],
+      dateColumns: [],
+    },
+    messages: [],
+    charts: [],
+    insights: [],
+    rawData: [],
+    sampleRows: [],
+    columnStatistics: {},
+    collaborators: [normalizedUsername],
+    blobInfo,
+    analysisMetadata: {
+      totalProcessingTime: 0,
+      aiModelUsed: 'gpt-4o',
+      fileSize: fileSize,
+      analysisVersion: '1.0.0'
+    }
+  };
+
+  try {
+    const containerInstance = await waitForContainer();
+    const { resource } = await containerInstance.items.create(placeholderDocument);
+    console.log(`✅ Created placeholder session: ${chatId} for sessionId: ${sessionId}`);
+    return resource as ChatDocument;
+  } catch (error: any) {
+    console.error("❌ Failed to create placeholder session:", error);
+    throw error;
+  }
+};
+
+/**
  * Get chat document by ID
  */
 export const getChatDocument = async (
@@ -638,10 +702,11 @@ export const getChatBySessionIdEfficient = async (sessionId: string): Promise<Ch
       const containerInstance = await waitForContainer();
       
       const query = "SELECT * FROM c WHERE c.sessionId = @sessionId";
+      // Enable cross-partition query since sessionId is not the partition key
       const { resources } = await containerInstance.items.query({
         query,
         parameters: [{ name: "@sessionId", value: sessionId }]
-      }).fetchAll();
+      }, { enableCrossPartitionQuery: true }).fetchAll();
       const doc = (resources && resources.length > 0) ? resources[0] : null;
       if (!doc) {
         console.warn("⚠️ No chat document found for sessionId:", sessionId);

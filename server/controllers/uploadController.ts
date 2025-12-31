@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import multer from "multer";
 import { uploadFileToBlob } from "../lib/blobStorage.js";
 import { uploadQueue } from "../utils/uploadQueue.js";
+import { createPlaceholderSession } from "../models/chat.model.js";
 
 /**
  * Upload file endpoint - now uses async queue processing
@@ -35,6 +36,31 @@ export const uploadFile = async (
     } catch (blobError) {
       console.error("Failed to upload file to blob storage:", blobError);
       // Continue without failing the upload - blob storage is optional
+    }
+
+    // Create placeholder session immediately so it exists in the database
+    // This prevents 404 errors when frontend tries to fetch session details
+    try {
+      const placeholder = await createPlaceholderSession(
+        username,
+        req.file.originalname,
+        sessionId,
+        req.file.size,
+        blobInfo
+      );
+      console.log(`✅ Placeholder session created: ${sessionId} (chatId: ${placeholder.id})`);
+    } catch (placeholderError: any) {
+      // Log the full error details for debugging
+      console.error("❌ Failed to create placeholder session:", {
+        error: placeholderError?.message || placeholderError,
+        code: placeholderError?.code,
+        statusCode: placeholderError?.statusCode,
+        sessionId,
+        username
+      });
+      // Don't fail the upload - the session will be created during processing
+      // But log this as a warning since it means the frontend will get 404s initially
+      console.warn("⚠️ Upload will continue, but frontend may get 404 errors until processing completes");
     }
 
     // Enqueue the processing job

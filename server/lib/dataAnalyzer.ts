@@ -2014,6 +2014,249 @@ export async function generateGeneralAnswer(
     return result;
   };
   
+  // Detect simple bar plot requests: "bar plot for status and total" or "bar plot for column status"
+  const detectSimpleBarPlot = (q: string): { xColumn: string | null; yColumn: string | null } | null => {
+    const ql = q.toLowerCase();
+    
+    // Check if user explicitly mentions "bar plot" or "bar chart"
+    const hasBarKeyword = /\b(bar\s+(plot|chart|graph)|barplot|barchart)\b/i.test(q);
+    if (!hasBarKeyword) {
+      return null;
+    }
+    
+    console.log('🔍 Detecting simple bar plot request...');
+    
+    // Pattern 1: "bar plot for [X] and [Y]" or "bar plot for column [X]"
+    const pattern1 = q.match(/\b(?:bar\s+(?:plot|chart|graph))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)\s+(?:and|with)\s+([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern1) {
+      const xRaw = pattern1[1].trim();
+      const yRaw = pattern1[2].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      const yCol = findMatchingColumn(yRaw, availableColumns);
+      
+      if (xCol && yCol) {
+        console.log(`✅ Detected bar plot: X="${xCol}", Y="${yCol}"`);
+        return { xColumn: xCol, yColumn: yCol };
+      }
+    }
+    
+    // Pattern 2: "bar plot for [X]" - try to infer Y from context or use a numeric column
+    const pattern2 = q.match(/\b(?:bar\s+(?:plot|chart|graph))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern2) {
+      const xRaw = pattern2[1].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      
+      if (xCol) {
+        // Try to find a numeric column mentioned in the question or use "total" if it exists
+        let yCol: string | null = null;
+        
+        // Check if "total" is mentioned or exists
+        if (summary.numericColumns.includes('total')) {
+          yCol = 'total';
+        } else if (summary.numericColumns.length > 0) {
+          // Use first numeric column as default
+          yCol = summary.numericColumns[0];
+        }
+        
+        if (xCol && yCol) {
+          console.log(`✅ Detected bar plot: X="${xCol}", Y="${yCol}" (inferred)`);
+          return { xColumn: xCol, yColumn: yCol };
+        }
+      }
+    }
+    
+    // Pattern 3: Extract two column names from the question
+    // Look for mentions of "status" and "total" or similar patterns
+    const columnMentions = availableColumns.filter(col => {
+      const colLower = col.toLowerCase();
+      return ql.includes(colLower);
+    });
+    
+    if (columnMentions.length >= 2) {
+      // Find one categorical and one numeric
+      const categorical = columnMentions.find(col => !summary.numericColumns.includes(col));
+      const numeric = columnMentions.find(col => summary.numericColumns.includes(col));
+      
+      if (categorical && numeric) {
+        console.log(`✅ Detected bar plot from column mentions: X="${categorical}", Y="${numeric}"`);
+        return { xColumn: categorical, yColumn: numeric };
+      }
+    }
+    
+    return null;
+  };
+  
+  // Detect simple pie chart requests: "pie chart for status and total" or "pie chart for column status"
+  const detectSimplePieChart = (q: string): { xColumn: string | null; yColumn: string | null } | null => {
+    const ql = q.toLowerCase();
+    
+    // Check if user explicitly mentions "pie chart" or "pie graph"
+    const hasPieKeyword = /\b(pie\s+(chart|graph|plot)|piechart)\b/i.test(q);
+    if (!hasPieKeyword) {
+      return null;
+    }
+    
+    console.log('🔍 Detecting simple pie chart request...');
+    
+    // Pattern 1: "pie chart for [X] and [Y]" or "pie chart for column [X]"
+    const pattern1 = q.match(/\b(?:pie\s+(?:chart|graph|plot))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)\s+(?:and|with)\s+([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern1) {
+      const xRaw = pattern1[1].trim();
+      const yRaw = pattern1[2].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      const yCol = findMatchingColumn(yRaw, availableColumns);
+      
+      if (xCol && yCol) {
+        console.log(`✅ Detected pie chart: X="${xCol}", Y="${yCol}"`);
+        return { xColumn: xCol, yColumn: yCol };
+      }
+    }
+    
+    // Pattern 2: "pie chart for [X]" - try to infer Y from context or use a numeric column
+    const pattern2 = q.match(/\b(?:pie\s+(?:chart|graph|plot))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern2) {
+      const xRaw = pattern2[1].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      
+      if (xCol) {
+        // Try to find a numeric column mentioned in the question or use "total" if it exists
+        let yCol: string | null = null;
+        
+        // Check if "total" is mentioned or exists
+        if (summary.numericColumns.includes('total')) {
+          yCol = 'total';
+        } else if (summary.numericColumns.length > 0) {
+          // Use first numeric column as default
+          yCol = summary.numericColumns[0];
+        }
+        
+        if (xCol && yCol) {
+          console.log(`✅ Detected pie chart: X="${xCol}", Y="${yCol}" (inferred)`);
+          return { xColumn: xCol, yColumn: yCol };
+        }
+      }
+    }
+    
+    // Pattern 3: Extract two column names from the question
+    // Look for mentions of column names in the question
+    const columnMentions = availableColumns.filter(col => {
+      const colLower = col.toLowerCase();
+      return ql.includes(colLower);
+    });
+    
+    if (columnMentions.length >= 2) {
+      // Find one categorical and one numeric
+      const categorical = columnMentions.find(col => !summary.numericColumns.includes(col));
+      const numeric = columnMentions.find(col => summary.numericColumns.includes(col));
+      
+      if (categorical && numeric) {
+        console.log(`✅ Detected pie chart from column mentions: X="${categorical}", Y="${numeric}"`);
+        return { xColumn: categorical, yColumn: numeric };
+      }
+    }
+    
+    return null;
+  };
+  
+  // Check for simple bar plot request early
+  const barPlotRequest = detectSimpleBarPlot(question);
+  if (barPlotRequest && barPlotRequest.xColumn && barPlotRequest.yColumn) {
+    console.log(`📊 Creating bar plot: ${barPlotRequest.xColumn} (X) vs ${barPlotRequest.yColumn} (Y)`);
+    
+    try {
+      const barSpec: ChartSpec = {
+        type: 'bar',
+        title: `Bar Chart: ${barPlotRequest.yColumn} by ${barPlotRequest.xColumn}`,
+        x: barPlotRequest.xColumn,
+        y: barPlotRequest.yColumn,
+        xLabel: barPlotRequest.xColumn,
+        yLabel: barPlotRequest.yColumn,
+        aggregate: 'sum', // Default to sum for bar charts
+      };
+      
+      console.log('🔄 Processing bar chart data...');
+      const barData = processChartData(workingData, barSpec);
+      console.log(`✅ Bar chart data: ${barData.length} bars`);
+      
+      if (barData.length === 0) {
+        return {
+          answer: `I couldn't generate a bar chart. The data might be empty after filtering, or there might be an issue with the columns "${barPlotRequest.xColumn}" and "${barPlotRequest.yColumn}".`
+        };
+      }
+      
+      const insights = await generateChartInsights(barSpec, barData, summary, chatInsights);
+      
+      return withNotes({
+        answer: `I've created a bar chart showing ${barPlotRequest.yColumn} grouped by ${barPlotRequest.xColumn}.`,
+        charts: [{ ...barSpec, data: barData, keyInsight: insights.keyInsight }],
+        insights: []
+      });
+    } catch (error) {
+      console.error('❌ Error creating bar plot:', error);
+      // Fall through to general processing
+    }
+  }
+  
+  // Check for simple pie chart request early
+  const pieChartRequest = detectSimplePieChart(question);
+  if (pieChartRequest && pieChartRequest.xColumn && pieChartRequest.yColumn) {
+    console.log(`🥧 Creating pie chart: ${pieChartRequest.xColumn} (X) vs ${pieChartRequest.yColumn} (Y)`);
+    
+    try {
+      // Ensure X column is not a date column for pie charts (unless explicitly requested)
+      const isDateCol = summary.dateColumns.includes(pieChartRequest.xColumn);
+      if (isDateCol) {
+        console.warn(`⚠️ Pie chart requested with date column "${pieChartRequest.xColumn}". Finding categorical alternative...`);
+        // Try to find a categorical column
+        const categoricalCol = availableColumns.find(col => 
+          !summary.dateColumns.includes(col) && 
+          !summary.numericColumns.includes(col) &&
+          col !== pieChartRequest.xColumn
+        );
+        
+        if (categoricalCol) {
+          console.log(`   Using categorical column "${categoricalCol}" instead`);
+          pieChartRequest.xColumn = categoricalCol;
+        } else {
+          return {
+            answer: `I can't create a pie chart using the date column "${pieChartRequest.xColumn}". Pie charts work best with categorical columns like status, category, or product type. Please specify a categorical column for the pie chart.`
+          };
+        }
+      }
+      
+      const pieSpec: ChartSpec = {
+        type: 'pie',
+        title: `Pie Chart: ${pieChartRequest.yColumn} by ${pieChartRequest.xColumn}`,
+        x: pieChartRequest.xColumn,
+        y: pieChartRequest.yColumn,
+        xLabel: pieChartRequest.xColumn,
+        yLabel: pieChartRequest.yColumn,
+        aggregate: 'sum', // Default to sum for pie charts
+      };
+      
+      console.log('🔄 Processing pie chart data...');
+      const pieData = processChartData(workingData, pieSpec);
+      console.log(`✅ Pie chart data: ${pieData.length} segments`);
+      
+      if (pieData.length === 0) {
+        return {
+          answer: `I couldn't generate a pie chart. The data might be empty after filtering, or there might be an issue with the columns "${pieChartRequest.xColumn}" and "${pieChartRequest.yColumn}".`
+        };
+      }
+      
+      const insights = await generateChartInsights(pieSpec, pieData, summary, chatInsights);
+      
+      return withNotes({
+        answer: `I've created a pie chart showing the distribution of ${pieChartRequest.yColumn} by ${pieChartRequest.xColumn}. The chart shows the top categories and their proportions.`,
+        charts: [{ ...pieSpec, data: pieData, keyInsight: insights.keyInsight }],
+        insights: []
+      });
+    } catch (error) {
+      console.error('❌ Error creating pie chart:', error);
+      // Fall through to general processing
+    }
+  }
+  
   // If secondary Y-axis is requested, try to find the previous chart from chat history
   if (explicitY2) {
     console.log('🔍 Secondary Y-axis detected, looking for previous chart in chat history...');
