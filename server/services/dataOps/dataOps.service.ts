@@ -11,6 +11,7 @@ import {
   ChatDocument 
 } from "../../models/chat.model.js";
 import { loadLatestData } from "../../utils/dataLoader.js";
+import queryCache from "../../lib/cache.js";
 
 export interface ProcessDataOpsParams {
   sessionId: string;
@@ -27,10 +28,14 @@ export interface ProcessDataOpsResult {
   saved?: boolean;
 }
 
-async function loadDataForOperation(chatDocument: ChatDocument): Promise<Record<string, any>[]> {
+async function loadDataForOperation(
+  chatDocument: ChatDocument,
+  requiredColumns?: string[]
+): Promise<Record<string, any>[]> {
   // Use the shared data loader to ensure we get the latest data
   // This ensures data operations work on the same data that analysis uses
-  return await loadLatestData(chatDocument);
+  // For large datasets, we can filter columns to reduce memory usage
+  return await loadLatestData(chatDocument, requiredColumns);
 }
 
 /**
@@ -97,6 +102,12 @@ export async function processDataOperation(params: ProcessDataOpsParams): Promis
 
   // Execute operation
   const result = await executeDataOperation(intent, fullData, sessionId, chatDocument, message, fullChatHistory);
+
+  // Invalidate cache when data is modified (saved operations)
+  if (result.saved) {
+    queryCache.invalidateSession(sessionId);
+    console.log(`🗑️ Cache invalidated for session ${sessionId} due to data modification`);
+  }
 
   // Save messages
   try {

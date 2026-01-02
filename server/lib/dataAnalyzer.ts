@@ -7,6 +7,7 @@ import { retrieveRelevantContext, retrieveSimilarPastQA, chunkData, generateChun
 import { parseUserQuery } from './queryParser.js';
 import { applyQueryTransformations } from './dataTransform.js';
 import type { ParsedQuery } from '../shared/queryTypes.js';
+import { calculateSmartDomainsForChart } from './axisScaling.js';
 
 export async function analyzeUpload(
   data: Record<string, any>[],
@@ -23,6 +24,18 @@ export async function analyzeUpload(
   const charts = await Promise.all(chartSpecs.map(async (spec) => {
     const processedData = processChartData(data, spec);
     
+    // Calculate smart axis domains based on statistical measures
+    const smartDomains = calculateSmartDomainsForChart(
+      processedData,
+      spec.x,
+      spec.y,
+      spec.y2 || undefined,
+      {
+        yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+        y2Options: spec.y2 ? { useIQR: true, paddingPercent: 5, includeOutliers: true } : undefined,
+      }
+    );
+    
     // Generate key insight for this specific chart
     const chartInsights = await generateChartInsights(spec, processedData, summary);
     
@@ -31,6 +44,7 @@ export async function analyzeUpload(
       xLabel: spec.x,
       yLabel: spec.y,
       data: processedData,
+      ...smartDomains, // Add smart domains
       keyInsight: chartInsights.keyInsight,
     };
   }));
@@ -230,38 +244,63 @@ export async function answerQuestion(
       return null;
     }
     
-    // More flexible detection: look for "and" or "vs" with mention of line chart, plot, or "over months/time"
-    const mentionsLine = /\bline\b|\bline\s*chart\b|\bover\s+(?:time|months?|weeks?|days?)\b|\bplot\b|\bgraph\b/.test(ql);
+    // More flexible detection: look for "and", "vs", or "with" with mention of line chart, plot, or "over months/time"
+    // Also detect "in one trend line" or "in one chart" as indicators
+    const mentionsLine = /\bline\b|\bline\s*chart\b|\bover\s+(?:time|months?|weeks?|days?)\b|\bplot\b|\bgraph\b|\btrends?\b|\bcompare\b|\bin\s+one\s+(?:trend\s+)?(?:line|chart)\b/i.test(ql);
     
     // Also check if it mentions two variables (check for common patterns)
     const hasAnd = /\sand\s+/.test(ql);
     const hasVs = /\s+vs\s+/.test(ql);
+    const hasWith = /\s+with\s+/.test(ql);
+    const hasCompare = /\bcompare\s+/.test(ql);
+    const hasInOne = /\bin\s+one\s+(?:trend\s+)?(?:line|chart|graph)\b/i.test(ql);
     
     // Check for "two separate axes" which indicates dual-axis line chart
     const wantsDualAxis = /\b(two\s+separates?\s+axes?|separates?\s+axes?|dual\s+axis|dual\s+y)\b/i.test(q);
     
-    console.log('🔍 detectTwoSeriesLine - flags:', { mentionsLine, hasAnd, hasVs, wantsDualAxis });
+    console.log('🔍 detectTwoSeriesLine - flags:', { mentionsLine, hasAnd, hasVs, hasWith, hasCompare, hasInOne, wantsDualAxis });
     
-    // If it mentions "and" or "vs" with plot/chart keywords, OR if it explicitly wants dual axes, proceed
-    if (!mentionsLine && !hasAnd && !hasVs && !wantsDualAxis) {
+    // If it mentions "and", "vs", "with", "compare", or "in one trend line" with plot/chart keywords, OR if it explicitly wants dual axes, proceed
+    // Special case: "A with B" pattern should always be considered for dual-axis chart even without explicit chart keywords
+    if (!mentionsLine && !hasAnd && !hasVs && !hasWith && !hasCompare && !hasInOne && !wantsDualAxis) {
       console.log('❌ detectTwoSeriesLine - does not match criteria');
       return null;
     }
     
-    // split on ' vs ' or ' and '
+    // Special handling: "A with B" pattern is a strong indicator of dual-axis request
+    if (hasWith && !mentionsLine && !hasInOne) {
+      console.log('✅ detectTwoSeriesLine - "with" pattern detected, treating as dual-axis request');
+    }
+    
+    // split on ' vs ', ' and ', ' with ', or 'compare ... with'
     let parts: string[] = [];
-    if (ql.includes(' vs ')) parts = q.split(/\s+vs\s+/i);
-    else if (ql.includes(' and ')) parts = q.split(/\s+and\s+/i);
+    if (ql.includes(' vs ')) {
+      parts = q.split(/\s+vs\s+/i);
+    } else if (ql.includes(' and ')) {
+      parts = q.split(/\s+and\s+/i);
+    } else if (hasCompare && hasWith) {
+      // Handle "compare A with B" pattern
+      const compareMatch = q.match(/compare\s+(.+?)\s+with\s+(.+)/i);
+      if (compareMatch && compareMatch.length >= 3) {
+        parts = [compareMatch[1].trim(), compareMatch[2].trim()];
+      }
+    } else if (hasWith) {
+      // Handle "A with B" pattern (for trend comparisons)
+      parts = q.split(/\s+with\s+/i);
+    }
     
     if (parts.length < 2) return null;
     
     // Clean up parts: remove chart-related words and "over months" phrases
     // Also handle "on two separate axes" (including typo "separates")
+    // Handle "in one trend line" or "in one chart" patterns
     const candidates = parts.map(p => 
       p.replace(/over\s+(?:time|months?|weeks?|days?|.*)/i, '')
        .replace(/\b(line\s*chart|plot|graph|show|display|create)\b/gi, '')
        .replace(/\bon\s+(?:two\s+)?(?:separates?\s+)?axes?\b/gi, '')  // Fixed: added 's?' to handle "separates"
        .replace(/\s+axes?\s*$/i, '')  // Remove trailing "axes"
+       .replace(/\bin\s+one\s+(?:trend\s+)?(?:line|chart|graph)\b/gi, '')  // Remove "in one trend line" or "in one chart"
+       .replace(/\bin\s+one\s+/gi, '')  // Remove "in one" as fallback
        .trim()
     ).filter(Boolean);
     
@@ -911,11 +950,24 @@ export async function answerQuestion(
         };
       }
       
+      // Calculate smart axis domains for dual-axis chart
+      const smartDomains = calculateSmartDomainsForChart(
+        dualAxisLineData,
+        dualAxisLineSpec.x,
+        dualAxisLineSpec.y,
+        dualAxisLineSpec.y2,
+        {
+          yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+          y2Options: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+        }
+      );
+      
       const dualAxisInsights = await generateChartInsights(dualAxisLineSpec, dualAxisLineData, summary, chatInsights);
       
       const charts: ChartSpec[] = [{
         ...dualAxisLineSpec,
         data: dualAxisLineData,
+        ...smartDomains, // Add smart domains
         keyInsight: dualAxisInsights.keyInsight,
       }];
       
@@ -1656,7 +1708,6 @@ async function generateInsights(
 
     const values = data.map((row) => Number(String(row[col]).replace(/[%,,]/g, ''))).filter((v) => !isNaN(v));
     if (values.length > 0) {
-      const sorted = [...values].sort((a, b) => a - b);
       const avg = values.reduce((a, b) => a + b, 0) / values.length;
       const p25 = percentile(values, 0.25);
       const p50 = percentile(values, 0.5);
@@ -1665,9 +1716,17 @@ async function generateInsights(
       const std = stdDev(values);
       const cv = avg !== 0 ? (std / Math.abs(avg)) * 100 : 0;
       
+      // Calculate min/max without spread operator to avoid stack overflow on large arrays
+      let min = values[0];
+      let max = values[0];
+      for (let i = 1; i < values.length; i++) {
+        if (values[i] < min) min = values[i];
+        if (values[i] > max) max = values[i];
+      }
+      
       stats[col] = {
-        min: Math.min(...values),
-        max: Math.max(...values),
+        min: min,
+        max: max,
         avg: avg,
         total: values.reduce((a, b) => a + b, 0),
         median: p50,
@@ -1866,7 +1925,8 @@ export async function generateGeneralAnswer(
   sessionId?: string,
   preParsedQuery?: ParsedQuery | null,
   preTransformationNotes?: string[],
-  chatInsights?: Insight[]
+  chatInsights?: Insight[],
+  requiredColumns?: string[]
 ): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[] }> {
   // Detect explicit axis hints for any chart request (including secondary Y-axis)
   const parseExplicitAxes = (q: string): { x?: string; y?: string; y2?: string } => {
@@ -1953,6 +2013,249 @@ export async function generateGeneralAnswer(
     // Return result as-is without appending filters applied text
     return result;
   };
+  
+  // Detect simple bar plot requests: "bar plot for status and total" or "bar plot for column status"
+  const detectSimpleBarPlot = (q: string): { xColumn: string | null; yColumn: string | null } | null => {
+    const ql = q.toLowerCase();
+    
+    // Check if user explicitly mentions "bar plot" or "bar chart"
+    const hasBarKeyword = /\b(bar\s+(plot|chart|graph)|barplot|barchart)\b/i.test(q);
+    if (!hasBarKeyword) {
+      return null;
+    }
+    
+    console.log('🔍 Detecting simple bar plot request...');
+    
+    // Pattern 1: "bar plot for [X] and [Y]" or "bar plot for column [X]"
+    const pattern1 = q.match(/\b(?:bar\s+(?:plot|chart|graph))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)\s+(?:and|with)\s+([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern1) {
+      const xRaw = pattern1[1].trim();
+      const yRaw = pattern1[2].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      const yCol = findMatchingColumn(yRaw, availableColumns);
+      
+      if (xCol && yCol) {
+        console.log(`✅ Detected bar plot: X="${xCol}", Y="${yCol}"`);
+        return { xColumn: xCol, yColumn: yCol };
+      }
+    }
+    
+    // Pattern 2: "bar plot for [X]" - try to infer Y from context or use a numeric column
+    const pattern2 = q.match(/\b(?:bar\s+(?:plot|chart|graph))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern2) {
+      const xRaw = pattern2[1].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      
+      if (xCol) {
+        // Try to find a numeric column mentioned in the question or use "total" if it exists
+        let yCol: string | null = null;
+        
+        // Check if "total" is mentioned or exists
+        if (summary.numericColumns.includes('total')) {
+          yCol = 'total';
+        } else if (summary.numericColumns.length > 0) {
+          // Use first numeric column as default
+          yCol = summary.numericColumns[0];
+        }
+        
+        if (xCol && yCol) {
+          console.log(`✅ Detected bar plot: X="${xCol}", Y="${yCol}" (inferred)`);
+          return { xColumn: xCol, yColumn: yCol };
+        }
+      }
+    }
+    
+    // Pattern 3: Extract two column names from the question
+    // Look for mentions of "status" and "total" or similar patterns
+    const columnMentions = availableColumns.filter(col => {
+      const colLower = col.toLowerCase();
+      return ql.includes(colLower);
+    });
+    
+    if (columnMentions.length >= 2) {
+      // Find one categorical and one numeric
+      const categorical = columnMentions.find(col => !summary.numericColumns.includes(col));
+      const numeric = columnMentions.find(col => summary.numericColumns.includes(col));
+      
+      if (categorical && numeric) {
+        console.log(`✅ Detected bar plot from column mentions: X="${categorical}", Y="${numeric}"`);
+        return { xColumn: categorical, yColumn: numeric };
+      }
+    }
+    
+    return null;
+  };
+  
+  // Detect simple pie chart requests: "pie chart for status and total" or "pie chart for column status"
+  const detectSimplePieChart = (q: string): { xColumn: string | null; yColumn: string | null } | null => {
+    const ql = q.toLowerCase();
+    
+    // Check if user explicitly mentions "pie chart" or "pie graph"
+    const hasPieKeyword = /\b(pie\s+(chart|graph|plot)|piechart)\b/i.test(q);
+    if (!hasPieKeyword) {
+      return null;
+    }
+    
+    console.log('🔍 Detecting simple pie chart request...');
+    
+    // Pattern 1: "pie chart for [X] and [Y]" or "pie chart for column [X]"
+    const pattern1 = q.match(/\b(?:pie\s+(?:chart|graph|plot))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)\s+(?:and|with)\s+([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern1) {
+      const xRaw = pattern1[1].trim();
+      const yRaw = pattern1[2].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      const yCol = findMatchingColumn(yRaw, availableColumns);
+      
+      if (xCol && yCol) {
+        console.log(`✅ Detected pie chart: X="${xCol}", Y="${yCol}"`);
+        return { xColumn: xCol, yColumn: yCol };
+      }
+    }
+    
+    // Pattern 2: "pie chart for [X]" - try to infer Y from context or use a numeric column
+    const pattern2 = q.match(/\b(?:pie\s+(?:chart|graph|plot))\s+(?:for|of|with)\s+(?:column\s+)?([^\s]+(?:\s+[^\s]+)?)/i);
+    if (pattern2) {
+      const xRaw = pattern2[1].trim();
+      const xCol = findMatchingColumn(xRaw, availableColumns);
+      
+      if (xCol) {
+        // Try to find a numeric column mentioned in the question or use "total" if it exists
+        let yCol: string | null = null;
+        
+        // Check if "total" is mentioned or exists
+        if (summary.numericColumns.includes('total')) {
+          yCol = 'total';
+        } else if (summary.numericColumns.length > 0) {
+          // Use first numeric column as default
+          yCol = summary.numericColumns[0];
+        }
+        
+        if (xCol && yCol) {
+          console.log(`✅ Detected pie chart: X="${xCol}", Y="${yCol}" (inferred)`);
+          return { xColumn: xCol, yColumn: yCol };
+        }
+      }
+    }
+    
+    // Pattern 3: Extract two column names from the question
+    // Look for mentions of column names in the question
+    const columnMentions = availableColumns.filter(col => {
+      const colLower = col.toLowerCase();
+      return ql.includes(colLower);
+    });
+    
+    if (columnMentions.length >= 2) {
+      // Find one categorical and one numeric
+      const categorical = columnMentions.find(col => !summary.numericColumns.includes(col));
+      const numeric = columnMentions.find(col => summary.numericColumns.includes(col));
+      
+      if (categorical && numeric) {
+        console.log(`✅ Detected pie chart from column mentions: X="${categorical}", Y="${numeric}"`);
+        return { xColumn: categorical, yColumn: numeric };
+      }
+    }
+    
+    return null;
+  };
+  
+  // Check for simple bar plot request early
+  const barPlotRequest = detectSimpleBarPlot(question);
+  if (barPlotRequest && barPlotRequest.xColumn && barPlotRequest.yColumn) {
+    console.log(`📊 Creating bar plot: ${barPlotRequest.xColumn} (X) vs ${barPlotRequest.yColumn} (Y)`);
+    
+    try {
+      const barSpec: ChartSpec = {
+        type: 'bar',
+        title: `Bar Chart: ${barPlotRequest.yColumn} by ${barPlotRequest.xColumn}`,
+        x: barPlotRequest.xColumn,
+        y: barPlotRequest.yColumn,
+        xLabel: barPlotRequest.xColumn,
+        yLabel: barPlotRequest.yColumn,
+        aggregate: 'sum', // Default to sum for bar charts
+      };
+      
+      console.log('🔄 Processing bar chart data...');
+      const barData = processChartData(workingData, barSpec);
+      console.log(`✅ Bar chart data: ${barData.length} bars`);
+      
+      if (barData.length === 0) {
+        return {
+          answer: `I couldn't generate a bar chart. The data might be empty after filtering, or there might be an issue with the columns "${barPlotRequest.xColumn}" and "${barPlotRequest.yColumn}".`
+        };
+      }
+      
+      const insights = await generateChartInsights(barSpec, barData, summary, chatInsights);
+      
+      return withNotes({
+        answer: `I've created a bar chart showing ${barPlotRequest.yColumn} grouped by ${barPlotRequest.xColumn}.`,
+        charts: [{ ...barSpec, data: barData, keyInsight: insights.keyInsight }],
+        insights: []
+      });
+    } catch (error) {
+      console.error('❌ Error creating bar plot:', error);
+      // Fall through to general processing
+    }
+  }
+  
+  // Check for simple pie chart request early
+  const pieChartRequest = detectSimplePieChart(question);
+  if (pieChartRequest && pieChartRequest.xColumn && pieChartRequest.yColumn) {
+    console.log(`🥧 Creating pie chart: ${pieChartRequest.xColumn} (X) vs ${pieChartRequest.yColumn} (Y)`);
+    
+    try {
+      // Ensure X column is not a date column for pie charts (unless explicitly requested)
+      const isDateCol = summary.dateColumns.includes(pieChartRequest.xColumn);
+      if (isDateCol) {
+        console.warn(`⚠️ Pie chart requested with date column "${pieChartRequest.xColumn}". Finding categorical alternative...`);
+        // Try to find a categorical column
+        const categoricalCol = availableColumns.find(col => 
+          !summary.dateColumns.includes(col) && 
+          !summary.numericColumns.includes(col) &&
+          col !== pieChartRequest.xColumn
+        );
+        
+        if (categoricalCol) {
+          console.log(`   Using categorical column "${categoricalCol}" instead`);
+          pieChartRequest.xColumn = categoricalCol;
+        } else {
+          return {
+            answer: `I can't create a pie chart using the date column "${pieChartRequest.xColumn}". Pie charts work best with categorical columns like status, category, or product type. Please specify a categorical column for the pie chart.`
+          };
+        }
+      }
+      
+      const pieSpec: ChartSpec = {
+        type: 'pie',
+        title: `Pie Chart: ${pieChartRequest.yColumn} by ${pieChartRequest.xColumn}`,
+        x: pieChartRequest.xColumn,
+        y: pieChartRequest.yColumn,
+        xLabel: pieChartRequest.xColumn,
+        yLabel: pieChartRequest.yColumn,
+        aggregate: 'sum', // Default to sum for pie charts
+      };
+      
+      console.log('🔄 Processing pie chart data...');
+      const pieData = processChartData(workingData, pieSpec);
+      console.log(`✅ Pie chart data: ${pieData.length} segments`);
+      
+      if (pieData.length === 0) {
+        return {
+          answer: `I couldn't generate a pie chart. The data might be empty after filtering, or there might be an issue with the columns "${pieChartRequest.xColumn}" and "${pieChartRequest.yColumn}".`
+        };
+      }
+      
+      const insights = await generateChartInsights(pieSpec, pieData, summary, chatInsights);
+      
+      return withNotes({
+        answer: `I've created a pie chart showing the distribution of ${pieChartRequest.yColumn} by ${pieChartRequest.xColumn}. The chart shows the top categories and their proportions.`,
+        charts: [{ ...pieSpec, data: pieData, keyInsight: insights.keyInsight }],
+        insights: []
+      });
+    } catch (error) {
+      console.error('❌ Error creating pie chart:', error);
+      // Fall through to general processing
+    }
+  }
   
   // If secondary Y-axis is requested, try to find the previous chart from chat history
   if (explicitY2) {
@@ -2622,6 +2925,28 @@ export async function generateGeneralAnswer(
       return { answer: `No valid data points found for line chart. Please check that columns "${vsQuery.var1}" and "${vsQuery.var2}" contain numeric data.` };
     }
     
+    // Calculate smart domains for both charts
+    const scatterDomains = calculateSmartDomainsForChart(
+      scatterData,
+      scatterSpec.x,
+      scatterSpec.y,
+      undefined,
+      {
+        yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+      }
+    );
+    
+    const lineDomains = calculateSmartDomainsForChart(
+      lineData,
+      lineSpec.x,
+      lineSpec.y,
+      lineSpec.y2,
+      {
+        yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+        y2Options: lineSpec.y2 ? { useIQR: true, paddingPercent: 5, includeOutliers: true } : undefined,
+      }
+    );
+    
     const scatterInsights = await generateChartInsights(scatterSpec, scatterData, summary, chatInsights);
     const lineInsights = await generateChartInsights(lineSpec, lineData, summary, chatInsights);
     
@@ -2629,11 +2954,13 @@ export async function generateGeneralAnswer(
       {
         ...scatterSpec,
         data: scatterData,
+        ...scatterDomains, // Add smart domains
         keyInsight: scatterInsights.keyInsight,
       },
       {
         ...lineSpec,
         data: lineData,
+        ...lineDomains, // Add smart domains
         keyInsight: lineInsights.keyInsight,
       },
     ];
@@ -2648,14 +2975,20 @@ export async function generateGeneralAnswer(
   }
 
   // Use more messages for better context (last 15 messages)
-  // Filter out messages that are too long to avoid token limits
+  // Truncate long messages to reduce token usage while preserving context
   const recentHistory = chatHistory
     .slice(-15)
-    .filter(msg => msg.content && msg.content.length < 500) // Filter very long messages
-    .map((msg) => `${msg.role}: ${msg.content}`)
+    .map((msg) => {
+      const content = msg.content || '';
+      const truncated = content.length > 500 ? content.substring(0, 500) + '...' : content;
+      return `${msg.role}: ${truncated}`;
+    })
     .join('\n');
   
-  const historyContext = recentHistory;
+  // Limit total history context to 2000 characters to avoid token limits
+  const historyContext = recentHistory.length > 2000 
+    ? recentHistory.substring(0, 2000) + '...' 
+    : recentHistory;
   
   // If we have a parsed query with aggregations, extract the aggregation column names for the AI
   let aggregationColumnHints = '';
@@ -2805,6 +3138,24 @@ Just respond conversationally - no data analysis needed here.`;
     .map(c => c.name)
     .filter(col => conversationTopics.includes(col.toLowerCase()));
   
+  // Create statistical summary for AI prompt (instead of sending raw data)
+  let dataContext = '';
+  if (requiredColumns && requiredColumns.length > 0 && data.length > 1000) {
+    // For large datasets, use statistical summaries
+    try {
+      const { createStatisticalSummary, formatStatisticalSummary } = await import('./statisticalSummary.js');
+      const statSummary = createStatisticalSummary(data, summary, requiredColumns);
+      dataContext = formatStatisticalSummary(statSummary);
+      console.log(`📊 Using statistical summary for AI prompt (${statSummary.columns.length} columns)`);
+    } catch (error) {
+      console.warn('⚠️ Failed to create statistical summary, using basic context:', error);
+      dataContext = `- ${summary.rowCount} rows, ${summary.columnCount} columns\n- Numeric columns: ${summary.numericColumns.join(', ')}`;
+    }
+  } else {
+    // For small datasets, use basic context
+    dataContext = `- ${summary.rowCount} rows, ${summary.columnCount} columns\n- Numeric columns: ${summary.numericColumns.join(', ')}`;
+  }
+  
   const prompt = `You are a friendly, conversational data analyst assistant. You're having a natural, flowing conversation with the user about their data. Be warm, helpful, and engaging - like talking to a colleague over coffee.
 
 CURRENT QUESTION: ${question}
@@ -2819,9 +3170,8 @@ ${historyContext ? `CONVERSATION HISTORY:\n${historyContext}\n\nIMPORTANT - Use 
 - Match their tone - if they're casual, be casual; if they're formal, be professional` : ''}
 
 DATA CONTEXT:
-- ${summary.rowCount} rows, ${summary.columnCount} columns
-- All columns: ${summary.columns.map((c) => `${c.name} (${c.type})`).join(', ')}${parsedQuery && parsedQuery.aggregations && parsedQuery.aggregations.length > 0 ? ', ' + parsedQuery.aggregations.map(agg => agg.alias || `${agg.column}_${agg.operation}`).join(', ') : ''}
-- Numeric columns: ${summary.numericColumns.join(', ')}${parsedQuery && parsedQuery.aggregations && parsedQuery.aggregations.length > 0 ? ', ' + parsedQuery.aggregations.map(agg => agg.alias || `${agg.column}_${agg.operation}`).join(', ') : ''}
+${dataContext}
+${parsedQuery && parsedQuery.aggregations && parsedQuery.aggregations.length > 0 ? `\nAggregated columns: ${parsedQuery.aggregations.map(agg => agg.alias || `${agg.column}_${agg.operation}`).join(', ')}` : ''}
 ${aggregationColumnHints}
 ${retrievedContext}
 
@@ -2946,10 +3296,14 @@ TECHNICAL RULES:
         if (spec.type === 'pie' && aggregate === 'none') {
           aggregate = 'sum';
         }
+        // For bar charts, default to 'sum' if not specified (needed for categorical X with numeric Y)
+        if (spec.type === 'bar' && aggregate === 'none') {
+          aggregate = 'sum';
+        }
         const validAggregates = ['sum', 'mean', 'count', 'none'];
         if (!validAggregates.includes(aggregate)) {
-          console.warn(`⚠️ Invalid aggregate value "${aggregate}", defaulting to "sum" for pie charts or "none" for others`);
-          aggregate = spec.type === 'pie' ? 'sum' : 'none';
+          console.warn(`⚠️ Invalid aggregate value "${aggregate}", defaulting to "sum" for pie/bar charts or "none" for others`);
+          aggregate = (spec.type === 'pie' || spec.type === 'bar') ? 'sum' : 'none';
         }
 
         return {
@@ -3119,9 +3473,32 @@ TECHNICAL RULES:
           console.warn(`   This might mean the filter removed all rows or aggregation failed`);
         }
         
-        console.log(`   Final chart spec: x="${spec.x}", y="${spec.y}"`);
+        console.log(`   Final chart spec: x="${spec.x}", y="${spec.y}", aggregate="${spec.aggregate}"`);
         const processedData = processChartData(workingData, spec);
         console.log(`   Processed data rows: ${processedData.length}`);
+        
+        // If no data was processed, provide a helpful error message
+        if (processedData.length === 0) {
+          const allCols = summary.columns.map(c => c.name);
+          const xExists = allCols.some(c => c.toLowerCase() === spec.x.toLowerCase());
+          const yExists = allCols.some(c => c.toLowerCase() === spec.y.toLowerCase());
+          
+          let errorMsg = `No valid data points found. `;
+          if (!xExists) {
+            errorMsg += `Column "${spec.x}" not found. `;
+          }
+          if (!yExists) {
+            errorMsg += `Column "${spec.y}" not found. `;
+          }
+          if (xExists && yExists) {
+            errorMsg += `Please check that "${spec.y}" contains numeric data that can be aggregated. `;
+          }
+          errorMsg += `Available columns: ${allCols.join(', ')}`;
+          
+          console.warn(`⚠️ Chart processing failed: ${errorMsg}`);
+          return null; // Return null to indicate failure
+        }
+        
         const chartInsights = await generateChartInsights(spec, processedData, summary, chatInsights);
         
         return {
@@ -3131,7 +3508,32 @@ TECHNICAL RULES:
           data: processedData,
           keyInsight: chartInsights.keyInsight,
         };
-      }));
+      })).filter((chart): chart is ChartSpec => chart !== null);
+      
+      // If all charts failed, return error message
+      if (processedCharts.length === 0 && sanitized.length > 0) {
+        const allCols = summary.columns.map(c => c.name);
+        const firstSpec = sanitized[0];
+        const xExists = allCols.some(c => c.toLowerCase() === firstSpec.x.toLowerCase());
+        const yExists = allCols.some(c => c.toLowerCase() === firstSpec.y.toLowerCase());
+        
+        let errorMsg = `No valid data points found. `;
+        if (!xExists) {
+          errorMsg += `Column "${firstSpec.x}" not found. `;
+        }
+        if (!yExists) {
+          errorMsg += `Column "${firstSpec.y}" not found. `;
+        }
+        if (xExists && yExists) {
+          errorMsg += `Please check that "${firstSpec.y}" contains numeric data that can be aggregated. `;
+        }
+        errorMsg += `Available columns: ${allCols.join(', ')}`;
+        
+        return {
+          answer: errorMsg,
+          charts: undefined,
+        };
+      }
       
       console.log('Chat charts generated:', processedCharts?.length || 0);
 

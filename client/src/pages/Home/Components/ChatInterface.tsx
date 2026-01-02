@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/select';
 import { getUserEmail } from '@/utils/userStorage';
 import { useToast } from '@/hooks/use-toast';
+import { AvailableModelsDialog } from '@/components/AvailableModelsDialog';
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -649,6 +650,12 @@ export function ChatInterface({
                     </SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+            {/* Show Available Models button when in modeling mode */}
+            {mode === 'modeling' && (
+              <div className="flex-shrink-0">
+                <AvailableModelsDialog />
               </div>
             )}
             <div className="relative flex-1">

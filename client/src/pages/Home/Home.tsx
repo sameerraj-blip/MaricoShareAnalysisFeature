@@ -160,8 +160,10 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   });
 
   // Sync mode with initialMode prop (from URL) - only when initialMode changes
+  // This handles backward compatibility when coming from old routes (/data-ops, /modeling)
   useEffect(() => {
-    if (initialMode && initialMode !== mode) {
+    if (initialMode && initialMode !== mode && initialMode !== 'general') {
+      // Only set mode if it's a specific mode (not 'general'), for backward compatibility
       setMode(initialMode);
     }
   }, [initialMode]); // Only depend on initialMode, not mode

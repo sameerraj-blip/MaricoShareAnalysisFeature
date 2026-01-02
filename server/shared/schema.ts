@@ -14,7 +14,7 @@ export const chartSpecSchema = z.object({
   yLabel: z.string().optional(),
   y2Label: z.string().optional(),
   aggregate: z.enum(["sum", "mean", "count", "none"]).optional(),
-  data: z.array(z.record(z.union([z.string(), z.number()]))).optional(),
+  data: z.array(z.record(z.union([z.string(), z.number(), z.null()]))).optional(),
   xDomain: z.tuple([z.number(), z.number()]).optional(), // [min, max] for X-axis
   yDomain: z.tuple([z.number(), z.number()]).optional(), // [min, max] for Y-axis
   trendLine: z.array(z.record(z.union([z.string(), z.number()]))).optional(), // Two points defining the trend line: [{ [x]: min, [y]: y1 }, { [x]: max, [y]: y2 }]

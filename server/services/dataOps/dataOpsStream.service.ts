@@ -27,10 +27,14 @@ export interface ProcessStreamDataOpsParams {
  * Load data for operation using shared data loader
  * This ensures consistency with analysis - both use the same data source
  */
-async function loadDataForOperation(chatDocument: ChatDocument): Promise<Record<string, any>[]> {
+async function loadDataForOperation(
+  chatDocument: ChatDocument,
+  requiredColumns?: string[]
+): Promise<Record<string, any>[]> {
   // Use the shared data loader to ensure we get the latest data
   // This ensures data operations work on the same data that analysis uses
-  return await loadLatestData(chatDocument);
+  // For large datasets, we can filter columns to reduce memory usage
+  return await loadLatestData(chatDocument, requiredColumns);
 }
 
 /**

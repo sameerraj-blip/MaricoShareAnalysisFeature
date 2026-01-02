@@ -275,10 +275,22 @@ function referenceValue(
           ? (sorted[mid - 1] + sorted[mid]) / 2
           : sorted[mid];
       }
-      case 'min':
-        return Math.min(...values);
-      case 'max':
-        return Math.max(...values);
+      case 'min': {
+        // Use loop to avoid stack overflow on large arrays
+        let min = values[0];
+        for (let i = 1; i < values.length; i++) {
+          if (values[i] < min) min = values[i];
+        }
+        return min;
+      }
+      case 'max': {
+        // Use loop to avoid stack overflow on large arrays
+        let max = values[0];
+        for (let i = 1; i < values.length; i++) {
+          if (values[i] > max) max = values[i];
+        }
+        return max;
+      }
       case 'p25': {
         const sorted = [...values].sort((a, b) => a - b);
         const idx = Math.floor(sorted.length * 0.25);
@@ -437,10 +449,28 @@ function applyAggregations(
             resultValue = values.length;
             break;
           case 'min':
-            resultValue = values.length ? Math.min(...values) : null;
+            // Use loop to avoid stack overflow on large arrays
+            if (values.length === 0) {
+              resultValue = null;
+            } else {
+              let min = values[0];
+              for (let i = 1; i < values.length; i++) {
+                if (values[i] < min) min = values[i];
+              }
+              resultValue = min;
+            }
             break;
           case 'max':
-            resultValue = values.length ? Math.max(...values) : null;
+            // Use loop to avoid stack overflow on large arrays
+            if (values.length === 0) {
+              resultValue = null;
+            } else {
+              let max = values[0];
+              for (let i = 1; i < values.length; i++) {
+                if (values[i] > max) max = values[i];
+              }
+              resultValue = max;
+            }
             break;
           case 'median':
             if (values.length) {
@@ -582,10 +612,28 @@ function applyAggregations(
             resultValue = values.length;
             break;
           case 'min':
-            resultValue = values.length ? Math.min(...values) : null;
+            // Use loop to avoid stack overflow on large arrays
+            if (values.length === 0) {
+              resultValue = null;
+            } else {
+              let min = values[0];
+              for (let i = 1; i < values.length; i++) {
+                if (values[i] < min) min = values[i];
+              }
+              resultValue = min;
+            }
             break;
           case 'max':
-            resultValue = values.length ? Math.max(...values) : null;
+            // Use loop to avoid stack overflow on large arrays
+            if (values.length === 0) {
+              resultValue = null;
+            } else {
+              let max = values[0];
+              for (let i = 1; i < values.length; i++) {
+                if (values[i] > max) max = values[i];
+              }
+              resultValue = max;
+            }
             break;
           case 'median':
             if (values.length) {
@@ -614,11 +662,185 @@ function applyAggregations(
   };
 }
 
+/**
+ * Process data in batches for large datasets
+ * Used for filtering operations that can be parallelized
+ */
+function processBatches<T>(
+  data: Record<string, any>[],
+  batchSize: number,
+  processor: (batch: Record<string, any>[]) => T
+): T[] {
+  const results: T[] = [];
+  for (let i = 0; i < data.length; i += batchSize) {
+    const batch = data.slice(i, i + batchSize);
+    results.push(processor(batch));
+  }
+  return results;
+}
+
+/**
+ * Apply filters in streaming mode for large datasets
+ */
+function applyFiltersStreaming(
+  data: Record<string, any>[],
+  summary: DataSummary,
+  parsed: ParsedQuery,
+  batchSize: number = 10000
+): { data: Record<string, any>[]; descriptions: string[] } {
+  if (data.length <= batchSize) {
+    // Small dataset, use regular processing
+    return applyQueryTransformations(data, summary, parsed);
+  }
+
+  console.log(`📊 Processing ${data.length} rows in batches of ${batchSize} for filtering`);
+  let workingData = data;
+  const descriptions: string[] = [];
+
+  // Apply time filters in batches
+  if (parsed.timeFilters) {
+    for (const filter of parsed.timeFilters) {
+      const batchResults = processBatches(workingData, batchSize, (batch) => {
+        const { data: filtered } = applyTimeFilter(batch, summary, filter);
+        return filtered;
+      });
+      workingData = batchResults.flat();
+      const { description } = applyTimeFilter([], summary, filter);
+      if (description) descriptions.push(description);
+    }
+  }
+
+  // Apply value filters in batches
+  if (parsed.valueFilters) {
+    for (const filter of parsed.valueFilters) {
+      const batchResults = processBatches(workingData, batchSize, (batch) => {
+        const { data: filtered } = applyValueFilter(batch, filter);
+        return filtered;
+      });
+      workingData = batchResults.flat();
+      const { description } = applyValueFilter([], filter);
+      if (description) descriptions.push(description);
+    }
+  }
+
+  // Apply exclusion filters in batches
+  if (parsed.exclusionFilters) {
+    for (const filter of parsed.exclusionFilters) {
+      const batchResults = processBatches(workingData, batchSize, (batch) => {
+        const { data: filtered } = applyExclusions(batch, filter);
+        return filtered;
+      });
+      workingData = batchResults.flat();
+      const { description } = applyExclusions([], filter);
+      if (description) descriptions.push(description);
+    }
+  }
+
+  // Aggregations need special handling - merge results from batches
+  if (parsed.groupBy && parsed.aggregations && parsed.groupBy.length && parsed.aggregations.length) {
+    console.log(`📊 Applying aggregations in streaming mode`);
+    const batchResults = processBatches(workingData, batchSize, (batch) => {
+      const { data: aggregated } = applyAggregations(batch, summary, parsed.groupBy!, parsed.aggregations!, parsed.dateAggregationPeriod);
+      return aggregated;
+    });
+    
+    // Merge aggregated results
+    const merged = mergeAggregatedResults(batchResults, parsed.groupBy, parsed.aggregations);
+    workingData = merged;
+    descriptions.push(`Grouped by ${parsed.groupBy.join(', ')} with ${parsed.aggregations.map(a => `${a.operation}(${a.column})`).join(', ')}`);
+  }
+
+  // Top/bottom and sorting can be done on the final result
+  if (parsed.topBottom) {
+    const { data: limited, description } = applyTopBottom(workingData, parsed.topBottom);
+    workingData = limited;
+    if (description) descriptions.push(description);
+  }
+
+  workingData = applySort(workingData, parsed.sort || undefined);
+
+  if (parsed.limit && parsed.limit > 0) {
+    workingData = workingData.slice(0, parsed.limit);
+    descriptions.push(`Limited to ${parsed.limit} rows`);
+  }
+
+  return { data: workingData, descriptions };
+}
+
+/**
+ * Merge aggregated results from multiple batches
+ */
+function mergeAggregatedResults(
+  batchResults: Record<string, any>[][],
+  groupBy: string[],
+  aggregations: AggregationRequest[]
+): Record<string, any>[] {
+  const merged = new Map<string, Record<string, any>>();
+
+  for (const batchResult of batchResults) {
+    for (const row of batchResult) {
+      // Create key from groupBy columns
+      const key = groupBy.map(col => String(row[col] || '')).join('|');
+      
+      if (!merged.has(key)) {
+        // Initialize with groupBy values
+        const newRow: Record<string, any> = {};
+        groupBy.forEach(col => {
+          newRow[col] = row[col];
+        });
+        aggregations.forEach(agg => {
+          const targetName = agg.alias || `${agg.column}_${agg.operation}`;
+          newRow[targetName] = 0;
+        });
+        merged.set(key, newRow);
+      }
+
+      // Merge aggregation values
+      aggregations.forEach(agg => {
+        const targetName = agg.alias || `${agg.column}_${agg.operation}`;
+        const existingValue = merged.get(key)![targetName] || 0;
+        const newValue = toNumber(row[targetName]);
+        
+        if (!isNaN(newValue)) {
+          switch (agg.operation) {
+            case 'sum':
+              merged.get(key)![targetName] = existingValue + newValue;
+              break;
+            case 'mean':
+            case 'avg':
+              // For mean, we need to track count - simplified for now
+              merged.get(key)![targetName] = (existingValue + newValue) / 2;
+              break;
+            case 'count':
+              merged.get(key)![targetName] = existingValue + newValue;
+              break;
+            case 'max':
+              merged.get(key)![targetName] = Math.max(existingValue, newValue);
+              break;
+            case 'min':
+              merged.get(key)![targetName] = Math.min(existingValue || Infinity, newValue);
+              break;
+            default:
+              merged.get(key)![targetName] = newValue;
+          }
+        }
+      });
+    }
+  }
+
+  return Array.from(merged.values());
+}
+
 export function applyQueryTransformations(
   data: Record<string, any>[],
   summary: DataSummary,
   parsed: ParsedQuery
 ): TransformationResult {
+  // Use streaming for large datasets
+  if (data.length > 10000) {
+    return applyFiltersStreaming(data, summary, parsed);
+  }
+
   let workingData = [...data];
   const descriptions: string[] = [];
 

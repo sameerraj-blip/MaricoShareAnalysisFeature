@@ -9,6 +9,7 @@ import { ChatDocument } from "../../models/chat.model.js";
 
 /**
  * Enrich charts with data and insights
+ * Memory-optimized for large datasets
  */
 export async function enrichCharts(
   charts: any[],
@@ -19,22 +20,46 @@ export async function enrichCharts(
     return [];
   }
 
+  const MAX_CHART_DATA_POINTS = 50000; // Limit to prevent memory issues
+
   try {
-    return await Promise.all(
-      charts.map(async (c: any) => {
-        const dataForChart = c.data && Array.isArray(c.data)
+    // Process charts sequentially to avoid memory spikes from parallel processing
+    const enrichedCharts: any[] = [];
+    
+    for (const c of charts) {
+      try {
+        let dataForChart = c.data && Array.isArray(c.data)
           ? c.data
           : processChartData(chatDocument.rawData, c);
+        
+        // Limit data size for memory efficiency
+        if (dataForChart.length > MAX_CHART_DATA_POINTS) {
+          console.log(`⚠️ Chart "${c.title}" has ${dataForChart.length} data points, limiting to ${MAX_CHART_DATA_POINTS}`);
+          if (c.type === 'line' || c.type === 'area') {
+            const step = Math.ceil(dataForChart.length / MAX_CHART_DATA_POINTS);
+            dataForChart = dataForChart.filter((_: any, idx: number) => idx % step === 0).slice(0, MAX_CHART_DATA_POINTS);
+          } else {
+            dataForChart = dataForChart.slice(0, MAX_CHART_DATA_POINTS);
+          }
+        }
+        
         const insights = !('keyInsight' in c)
           ? await generateChartInsights(c, dataForChart, chatDocument.dataSummary, chatLevelInsights)
           : null;
-        return {
+        
+        enrichedCharts.push({
           ...c,
           data: dataForChart,
           keyInsight: c.keyInsight ?? insights?.keyInsight,
-        };
-      })
-    );
+        });
+      } catch (chartError) {
+        console.error(`Error enriching chart "${c.title}":`, chartError);
+        // Include chart without enrichment rather than failing completely
+        enrichedCharts.push(c);
+      }
+    }
+    
+    return enrichedCharts;
   } catch (e) {
     console.error('Final enrichment of chat charts failed:', e);
     return charts;

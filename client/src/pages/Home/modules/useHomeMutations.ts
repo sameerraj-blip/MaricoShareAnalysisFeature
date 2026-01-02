@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Message, UploadResponse, ChatResponse, ThinkingStep } from '@/shared/schema';
 import { uploadFile, streamChatRequest, streamDataOpsChatRequest, DataOpsResponse } from '@/lib/api';
+import { sessionsApi } from '@/lib/api/sessions';
 import { useToast } from '@/hooks/use-toast';
 import { getUserEmail } from '@/utils/userStorage';
 import { useRef, useEffect, useState } from 'react';
@@ -59,39 +60,100 @@ export const useHomeMutations = ({
 
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
-      return await uploadFile<UploadResponse>('/api/upload', file);
+      return await uploadFile<any>('/api/upload', file);
     },
-    onSuccess: (data) => {
-      console.log("upload chart data from the backend",data)
-      setSessionId(data.sessionId);
-      setFileName(data.fileName || null);
-      setInitialCharts(data.charts);
-      setInitialInsights(data.insights);
+    onSuccess: async (data) => {
+      console.log("upload response from the backend", data);
       
-      // Store sample rows and columns for data preview
-      if (data.sampleRows && data.sampleRows.length > 0) {
-        setSampleRows(data.sampleRows);
-        setColumns(data.summary.columns.map(c => c.name));
-        setNumericColumns(data.summary.numericColumns);
-        setDateColumns(data.summary.dateColumns);
-        setTotalRows(data.summary.rowCount);
-        setTotalColumns(data.summary.columnCount);
-      }
-      
-      // Create initial assistant message with charts and insights - more conversational
-      const initialMessage: Message = {
-        role: 'assistant',
-        content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${data.summary.rowCount} rows and ${data.summary.columnCount} columns\n🔢 ${data.summary.numericColumns.length} numeric columns to work with\n📅 ${data.summary.dateColumns.length} date columns for time-based analysis\n\nI've created ${data.charts.length} visualizations and ${data.insights.length} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
-        charts: data.charts,
-        insights: data.insights,
-        timestamp: Date.now(),
-      };
-      
-      setMessages([initialMessage]);
-      
-      // Set AI-generated suggestions if provided
-      if (data.suggestions && data.suggestions.length > 0 && setSuggestions) {
-        setSuggestions(data.suggestions);
+      // Handle new async format (202 response with jobId and sessionId)
+      if (data.jobId && data.sessionId && data.status === 'processing') {
+        setSessionId(data.sessionId);
+        
+        // Fetch session details from placeholder (now it exists!)
+        try {
+          const sessionData = await sessionsApi.getSessionDetails(data.sessionId);
+          const session = sessionData.session || sessionData;
+          
+          if (session) {
+            setFileName(session.fileName || null);
+            setInitialCharts(session.charts || []);
+            setInitialInsights(session.insights || []);
+            
+            // Handle placeholder session (dataSummary might be empty)
+            if (session.dataSummary && session.dataSummary.rowCount > 0) {
+              // Full data is available
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
+              
+              // Create initial assistant message
+              const initialMessage: Message = {
+                role: 'assistant',
+                content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary.rowCount} rows and ${session.dataSummary.columnCount} columns\n🔢 ${session.dataSummary.numericColumns.length} numeric columns to work with\n📅 ${session.dataSummary.dateColumns.length} date columns for time-based analysis\n\nI've created ${(session.charts || []).length} visualizations and ${(session.insights || []).length} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+                charts: session.charts || [],
+                insights: session.insights || [],
+                timestamp: Date.now(),
+              };
+              setMessages([initialMessage]);
+            } else {
+              // Placeholder session - show processing message
+              const processingMessage: Message = {
+                role: 'assistant',
+                content: `📤 Your file "${session.fileName}" is being processed. This may take a few moments for large files. I'll update you once the analysis is complete!`,
+                timestamp: Date.now(),
+              };
+              setMessages([processingMessage]);
+            }
+          }
+        } catch (sessionError) {
+          console.error('Failed to fetch session details:', sessionError);
+          // Still set sessionId so user can see the session
+          setSessionId(data.sessionId);
+        }
+        
+        toast({
+          title: 'Upload Accepted',
+          description: 'Your file is being processed. Analysis will be available shortly.',
+        });
+      } 
+      // Handle old synchronous format (backward compatibility)
+      else if (data.sessionId && data.summary) {
+        setSessionId(data.sessionId);
+        setFileName(data.fileName || null);
+        setInitialCharts(data.charts || []);
+        setInitialInsights(data.insights || []);
+        
+        if (data.sampleRows && data.sampleRows.length > 0) {
+          setSampleRows(data.sampleRows);
+          setColumns(data.summary.columns.map((c: any) => c.name));
+          setNumericColumns(data.summary.numericColumns);
+          setDateColumns(data.summary.dateColumns);
+          setTotalRows(data.summary.rowCount);
+          setTotalColumns(data.summary.columnCount);
+        }
+        
+        const initialMessage: Message = {
+          role: 'assistant',
+          content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${data.summary.rowCount} rows and ${data.summary.columnCount} columns\n🔢 ${data.summary.numericColumns.length} numeric columns to work with\n📅 ${data.summary.dateColumns.length} date columns for time-based analysis\n\nI've created ${(data.charts || []).length} visualizations and ${(data.insights || []).length} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+          charts: data.charts || [],
+          insights: data.insights || [],
+          timestamp: Date.now(),
+        };
+        setMessages([initialMessage]);
+        
+        if (data.suggestions && data.suggestions.length > 0 && setSuggestions) {
+          setSuggestions(data.suggestions);
+        }
+        
+        toast({
+          title: 'Analysis Complete',
+          description: 'Your data has been analyzed successfully!',
+        });
       }
       
       // Invalidate sessions query to refresh the analysis list
@@ -99,11 +161,6 @@ export const useHomeMutations = ({
         queryClient.invalidateQueries({ queryKey: ['sessions', userEmail] });
         console.log('🔄 Invalidated sessions query for user:', userEmail);
       }
-      
-      toast({
-        title: 'Analysis Complete',
-        description: 'Your data has been analyzed successfully!',
-      });
     },
     onError: (error) => {
       toast({
@@ -181,9 +238,12 @@ export const useHomeMutations = ({
       }
       
       // Send full chat history for context (last 15 messages to maintain conversation flow)
+      // Truncate long messages to reduce token usage
       const chatHistory = currentMessages.slice(-15).map(msg => ({
         role: msg.role,
-        content: msg.content,
+        content: msg.content.length > 500 
+          ? msg.content.substring(0, 500) + '...' 
+          : msg.content,
       }));
       
       console.log('📤 Request payload:', {

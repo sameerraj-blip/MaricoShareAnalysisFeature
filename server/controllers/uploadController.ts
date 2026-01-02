@@ -1,19 +1,17 @@
 import { Request, Response } from "express";
 import multer from "multer";
-import { parseFile, createDataSummary, convertDashToZeroForNumericColumns } from "../lib/fileParser.js";
-import { analyzeUpload } from "../lib/dataAnalyzer.js";
-import { uploadResponseSchema } from "../shared/schema.js";
-import { createChatDocument, generateColumnStatistics } from "../models/chat.model.js";
 import { uploadFileToBlob } from "../lib/blobStorage.js";
-import { chunkData, generateChunkEmbeddings, clearVectorStore } from "../lib/ragService.js";
-import { generateAISuggestions } from "../lib/suggestionGenerator.js";
+import { uploadQueue } from "../utils/uploadQueue.js";
+import { createPlaceholderSession } from "../models/chat.model.js";
 
+/**
+ * Upload file endpoint - now uses async queue processing
+ * Returns immediately with jobId for status tracking
+ */
 export const uploadFile = async (
   req: Request & { file?: Express.Multer.File },
   res: Response
 ) => {
-  const startTime = Date.now();
-  
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -22,7 +20,10 @@ export const uploadFile = async (
     // Get username from request body or headers
     const username = req.body.username || req.headers['x-user-email'] || 'anonymous@example.com';
 
-    // Upload file to Azure Blob Storage
+    // Generate a unique session ID for this upload
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Upload file to Azure Blob Storage first (this is fast)
     let blobInfo;
     try {
       blobInfo = await uploadFileToBlob(
@@ -31,158 +32,125 @@ export const uploadFile = async (
         username,
         req.file.mimetype
       );
+      console.log(`✅ File uploaded to blob storage: ${blobInfo.blobName}`);
     } catch (blobError) {
       console.error("Failed to upload file to blob storage:", blobError);
       // Continue without failing the upload - blob storage is optional
     }
 
-    // Parse the file
-    let data = await parseFile(req.file.buffer, req.file.originalname);
-    
-    if (data.length === 0) {
-      return res.status(400).json({ error: 'No data found in file' });
-    }
-
-    // Create data summary to determine column types
-    const summary = createDataSummary(data);
-    
-    // Convert "-" values to 0 for numerical columns
-    // This ensures that dash placeholders in numeric columns are treated as 0, not null
-    data = convertDashToZeroForNumericColumns(data, summary.numericColumns);
-
-    // Analyze data with AI
-    console.log('🤖 Starting AI analysis...');
-    const { charts, insights } = await analyzeUpload(data, summary, req.file.originalname);
-    
-    // Generate AI suggestions based on the data (no conversation history yet)
-    console.log('💡 Generating AI suggestions based on data...');
-    let suggestions: string[] = [];
+    // Create placeholder session immediately so it exists in the database
+    // This prevents 404 errors when frontend tries to fetch session details
     try {
-      suggestions = await generateAISuggestions([], summary); // Empty chat history for initial upload
-      console.log('✅ Generated suggestions:', suggestions);
-    } catch (suggestionError) {
-      console.error('Failed to generate AI suggestions:', suggestionError);
-      // Continue without suggestions - will use fallback
-    }
-    
-    console.log('📊 === CHART GENERATION RESULTS ===');
-    console.log(`Generated ${charts.length} charts:`);
-    charts.forEach((chart, index) => {
-      console.log(`Chart ${index + 1}: "${chart.title}"`);
-      console.log(`  Type: ${chart.type}`);
-      console.log(`  X: "${chart.x}", Y: "${chart.y}"`);
-      console.log(`  Data points: ${chart.data?.length || 0}`);
-      if (chart.data && chart.data.length > 0) {
-        console.log(`  Sample data:`, chart.data.slice(0, 2));
-      } else {
-        console.log(`  ⚠️  NO DATA - This chart will appear empty!`);
-      }
-    });
-
-    // Sanitize charts to remove rows with any NaN values
-    console.log('🧹 Sanitizing charts...');
-    const sanitizedCharts = charts.map((chart, index) => {
-      const originalLength = chart.data?.length || 0;
-      const sanitizedData = chart.data?.filter(row => {
-        // Filter out rows that contain any NaN values
-        return !Object.values(row).some(value => typeof value === 'number' && isNaN(value));
-      }) || [];
-      
-      console.log(`Chart ${index + 1} sanitization: ${originalLength} → ${sanitizedData.length} data points`);
-      
-      return {
-        ...chart,
-        data: sanitizedData
-      };
-    });
-
-    // Generate a unique session ID for this upload
-    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    // Initialize RAG: Clear old vector store and chunk data for semantic search
-    // (RAG disabled for now - will enable later)
-    try {
-      clearVectorStore(sessionId);
-      chunkData(data, summary, sessionId);
-      // Skip embedding generation for now (RAG disabled)
-      // generateChunkEmbeddings(sessionId).catch(() => {});
-    } catch (ragError) {
-      // Silently continue without RAG
-    }
-
-    // Generate column statistics for numeric columns
-    const columnStatistics = generateColumnStatistics(data, summary.numericColumns);
-    
-    // Get top 50 rows as sample data for preview, converting dates to strings
-    const sampleRows = data.slice(0, 50).map(row => {
-      const serializedRow: Record<string, any> = {};
-      for (const [key, value] of Object.entries(row)) {
-        // Convert Date objects to ISO strings
-        if (value instanceof Date) {
-          serializedRow[key] = value.toISOString();
-        } else {
-          serializedRow[key] = value;
-        }
-      }
-      return serializedRow;
-    });
-
-    // Calculate processing time
-    const processingTime = Date.now() - startTime;
-
-    // Create chat document in CosmosDB with all analysis data
-    let chatDocument;
-    try {
-      chatDocument = await createChatDocument(
+      const placeholder = await createPlaceholderSession(
         username,
         req.file.originalname,
         sessionId,
-        summary,
-        sanitizedCharts,
-        data, // Raw data
-        sampleRows, // Sample rows
-        columnStatistics, // Column statistics
-        blobInfo ? {
-          blobUrl: blobInfo.blobUrl,
-          blobName: blobInfo.blobName,
-        } : undefined, // Blob info
-        {
-          totalProcessingTime: processingTime,
-          aiModelUsed: 'gpt-4o',
-          fileSize: req.file.size,
-          analysisVersion: '1.0.0'
-        }, // Analysis metadata
-        insights // AI-generated insights
+        req.file.size,
+        blobInfo
       );
-    } catch (cosmosError) {
-      console.error("Failed to create chat document in CosmosDB:", cosmosError);
-      // Continue without failing the upload - CosmosDB is optional
+      console.log(`✅ Placeholder session created: ${sessionId} (chatId: ${placeholder.id})`);
+    } catch (placeholderError: any) {
+      // Log the full error details for debugging
+      console.error("❌ Failed to create placeholder session:", {
+        error: placeholderError?.message || placeholderError,
+        code: placeholderError?.code,
+        statusCode: placeholderError?.statusCode,
+        sessionId,
+        username
+      });
+      // Don't fail the upload - the session will be created during processing
+      // But log this as a warning since it means the frontend will get 404s initially
+      console.warn("⚠️ Upload will continue, but frontend may get 404 errors until processing completes");
     }
-    
-    console.log('✅ Chart processing complete');
 
-    const response = {
+    // Enqueue the processing job
+    const jobId = await uploadQueue.enqueue(
       sessionId,
-      summary,
-      charts: sanitizedCharts,
-      insights,
-      sampleRows, // Use the sampleRows we already created
-      suggestions: suggestions.length > 0 ? suggestions : undefined, // Include AI-generated suggestions
-      chatId: chatDocument?.id, // Include chat document ID if created
-      blobInfo: blobInfo ? {
-        blobUrl: blobInfo.blobUrl,
-        blobName: blobInfo.blobName,
-      } : undefined, // Include blob storage info if uploaded
-    };
+      username,
+      req.file.originalname,
+      req.file.buffer,
+      req.file.mimetype,
+      blobInfo
+    );
 
-    // Validate response
-    const validated = uploadResponseSchema.parse(response);
+    console.log(`📤 Upload job enqueued: ${jobId} for session ${sessionId}`);
 
-    res.json(validated);
+    // Return immediately with job ID and session ID
+    res.status(202).json({
+      jobId,
+      sessionId,
+      status: 'processing',
+      message: 'File upload accepted. Processing in background. Use /api/upload/status/:jobId to check progress.',
+    });
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to process file',
+    });
+  }
+};
+
+/**
+ * Get upload job status
+ */
+export const getUploadStatus = async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    
+    if (!jobId) {
+      return res.status(400).json({ error: 'Job ID is required' });
+    }
+
+    const job = uploadQueue.getJob(jobId);
+    
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const response: any = {
+      jobId: job.jobId,
+      sessionId: job.sessionId,
+      status: job.status,
+      progress: job.progress,
+      createdAt: job.createdAt,
+    };
+
+    if (job.startedAt) {
+      response.startedAt = job.startedAt;
+    }
+
+    if (job.completedAt) {
+      response.completedAt = job.completedAt;
+    }
+
+    if (job.error) {
+      response.error = job.error;
+    }
+
+    if (job.status === 'completed' && job.result) {
+      response.result = job.result;
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error('Get upload status error:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to get upload status',
+    });
+  }
+};
+
+/**
+ * Get queue statistics (admin endpoint)
+ */
+export const getQueueStats = async (req: Request, res: Response) => {
+  try {
+    const stats = uploadQueue.getStats();
+    res.json(stats);
+  } catch (error) {
+    console.error('Get queue stats error:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to get queue stats',
     });
   }
 };

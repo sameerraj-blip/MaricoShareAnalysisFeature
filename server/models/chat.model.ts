@@ -4,6 +4,7 @@
  */
 import { ChartSpec, Message, DataSummary, Insight } from "../shared/schema.js";
 import { waitForContainer } from "./database.config.js";
+import { ChartReference, saveChartsToBlob, loadChartsFromBlob } from "../lib/blobStorage.js";
 
 // Chat document interface
 export interface ChatDocument {
@@ -16,7 +17,8 @@ export interface ChatDocument {
   collaborators?: string[]; // Emails with access (always includes owner)
   dataSummary: DataSummary; // Data summary from file upload
   messages: Message[]; // Chat messages with charts and insights
-  charts: ChartSpec[]; // All charts generated for this chat
+  charts: ChartSpec[]; // All charts generated for this chat (may be empty if stored in blob)
+  chartReferences?: ChartReference[]; // References to charts stored in blob storage
   insights: Insight[]; // AI-generated insights from data analysis
   sessionId: string; // Original session ID
   // Enhanced analysis data storage
@@ -155,6 +157,50 @@ export const createChatDocument = async (
   
   const chatId = `${uniqueFileName.replace(/[^a-zA-Z0-9]/g, '_')}_${timestamp}`;
   
+  // Estimate document size (rough calculation)
+  // CosmosDB has a 4MB limit per document
+  const estimatedSize = JSON.stringify(rawData).length;
+  const MAX_DOCUMENT_SIZE = 3 * 1024 * 1024; // 3MB safety margin (leave room for other fields)
+  
+  // For large datasets, don't store rawData in CosmosDB - it's already in blob storage
+  // Only store sampleRows for preview
+  const shouldStoreRawData = estimatedSize < MAX_DOCUMENT_SIZE && rawData.length < 10000;
+  
+  if (!shouldStoreRawData) {
+    console.log(`⚠️ Large dataset detected (${rawData.length} rows, ~${(estimatedSize / 1024 / 1024).toFixed(2)}MB). Storing only sampleRows in CosmosDB. Full data is in blob storage.`);
+  }
+  
+  // Check if charts should be stored in blob (if they have large data arrays)
+  let chartsToStore: ChartSpec[] = [];
+  let chartReferences: ChartReference[] = [];
+  
+  if (initialCharts && initialCharts.length > 0) {
+    // Estimate chart size - if any chart has data array with >1000 points, store in blob
+    const shouldStoreChartsInBlob = initialCharts.some(chart => {
+      const chartSize = JSON.stringify(chart).length;
+      const hasLargeData = chart.data && Array.isArray(chart.data) && chart.data.length > 1000;
+      return chartSize > 100000 || hasLargeData; // 100KB or >1000 data points
+    });
+    
+    if (shouldStoreChartsInBlob) {
+      console.log(`📊 Charts have large data arrays. Storing in blob storage...`);
+      try {
+        chartReferences = await saveChartsToBlob(sessionId, initialCharts, normalizedUsername);
+        // Store only chart metadata (without data) in CosmosDB
+        chartsToStore = initialCharts.map(chart => ({
+          ...chart,
+          data: undefined, // Remove data array
+        }));
+        console.log(`✅ Saved ${chartReferences.length} charts to blob storage`);
+      } catch (blobError) {
+        console.error('⚠️ Failed to save charts to blob, storing in CosmosDB:', blobError);
+        chartsToStore = initialCharts; // Fallback to storing in CosmosDB
+      }
+    } else {
+      chartsToStore = initialCharts; // Small charts can be stored in CosmosDB
+    }
+  }
+  
   const chatDocument: ChatDocument & { fsmrora?: string } = {
     id: chatId,
     username: normalizedUsername,
@@ -165,10 +211,11 @@ export const createChatDocument = async (
     lastUpdatedAt: timestamp,
     dataSummary,
     messages: [],
-    charts: initialCharts,
+    charts: chartsToStore, // Charts without data if stored in blob
+    chartReferences: chartReferences.length > 0 ? chartReferences : undefined,
     insights: insights,
     sessionId,
-    rawData,
+    rawData: shouldStoreRawData ? rawData : [], // Only store rawData if it's small enough
     sampleRows,
     columnStatistics,
     blobInfo,
@@ -184,9 +231,92 @@ export const createChatDocument = async (
   try {
     const containerInstance = await waitForContainer();
     const { resource } = await containerInstance.items.create(chatDocument);
+    console.log(`✅ Created chat document: ${chatId} (rawData stored: ${shouldStoreRawData ? 'yes' : 'no, using blob storage'})`);
     return resource as ChatDocument;
-  } catch (error) {
+  } catch (error: any) {
+    // Check if error is due to document size
+    if (error?.code === 400 || error?.message?.includes('Request Entity Too Large') || error?.message?.includes('413')) {
+      console.error(`❌ Document too large for CosmosDB (${rawData.length} rows). Retrying without rawData...`);
+      // Retry without rawData
+      const retryDocument = {
+        ...chatDocument,
+        rawData: [], // Don't store rawData - it's in blob storage
+      };
+      try {
+        const containerInstance = await waitForContainer();
+        const { resource } = await containerInstance.items.create(retryDocument);
+        console.log(`✅ Created chat document (without rawData): ${chatId}`);
+        return resource as ChatDocument;
+      } catch (retryError) {
+        console.error("Failed to create chat document even without rawData:", retryError);
+        throw retryError;
+      }
+    }
     console.error("Failed to create chat document:", error);
+    throw error;
+  }
+};
+
+/**
+ * Create a placeholder session document immediately when upload is accepted
+ * This ensures the session exists in the database before async processing completes
+ */
+export const createPlaceholderSession = async (
+  username: string,
+  fileName: string,
+  sessionId: string,
+  fileSize: number,
+  blobInfo?: { blobUrl: string; blobName: string }
+): Promise<ChatDocument> => {
+  const timestamp = Date.now();
+  const normalizedUsername = normalizeEmail(username) || username;
+  
+  // Generate unique filename with number suffix if needed
+  const uniqueFileName = await generateUniqueFileName(fileName, normalizedUsername);
+  console.log(`📝 Creating placeholder session: "${fileName}" -> "${uniqueFileName}"`);
+  
+  const chatId = `${uniqueFileName.replace(/[^a-zA-Z0-9]/g, '_')}_${timestamp}`;
+  
+  // Create minimal placeholder document
+  const placeholderDocument: ChatDocument & { fsmrora?: string } = {
+    id: chatId,
+    username: normalizedUsername,
+    fsmrora: normalizedUsername, // Partition key
+    fileName: uniqueFileName,
+    uploadedAt: timestamp,
+    createdAt: timestamp,
+    lastUpdatedAt: timestamp,
+    sessionId,
+    dataSummary: {
+      rowCount: 0,
+      columnCount: 0,
+      columns: [],
+      numericColumns: [],
+      dateColumns: [],
+    },
+    messages: [],
+    charts: [],
+    insights: [],
+    rawData: [],
+    sampleRows: [],
+    columnStatistics: {},
+    collaborators: [normalizedUsername],
+    blobInfo,
+    analysisMetadata: {
+      totalProcessingTime: 0,
+      aiModelUsed: 'gpt-4o',
+      fileSize: fileSize,
+      analysisVersion: '1.0.0'
+    }
+  };
+
+  try {
+    const containerInstance = await waitForContainer();
+    const { resource } = await containerInstance.items.create(placeholderDocument);
+    console.log(`✅ Created placeholder session: ${chatId} for sessionId: ${sessionId}`);
+    return resource as ChatDocument;
+  } catch (error: any) {
+    console.error("❌ Failed to create placeholder session:", error);
     throw error;
   }
 };
@@ -271,15 +401,48 @@ export const addMessageToChat = async (
     chatDocument.messages.push(message);
     
     // Add any new charts from the message to the main charts array
-    if (message.charts) {
-      message.charts.forEach(chart => {
-        const existingChart = chatDocument.charts.find(c => 
+    if (message.charts && message.charts.length > 0) {
+      const newCharts = message.charts.filter(chart => {
+        const exists = chatDocument.charts.find(c => 
           c.title === chart.title && c.type === chart.type
         );
-        if (!existingChart) {
-          chatDocument.charts.push(chart);
-        }
+        return !exists;
       });
+
+      if (newCharts.length > 0) {
+        // Check if charts should be stored in blob
+        const shouldStoreInBlob = newCharts.some(chart => {
+          const chartSize = JSON.stringify(chart).length;
+          const hasLargeData = chart.data && Array.isArray(chart.data) && chart.data.length > 1000;
+          return chartSize > 100000 || hasLargeData;
+        });
+
+        if (shouldStoreInBlob) {
+          try {
+            const newChartReferences = await saveChartsToBlob(
+              chatDocument.sessionId,
+              newCharts,
+              chatDocument.username
+            );
+            
+            const existingRefs = chatDocument.chartReferences || [];
+            chatDocument.chartReferences = [...existingRefs, ...newChartReferences];
+            
+            // Store charts without data
+            newCharts.forEach(chart => {
+              chatDocument.charts.push({
+                ...chart,
+                data: undefined,
+              });
+            });
+          } catch (blobError) {
+            console.error('⚠️ Failed to save charts to blob:', blobError);
+            chatDocument.charts.push(...newCharts); // Fallback
+          }
+        } else {
+          chatDocument.charts.push(...newCharts);
+        }
+      }
     }
 
     return await updateChatDocument(chatDocument);
@@ -307,6 +470,9 @@ export const addMessagesBySessionId = async (
     chatDocument.messages.push(...messages);
 
     // Collect any charts from assistant messages into top-level charts
+    // IMPORTANT: Charts passed here should have FULL data (not stripped)
+    // We'll save large charts to blob and strip data from message-level charts
+    const newCharts: ChartSpec[] = [];
     messages.forEach((msg) => {
       if (msg.charts && msg.charts.length > 0) {
         msg.charts.forEach((chart) => {
@@ -314,11 +480,74 @@ export const addMessagesBySessionId = async (
             (c) => c.title === chart.title && c.type === chart.type
           );
           if (!exists) {
-            chatDocument.charts.push(chart);
+            newCharts.push(chart); // Keep full chart with data
           }
         });
       }
     });
+
+    // Save new charts to blob if they're large, and strip data from message-level charts
+    if (newCharts.length > 0) {
+      const largeCharts: ChartSpec[] = [];
+      const smallCharts: ChartSpec[] = [];
+      
+      // Separate large and small charts
+      newCharts.forEach(chart => {
+        const chartSize = JSON.stringify(chart).length;
+        const hasLargeData = chart.data && Array.isArray(chart.data) && chart.data.length > 1000;
+        if (chartSize > 100000 || hasLargeData) {
+          largeCharts.push(chart);
+        } else {
+          smallCharts.push(chart);
+        }
+      });
+
+      // Save large charts to blob storage
+      if (largeCharts.length > 0) {
+        try {
+          const newChartReferences = await saveChartsToBlob(
+            sessionId,
+            largeCharts,
+            chatDocument.username
+          );
+          
+          // Merge with existing chart references
+          const existingRefs = chatDocument.chartReferences || [];
+          chatDocument.chartReferences = [...existingRefs, ...newChartReferences];
+          
+          // Store charts without data in CosmosDB (metadata only)
+          largeCharts.forEach(chart => {
+            const { data, trendLine, ...metadata } = chart;
+            chatDocument.charts.push(metadata as ChartSpec);
+          });
+          
+          console.log(`✅ Saved ${newChartReferences.length} large charts to blob storage`);
+        } catch (blobError) {
+          console.error('⚠️ Failed to save large charts to blob, storing in CosmosDB:', blobError);
+          // Fallback: store in CosmosDB (might fail if too large, but we try)
+          largeCharts.forEach(chart => {
+            chatDocument.charts.push(chart);
+          });
+        }
+      }
+
+      // Store small charts directly in CosmosDB (with full data)
+      if (smallCharts.length > 0) {
+        chatDocument.charts.push(...smallCharts);
+        console.log(`✅ Stored ${smallCharts.length} small charts directly in CosmosDB`);
+      }
+
+      // Strip data from message-level charts to prevent CosmosDB size issues
+      // Full chart data is available in top-level charts array and blob storage
+      messages.forEach(msg => {
+        if (msg.charts && msg.charts.length > 0) {
+          msg.charts = msg.charts.map(chart => {
+            const { data, trendLine, ...rest } = chart;
+            return rest; // Keep only metadata in message charts
+          });
+        }
+      });
+    }
 
     const updated = await updateChatDocument(chatDocument);
     console.log("✅ Upserted chat doc:", updated.id, "messages now:", updated.messages?.length || 0);
@@ -354,7 +583,10 @@ export const updateMessageAndTruncate = async (
     );
 
     if (messageIndex === -1) {
-      throw new Error(`Message with timestamp ${targetTimestamp} not found`);
+      // Message not found - this might be a new message, not an edit
+      // Return the document unchanged instead of throwing an error
+      console.warn(`⚠️ Message with timestamp ${targetTimestamp} not found. This might be a new message, not an edit. Skipping truncation.`);
+      return chatDocument;
     }
 
     console.log(`🗂️ Found message at index ${messageIndex}, truncating all messages after it`);
@@ -420,27 +652,74 @@ export const getUserChats = async (username: string): Promise<ChatDocument[]> =>
 /**
  * Get chat by session ID (more efficient)
  */
-export const getChatBySessionIdEfficient = async (sessionId: string): Promise<ChatDocument | null> => {
-  try {
-    const containerInstance = await waitForContainer();
-    
-    const query = "SELECT * FROM c WHERE c.sessionId = @sessionId";
-    const { resources } = await containerInstance.items.query({
-      query,
-      parameters: [{ name: "@sessionId", value: sessionId }]
-    }).fetchAll();
-    const doc = (resources && resources.length > 0) ? resources[0] : null;
-    if (!doc) {
-      console.warn("⚠️ No chat document found for sessionId:", sessionId);
-    } else {
-      console.log("🔎 Found chat document by sessionId:", doc.id, "username:", doc.username);
-      ensureCollaborators(doc as ChatDocument);
+/**
+ * Helper function to retry Cosmos DB operations on connection errors
+ */
+const retryOnConnectionError = async <T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  operationName: string = "Cosmos DB operation"
+): Promise<T> => {
+  let lastError: any;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check if it's a connection error that might be retryable
+      const isRetryableError = 
+        error.code === "ECONNREFUSED" || 
+        error.code === "ETIMEDOUT" || 
+        error.code === "ENOTFOUND" ||
+        error.code === "ECONNRESET" ||
+        error.code === "RestError" ||
+        errorMessage.includes("ECONNREFUSED") ||
+        errorMessage.includes("ETIMEDOUT") ||
+        errorMessage.includes("ENOTFOUND") ||
+        errorMessage.includes("ECONNRESET");
+      
+      if (isRetryableError && attempt < maxRetries) {
+        const delay = Math.min(attempt * 1000, 5000); // Exponential backoff: 1s, 2s, 3s (max 5s)
+        console.warn(`⚠️ ${operationName} connection error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`, errorMessage.substring(0, 100));
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      
+      // If not retryable or max retries reached, throw
+      throw error;
     }
-    return doc as unknown as ChatDocument | null;
-  } catch (error) {
-    console.error("❌ Failed to get chat by session ID:", error);
-    throw error;
   }
+  
+  throw lastError;
+};
+
+export const getChatBySessionIdEfficient = async (sessionId: string): Promise<ChatDocument | null> => {
+  return retryOnConnectionError(async () => {
+    try {
+      const containerInstance = await waitForContainer();
+      
+      const query = "SELECT * FROM c WHERE c.sessionId = @sessionId";
+      // Enable cross-partition query since sessionId is not the partition key
+      const { resources } = await containerInstance.items.query({
+        query,
+        parameters: [{ name: "@sessionId", value: sessionId }]
+      }, { enableCrossPartitionQuery: true }).fetchAll();
+      const doc = (resources && resources.length > 0) ? resources[0] : null;
+      if (!doc) {
+        console.warn("⚠️ No chat document found for sessionId:", sessionId);
+      } else {
+        console.log("🔎 Found chat document by sessionId:", doc.id, "username:", doc.username);
+        ensureCollaborators(doc as ChatDocument);
+      }
+      return doc as unknown as ChatDocument | null;
+    } catch (error) {
+      console.error("❌ Failed to get chat by session ID:", error);
+      throw error;
+    }
+  }, 3, "getChatBySessionIdEfficient");
 };
 
 /**
@@ -452,17 +731,27 @@ export const getChatBySessionIdForUser = async (
 ): Promise<ChatDocument | null> => {
   const chatDocument = await getChatBySessionIdEfficient(sessionId);
   if (!chatDocument) {
+    console.log(`❌ Session not found: ${sessionId}`);
     return null;
   }
 
   const collaborators = ensureCollaborators(chatDocument);
   const normalizedRequester = normalizeEmail(requesterEmail);
+  
+  console.log(`🔍 Access check for session ${sessionId}:`);
+  console.log(`   Requester: "${requesterEmail}" -> normalized: "${normalizedRequester}"`);
+  console.log(`   Session owner: "${chatDocument.username}"`);
+  console.log(`   Collaborators: [${collaborators.join(', ')}]`);
+  console.log(`   Is requester in collaborators: ${collaborators.includes(normalizedRequester || '')}`);
+  
   if (!normalizedRequester || !collaborators.includes(normalizedRequester)) {
+    console.warn(`⚠️ Unauthorized access attempt: "${normalizedRequester}" not in collaborators for session ${sessionId}`);
     const error = new Error("Unauthorized to access this session");
     (error as any).statusCode = 403;
     throw error;
   }
 
+  console.log(`✅ Access granted for session ${sessionId}`);
   return chatDocument;
 };
 
@@ -821,17 +1110,25 @@ export const generateColumnStatistics = (data: Record<string, any>[], numericCol
       const q1 = sortedValues[q1Index];
       const q3 = sortedValues[q3Index];
       
+      // Calculate min/max without spread operator to avoid stack overflow on large arrays
+      let min = values[0];
+      let max = values[0];
+      for (let i = 1; i < values.length; i++) {
+        if (values[i] < min) min = values[i];
+        if (values[i] > max) max = values[i];
+      }
+      
       stats[column] = {
         count: values.length,
-        min: Math.min(...values),
-        max: Math.max(...values),
+        min: min,
+        max: max,
         sum: sum,
         mean: Number(mean.toFixed(2)),
         median: Number(median.toFixed(2)),
         standardDeviation: Number(standardDeviation.toFixed(2)),
         q1: Number(q1.toFixed(2)),
         q3: Number(q3.toFixed(2)),
-        range: Math.max(...values) - Math.min(...values),
+        range: max - min,
         variance: Number(variance.toFixed(2))
       };
     }

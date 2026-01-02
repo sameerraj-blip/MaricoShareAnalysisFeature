@@ -8,6 +8,8 @@ import { Response } from "express";
  * Send SSE event to client
  * Safely handles client disconnections
  */
+const ENABLE_SSE_LOGGING = process.env.ENABLE_SSE_LOGGING === 'true';
+
 export function sendSSE(res: Response, event: string, data: any): boolean {
   // Check if connection is still writable
   if (res.writableEnded || res.destroyed || !res.writable) {
@@ -21,7 +23,10 @@ export function sendSSE(res: Response, event: string, data: any): boolean {
     if (typeof (res as any).flush === 'function') {
       (res as any).flush();
     }
-    console.log(`📤 SSE sent: ${event}`, data);
+    // Only log in development or when explicitly enabled
+    if (ENABLE_SSE_LOGGING || process.env.NODE_ENV === 'development') {
+      console.log(`📤 SSE sent: ${event}`, data);
+    }
     return true;
   } catch (error: any) {
     // Ignore errors from client disconnections (ECONNRESET, EPIPE are expected)

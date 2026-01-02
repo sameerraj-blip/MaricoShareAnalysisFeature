@@ -9,6 +9,7 @@ from config import config
 from data_operations import remove_nulls, get_preview, get_summary, convert_type, create_derived_column
 from ml_models import (
     train_linear_regression,
+    train_log_log_regression,
     train_logistic_regression,
     train_ridge_regression,
     train_lasso_regression,
@@ -94,7 +95,7 @@ class ConvertTypeRequest(BaseModel):
 class TrainModelRequest(BaseModel):
     data: List[Dict[str, Any]]
     model_type: Literal[
-        "linear", "logistic", "ridge", "lasso", "random_forest", "decision_tree", 
+        "linear", "log_log", "logistic", "ridge", "lasso", "random_forest", "decision_tree", 
         "gradient_boosting", "elasticnet", "svm", "knn",
         "polynomial", "bayesian", "quantile", "poisson", "gamma", "tweedie",
         "extra_trees", "xgboost", "lightgbm", "catboost", "gaussian_process", "mlp",
@@ -343,6 +344,14 @@ async def train_model_endpoint(request: TrainModelRequest):
         # Train model based on type
         if request.model_type == "linear":
             result = train_linear_regression(
+                data=request.data,
+                target_variable=request.target_variable,
+                features=request.features,
+                test_size=request.test_size,
+                random_state=request.random_state
+            )
+        elif request.model_type == "log_log":
+            result = train_log_log_regression(
                 data=request.data,
                 target_variable=request.target_variable,
                 features=request.features,

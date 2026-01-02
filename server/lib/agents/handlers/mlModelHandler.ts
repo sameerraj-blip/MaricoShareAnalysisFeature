@@ -35,7 +35,7 @@ export class MLModelHandler extends BaseHandler {
 
     // Extract model type
     type ModelType = 
-      | 'linear' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
+      | 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' 
       | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn'
       | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie'
       | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp'
@@ -52,12 +52,17 @@ export class MLModelHandler extends BaseHandler {
     
     if (intent.modelType) {
       modelType = intent.modelType as ModelType;
+      console.log(`✅ Using modelType from intent: ${modelType}`);
     } else {
+      console.log(`⚠️ No modelType in intent, extracting from question...`);
       // Try to extract from question
       const questionLower = (intent.originalQuestion || intent.customRequest || '').toLowerCase();
       
       // Regression models
-      if (questionLower.includes('polynomial')) {
+      if (questionLower.includes('log log') || questionLower.includes('log-log') || questionLower.includes('logarithmic') || questionLower.includes('log_log')) {
+        modelType = 'log_log';
+        console.log(`✅ Detected log_log model from question: "${questionLower}"`);
+      } else if (questionLower.includes('polynomial')) {
         modelType = 'polynomial';
       } else if (questionLower.includes('bayesian')) {
         modelType = 'bayesian';
@@ -155,7 +160,11 @@ export class MLModelHandler extends BaseHandler {
         modelType = 'kaplan_meier';
       }
       // Original models
-      else if (questionLower.includes('logistic')) {
+      // Check for log_log BEFORE logistic (since "log" is in both)
+      else if (questionLower.includes('log log') || questionLower.includes('log-log') || questionLower.includes('logarithmic') || questionLower.includes('log_log')) {
+        modelType = 'log_log';
+        console.log(`✅ Detected log_log model from question (fallback): "${questionLower}"`);
+      } else if (questionLower.includes('logistic')) {
         modelType = 'logistic';
       } else if (questionLower.includes('ridge')) {
         modelType = 'ridge';
@@ -400,16 +409,19 @@ export class MLModelHandler extends BaseHandler {
     const uniqueFeatures = Array.from(new Set(matchedFeatures));
 
     console.log(`🤖 Training ${modelType} model: target="${targetCol}", features=[${uniqueFeatures.join(', ')}]`);
+    console.log(`📋 Model type details: ${modelType} (type: ${typeof modelType})`);
 
     try {
       // Train the model using Python service (primary method - returns actual results)
       console.log('🤖 Using Python service to train model...');
+      console.log(`📤 Calling trainMLModel with modelType="${modelType}"`);
       const modelResult = await trainMLModel(
         context.data,
         modelType,
         targetCol,
         uniqueFeatures
       );
+      console.log(`✅ Model training successful. Model type in result: ${modelResult.model_type}`);
 
       // Format response with full model results
       const answer = this.formatModelResponse(modelResult, modelType, targetCol, uniqueFeatures);
@@ -423,9 +435,37 @@ export class MLModelHandler extends BaseHandler {
         operationResult: modelResult,
       };
     } catch (pythonError) {
-      console.error('Python service failed, trying GPT-4o code generation fallback:', pythonError);
+      const errorMessage = pythonError instanceof Error ? pythonError.message : String(pythonError);
+      const errorStack = pythonError instanceof Error ? pythonError.stack : undefined;
       
-      // Fallback to GPT-4o code generation if Python service fails
+      console.error('❌ Python service failed for model training:', {
+        modelType,
+        targetCol,
+        error: errorMessage,
+        stack: errorStack
+      });
+      
+      // For log_log models, provide specific error guidance
+      if (modelType === 'log_log') {
+        if (errorMessage.includes('positive') || errorMessage.includes('non-positive')) {
+          return this.createErrorResponse(
+            new Error(`Log-log model requires all values to be positive. ${errorMessage}\n\nPlease ensure both the target variable "${targetCol}" and all feature variables have only positive values (no zeros or negatives).`),
+            intent,
+            this.findSimilarColumns(targetVariable, context.summary)
+          );
+        }
+      }
+      
+      // Don't fallback to code generation for log_log - show the actual error
+      if (modelType === 'log_log') {
+        return this.createErrorResponse(
+          pythonError instanceof Error ? pythonError : new Error(`Failed to train log-log model: ${errorMessage}`),
+          intent,
+          this.findSimilarColumns(targetVariable, context.summary)
+        );
+      }
+      
+      // Fallback to GPT-4o code generation if Python service fails (for other models)
       try {
         console.log('🔄 Falling back to GPT-4o for code generation...');
         const { code, explanation } = await this.generateModelCode(
@@ -619,6 +659,9 @@ Return ONLY the Python code, no explanations before or after.`;
     switch (modelType) {
       case 'linear':
         explanation += `Linear Regression finds the best-fit line through the data by minimizing the sum of squared residuals. It assumes a linear relationship between features and target.\n\n`;
+        break;
+      case 'log_log':
+        explanation += `Log-Log Regression applies logarithmic transformation to both the target variable and all feature variables before training a linear regression. This is useful for modeling multiplicative relationships and elasticity analysis. The coefficients represent elasticities: a 1% change in a feature leads to a (coefficient)% change in the target variable.\n\n`;
         break;
       case 'logistic':
         explanation += `Logistic Regression is used for binary classification. It models the probability of class membership using the logistic function.\n\n`;
@@ -856,7 +899,7 @@ Return ONLY the Python code, no explanations before or after.`;
         
         // Look for model training patterns in user messages
         // Pattern: "train a [model type] model (degree N) for [target]"
-        const userModelMatch = content.match(/(?:train|build|create)\s+(?:a\s+)?(polynomial|linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp|neural\s*network)\s+(?:regression\s+)?model(?:\s*\([^)]+\))?\s+for\s+([a-zA-Z0-9_\s]+)/i);
+        const userModelMatch = content.match(/(?:train|build|create)\s+(?:a\s+)?(polynomial|linear|log[\s-]?log|logarithmic|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp|neural\s*network)\s+(?:regression\s+)?model(?:\s*\([^)]+\))?\s+for\s+([a-zA-Z0-9_\s]+)/i);
         if (userModelMatch && !target) {
           const typeStr = userModelMatch[1].toLowerCase().replace(/\s+/g, '_');
           const possibleTarget = userModelMatch[2].trim();
@@ -865,6 +908,13 @@ Return ONLY the Python code, no explanations before or after.`;
           const modelTypeMap: Record<string, string> = {
             'polynomial': 'polynomial',
             'linear': 'linear',
+            'log_log': 'log_log',
+            'log-log': 'log_log',
+            'loglog': 'log_log',
+            'log_log_regression': 'log_log',
+            'log_log_model': 'log_log',
+            'logarithmic': 'log_log',
+            'logarithmic_regression': 'log_log',
             'logistic': 'logistic',
             'ridge': 'ridge',
             'lasso': 'lasso',
@@ -899,7 +949,7 @@ Return ONLY the Python code, no explanations before or after.`;
         
         // Also check for simpler patterns: "[model type] model for [target]"
         if (!target) {
-          const simpleMatch = content.match(/(polynomial|linear|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp|neural\s*network)\s+(?:regression\s+)?model\s+for\s+([a-zA-Z0-9_\s]+)/i);
+          const simpleMatch = content.match(/(polynomial|linear|log[\s-]?log|logarithmic|logistic|ridge|lasso|random\s*forest|decision\s*tree|gradient\s*boosting|elasticnet|svm|knn|bayesian|xgboost|lightgbm|catboost|mlp|neural\s*network)\s+(?:regression\s+)?model\s+(?:for|targeting|with target)\s+([a-zA-Z0-9_\s]+)/i);
           if (simpleMatch) {
             const typeStr = simpleMatch[1].toLowerCase().replace(/\s+/g, '_');
             const possibleTarget = simpleMatch[2].trim();
@@ -907,6 +957,13 @@ Return ONLY the Python code, no explanations before or after.`;
             const modelTypeMap: Record<string, string> = {
               'polynomial': 'polynomial',
               'linear': 'linear',
+              'log_log': 'log_log',
+              'log-log': 'log_log',
+              'loglog': 'log_log',
+              'log_log_regression': 'log_log',
+              'log_log_model': 'log_log',
+              'logarithmic': 'log_log',
+              'logarithmic_regression': 'log_log',
               'logistic': 'logistic',
               'ridge': 'ridge',
               'lasso': 'lasso',
