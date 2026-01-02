@@ -79,6 +79,7 @@ export const uploadFile = async (
     res.status(202).json({
       jobId,
       sessionId,
+      fileName: req.file.originalname, // Include fileName so frontend can show it immediately
       status: 'processing',
       message: 'File upload accepted. Processing in background. Use /api/upload/status/:jobId to check progress.',
     });

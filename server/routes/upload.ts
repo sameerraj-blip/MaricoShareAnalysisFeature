@@ -5,10 +5,11 @@ import { uploadFile, getUploadStatus, getQueueStats } from "../controllers/uploa
 
 // Configure multer for file uploads (in-memory storage)
 // For very large files, consider using disk storage with streaming
+// Increased to 1GB to support large CSV files (50MB+)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 500 * 1024 * 1024, // 500MB
+    fileSize: 1024 * 1024 * 1024, // 1GB (1024MB) - increased for large file support
   },
   fileFilter: (req: express.Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
     const allowedTypes = [
@@ -35,8 +36,9 @@ router.post('/upload', upload.single('file'), (err: any, req: express.Request, r
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ 
         error: 'File too large', 
-        message: `File size exceeds the maximum limit of 500MB. Your file is too large to upload.`,
-        maxSize: '500MB'
+        message: `File size exceeds the maximum limit of 1GB. Your file is too large to upload.`,
+        maxSize: '1GB',
+        receivedSize: req.headers['content-length'] ? `${(parseInt(req.headers['content-length']) / 1024 / 1024).toFixed(2)}MB` : 'unknown'
       });
     }
     return res.status(400).json({ 

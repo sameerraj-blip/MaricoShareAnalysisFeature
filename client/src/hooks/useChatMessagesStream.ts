@@ -20,6 +20,12 @@ export const useChatMessagesStream = ({
 
   useEffect(() => {
     if (!sessionId || !enabled) {
+      // Close existing connection if disabled
+      if (eventSourceRef.current) {
+        console.log('🚫 SSE stream disabled - closing connection');
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
       return;
     }
 
@@ -50,10 +56,37 @@ export const useChatMessagesStream = ({
         reconnectAttemptsRef.current = 0;
       };
 
+      // Track if we've received init to prevent duplicate processing
+      let initReceived = false;
+      
       eventSource.addEventListener('init', (event) => {
         try {
           const data = JSON.parse(event.data);
-          // Initial load - could use this to sync if needed
+          // Initial load - send initial messages if available
+          // This helps sync messages when SSE first connects
+          // Only process init once to avoid duplicates
+          if (!initReceived && data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
+            initReceived = true;
+            onNewMessages(data.messages);
+            
+            // Check if this is initial analysis - if so, close connection immediately
+            const hasInitialAnalysis = data.messages.some((msg: any) => 
+              msg.role === 'assistant' && 
+              msg.content && 
+              (msg.content.toLowerCase().includes('initial analysis for') || 
+               msg.charts?.length > 0 || 
+               msg.insights?.length > 0)
+            );
+            
+            if (hasInitialAnalysis) {
+              console.log('✅ Initial analysis received - closing SSE connection immediately');
+              // Close connection immediately
+              if (eventSourceRef.current) {
+                eventSourceRef.current.close();
+                eventSourceRef.current = null;
+              }
+            }
+          }
         } catch (err) {
           console.error('Failed to parse SSE init data:', err);
         }
@@ -68,6 +101,15 @@ export const useChatMessagesStream = ({
           reconnectAttemptsRef.current = 0;
         } catch (err) {
           console.error('Failed to parse SSE messages data:', err);
+        }
+      });
+
+      // Handle 'complete' event - stop listening after initial analysis
+      eventSource.addEventListener('complete', () => {
+        console.log('✅ Initial analysis complete event received - closing SSE connection');
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
         }
       });
 

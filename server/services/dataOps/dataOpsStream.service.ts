@@ -226,6 +226,8 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
     }
 
     // Save messages only if client is still connected
+    // Use consistent timestamp to prevent duplicates
+    const assistantMessageTimestamp = Date.now();
     try {
       await addMessagesBySessionId(sessionId, [
         {
@@ -237,7 +239,7 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
         {
           role: 'assistant',
           content: result.answer,
-          timestamp: Date.now(),
+          timestamp: assistantMessageTimestamp,
         },
       ]);
     } catch (error) {

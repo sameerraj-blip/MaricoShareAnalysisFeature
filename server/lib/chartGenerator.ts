@@ -1,11 +1,13 @@
 import { ChartSpec } from '../shared/schema.js';
 import { findMatchingColumn } from './agents/utils/columnMatcher.js';
 import { normalizeDateToPeriod, parseFlexibleDate, DatePeriod, isDateColumnName } from './dateUtils.js';
+import { optimizeChartData, downsampleChartData } from './chartDownsampling.js';
 
 // Maximum data points for visualization to ensure good performance
-const MAX_POINTS_LINE_CHART = 2000;  // For line/area charts
-const MAX_POINTS_SCATTER = 2000;     // For scatter plots
-const MAX_POINTS_CORRELATION = 3000; // For correlation charts
+// Updated to 5000 as per requirements - all downsampling now handled by chartDownsampling.ts
+const MAX_POINTS_LINE_CHART = 5000;  // For line/area charts
+const MAX_POINTS_SCATTER = 5000;     // For scatter plots
+const MAX_POINTS_CORRELATION = 5000; // For correlation charts
 
 // Helper to clean numeric values (strip %, commas, etc.)
 function toNumber(value: any): number {
@@ -485,14 +487,12 @@ export function processChartData(
 
     console.log(`   Scatter plot: ${scatterData.length} valid numeric points`);
 
-    // Apply smart downsampling for large datasets
-    if (scatterData.length > MAX_POINTS_SCATTER) {
-      const beforeCount = scatterData.length;
-      scatterData = downsampleScatter(scatterData, xCol, yCol, MAX_POINTS_SCATTER);
-      console.log(`   Downsampled from ${beforeCount} to ${scatterData.length} points for performance`);
+    // Apply optimization to ensure max points limit
+    const optimized = optimizeChartData(scatterData, chartSpec);
+    if (optimized.length < scatterData.length) {
+      console.log(`   ✅ Optimized scatter plot from ${scatterData.length} to ${optimized.length} points`);
     }
-
-    return scatterData;
+    return optimized;
   }
 
   if (type === 'pie') {
@@ -730,25 +730,14 @@ export function processChartData(
         return sanitizedRow;
       });
       
-      // Apply downsampling if still too many points after aggregation
-      if (result.length > MAX_POINTS_LINE_CHART) {
-        const beforeCount = result.length;
-        // Check if x values are numeric for LTTB algorithm
-        const firstX = toNumber(result[0]?.[xCol]);
-        const isNumericX = !isNaN(firstX);
-        
-        if (isNumericX) {
-          // Use LTTB for numeric x-axis (preserves visual shape better)
-          result = downsampleLTTB(result, xCol, yCol, MAX_POINTS_LINE_CHART);
-        } else {
-          // Use simple decimation for non-numeric x-axis
-          result = downsampleSimple(result, MAX_POINTS_LINE_CHART);
-        }
-        console.log(`   Downsampled from ${beforeCount} to ${result.length} points after aggregation`);
+      // Apply optimization to ensure max points limit
+      const optimized = optimizeChartData(result, chartSpec);
+      if (optimized.length < result.length) {
+        console.log(`   ✅ Optimized from ${result.length} to ${optimized.length} points after aggregation`);
       }
       
-      console.log(`   ${type} chart result: ${result.length} points (sorted chronologically)`);
-      return result;
+      console.log(`   ${type} chart result: ${optimized.length} points (sorted chronologically)`);
+      return optimized;
     }
 
     let result = data
@@ -801,25 +790,14 @@ export function processChartData(
       }
     }
     
-    // Apply downsampling for large datasets
-    if (result.length > MAX_POINTS_LINE_CHART) {
-      const beforeCount = result.length;
-      // Check if x values are numeric for LTTB algorithm
-      const firstX = toNumber(result[0]?.[xCol]);
-      const isNumericX = !isNaN(firstX);
-      
-      if (isNumericX) {
-        // Use LTTB for numeric x-axis (preserves visual shape better)
-        result = downsampleLTTB(result, xCol, yCol, MAX_POINTS_LINE_CHART);
-      } else {
-        // Use simple decimation for non-numeric x-axis (dates, categories, etc.)
-        result = downsampleSimple(result, MAX_POINTS_LINE_CHART);
-      }
-      console.log(`   Downsampled from ${beforeCount} to ${result.length} points for performance`);
+    // Apply optimization to ensure max points limit
+    const optimized = optimizeChartData(result, chartSpec);
+    if (optimized.length < result.length) {
+      console.log(`   ✅ Optimized from ${result.length} to ${optimized.length} points`);
     }
     
-    console.log(`   ${type} chart result: ${result.length} points (sorted chronologically)`);
-    return result;
+    console.log(`   ${type} chart result: ${optimized.length} points (sorted chronologically)`);
+    return optimized;
   }
 
   console.warn(`❌ Unknown chart type: ${type} for chart: ${chartSpec.title}`);

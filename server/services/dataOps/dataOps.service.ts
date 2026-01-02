@@ -110,6 +110,8 @@ export async function processDataOperation(params: ProcessDataOpsParams): Promis
   }
 
   // Save messages
+  // Use consistent timestamps to prevent duplicates
+  const assistantMessageTimestamp = Date.now();
   try {
     await addMessagesBySessionId(sessionId, [
       {
@@ -121,7 +123,7 @@ export async function processDataOperation(params: ProcessDataOpsParams): Promis
       {
         role: 'assistant',
         content: result.answer,
-        timestamp: Date.now(),
+        timestamp: assistantMessageTimestamp,
       },
     ]);
   } catch (error) {
