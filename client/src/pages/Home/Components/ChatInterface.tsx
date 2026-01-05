@@ -40,6 +40,7 @@ interface ChatInterfaceProps {
   onModeChange?: (mode: 'general' | 'analysis' | 'dataOps' | 'modeling') => void; // Callback for mode change
   sessionId?: string | null; // Session ID for downloading modified datasets
   isReplacingAnalysis?: boolean; // Whether we're replacing the current analysis
+  isLargeFileLoading?: boolean; // Whether a large file is being loaded
 }
 
 // Dynamic suggestions based on conversation context
@@ -107,6 +108,7 @@ export function ChatInterface({
   onModeChange,
   sessionId,
   isReplacingAnalysis = false,
+  isLargeFileLoading = false,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
@@ -486,6 +488,20 @@ export function ChatInterface({
             <h3 className="text-lg font-semibold text-gray-900 mb-1">Replacing analysis...</h3>
             <p className="text-sm text-gray-500">Uploading and analyzing your new data file</p>
             <p className="text-xs text-gray-400 mt-2">This may take a moment</p>
+          </div>
+        </div>
+      )}
+      {/* Loading Overlay for large files */}
+      {isLargeFileLoading && (
+        <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="text-center">
+            <div className="relative mb-4">
+              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+                <Loader2 className="w-8 h-8 text-primary animate-spin" />
+              </div>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Large file loading</h3>
+            <p className="text-sm text-gray-500">Processing your file, this may take a few moments</p>
           </div>
         </div>
       )}

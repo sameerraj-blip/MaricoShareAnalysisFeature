@@ -6,12 +6,14 @@ interface UseChatMessagesStreamProps {
   sessionId: string | null;
   onNewMessages: (messages: Message[]) => void;
   enabled?: boolean;
+  onComplete?: () => void;
 }
 
 export const useChatMessagesStream = ({
   sessionId,
   onNewMessages,
   enabled = true,
+  onComplete,
 }: UseChatMessagesStreamProps) => {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -56,36 +58,13 @@ export const useChatMessagesStream = ({
         reconnectAttemptsRef.current = 0;
       };
 
-      // Track if we've received init to prevent duplicate processing
-      let initReceived = false;
-      
       eventSource.addEventListener('init', (event) => {
         try {
           const data = JSON.parse(event.data);
           // Initial load - send initial messages if available
-          // This helps sync messages when SSE first connects
-          // Only process init once to avoid duplicates
-          if (!initReceived && data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
-            initReceived = true;
+          if (data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
+            console.log(`📥 SSE init: Received ${data.messages.length} initial messages`);
             onNewMessages(data.messages);
-            
-            // Check if this is initial analysis - if so, close connection immediately
-            const hasInitialAnalysis = data.messages.some((msg: any) => 
-              msg.role === 'assistant' && 
-              msg.content && 
-              (msg.content.toLowerCase().includes('initial analysis for') || 
-               msg.charts?.length > 0 || 
-               msg.insights?.length > 0)
-            );
-            
-            if (hasInitialAnalysis) {
-              console.log('✅ Initial analysis received - closing SSE connection immediately');
-              // Close connection immediately
-              if (eventSourceRef.current) {
-                eventSourceRef.current.close();
-                eventSourceRef.current = null;
-              }
-            }
           }
         } catch (err) {
           console.error('Failed to parse SSE init data:', err);
@@ -96,6 +75,7 @@ export const useChatMessagesStream = ({
         try {
           const data = JSON.parse(event.data);
           if (data.messages && Array.isArray(data.messages)) {
+            console.log(`📥 SSE messages: Received ${data.messages.length} new messages`);
             onNewMessages(data.messages);
           }
           reconnectAttemptsRef.current = 0;
@@ -104,12 +84,25 @@ export const useChatMessagesStream = ({
         }
       });
 
-      // Handle 'complete' event - stop listening after initial analysis
-      eventSource.addEventListener('complete', () => {
-        console.log('✅ Initial analysis complete event received - closing SSE connection');
+      // Handle 'done' event - close connection after receiving one response
+      eventSource.addEventListener('done', () => {
+        console.log('✅ Chat response complete - closing SSE connection');
         if (eventSourceRef.current) {
           eventSourceRef.current.close();
           eventSourceRef.current = null;
+        }
+      });
+
+      // Handle 'complete' event - close connection after initial analysis
+      eventSource.addEventListener('complete', () => {
+        console.log('✅ Initial analysis complete - closing SSE connection');
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+        // Call onComplete callback if provided
+        if (onComplete) {
+          onComplete();
         }
       });
 
@@ -118,17 +111,31 @@ export const useChatMessagesStream = ({
       });
 
       eventSource.onerror = (error) => {
+        // Check if connection was closed normally (readyState 2 = CLOSED)
+        if (eventSource.readyState === EventSource.CLOSED) {
+          console.log('✅ SSE connection closed normally');
+          eventSourceRef.current = null;
+          return;
+        }
+        
+        console.warn('⚠️ SSE connection error, readyState:', eventSource.readyState);
         eventSource.close();
         eventSourceRef.current = null;
 
-        // Attempt to reconnect with exponential backoff
-        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+        // Only attempt to reconnect if enabled and we haven't exceeded max attempts
+        // Don't reconnect if connection was closed normally (after initial analysis)
+        if (enabled && reconnectAttemptsRef.current < maxReconnectAttempts) {
           const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
           reconnectAttemptsRef.current++;
+          console.log(`🔄 SSE: Attempting reconnect ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${delay}ms`);
           
           reconnectTimeoutRef.current = setTimeout(() => {
-            connectSSE();
+            if (enabled) { // Check again before reconnecting
+              connectSSE();
+            }
           }, delay);
+        } else {
+          console.log('🚫 SSE: Not reconnecting (disabled or max attempts reached)');
         }
       };
     };
@@ -147,6 +154,6 @@ export const useChatMessagesStream = ({
         eventSourceRef.current = null;
       }
     };
-  }, [sessionId, enabled, onNewMessages]);
+  }, [sessionId, enabled, onNewMessages, onComplete]);
 };
 

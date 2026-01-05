@@ -22,6 +22,7 @@ interface UseHomeMutationsProps {
   setTotalColumns: (columns: number) => void;
   setMessages: (messages: Message[] | ((prev: Message[]) => Message[])) => void;
   setSuggestions?: (suggestions: string[]) => void;
+  setIsLargeFileLoading?: (isLoading: boolean) => void;
 }
 
 export const useHomeMutations = ({
@@ -40,6 +41,7 @@ export const useHomeMutations = ({
   setTotalColumns,
   setMessages,
   setSuggestions,
+  setIsLargeFileLoading,
 }: UseHomeMutationsProps) => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -59,27 +61,30 @@ export const useHomeMutations = ({
   // This preserves formatting like **bold** for headings
 
   const uploadMutation = useMutation({
-    mutationFn: async (file: File) => {
+    mutationFn: async ({ file, fileSize }: { file: File; fileSize: number }) => {
+      // Store fileSize in a way we can access it in onSuccess
+      (file as any)._fileSize = fileSize;
       return await uploadFile<any>('/api/upload', file);
     },
-    onSuccess: async (data) => {
+    onSuccess: async (data, variables) => {
       console.log("upload response from the backend", data);
       
       // Handle new async format (202 response with jobId and sessionId)
       if (data.jobId && data.sessionId && data.status === 'processing') {
         setSessionId(data.sessionId);
         
-        // Show processing message IMMEDIATELY, before fetching session details
-        // This ensures the user sees feedback right away, even if session fetch fails
-        // NOTE: We only show the processing message here. The initial analysis message
-        // will come from SSE when processing completes, which will replace this message.
-        const fileName = data.fileName || 'your file';
-        const processingMessage: Message = {
-          role: 'assistant',
-          content: `📤 Your file "${fileName}" is being processed. This may take a few moments for large files. I'll update you once the analysis is complete!`,
-          timestamp: Date.now(),
-        };
-        setMessages([processingMessage]);
+        // Check if file is large (>= 50MB) and show loading state instead of message
+        const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
+        const isLargeFile = variables.fileSize >= LARGE_FILE_THRESHOLD;
+        
+        if (isLargeFile && setIsLargeFileLoading) {
+          // Show loading state for large files instead of processing message
+          setIsLargeFileLoading(true);
+          setMessages([]); // Clear messages to show loading state
+        } else {
+          // For small files, don't show any message - just wait for SSE
+          setMessages([]);
+        }
         
         // Fetch session details from placeholder (now it exists!)
         // We only fetch to set metadata, NOT to show the initial message
@@ -159,6 +164,10 @@ export const useHomeMutations = ({
       }
     },
     onError: (error) => {
+      // Clear large file loading state on error
+      if (setIsLargeFileLoading) {
+        setIsLargeFileLoading(false);
+      }
       toast({
         title: 'Upload Failed',
         description: error instanceof Error ? error.message : 'Failed to upload file',
@@ -419,7 +428,15 @@ export const useHomeMutations = ({
       };
       
       console.log('💬 Adding assistant message to chat:', assistantMessage.content.substring(0, 50));
+      console.log('📊 Message includes:', {
+        hasCharts: !!assistantMessage.charts?.length,
+        hasInsights: !!assistantMessage.insights?.length,
+        contentLength: assistantMessage.content?.length || 0
+      });
+      
       setMessages((prev) => {
+        // Simply append the message - no deduplication, no cleaning
+        // Messages are already saved to CosmosDB by the backend during processing
         const updated = [...prev, assistantMessage];
         console.log('📋 Total messages now:', updated.length);
         return updated;

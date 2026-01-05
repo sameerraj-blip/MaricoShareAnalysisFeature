@@ -4,6 +4,7 @@ import { ChatInterface } from './Components/ChatInterface';
 import { useHomeState, useHomeMutations, useHomeHandlers, useSessionLoader } from './modules';
 import { sessionsApi } from '@/lib/api';
 import { useChatMessagesStream } from '@/hooks/useChatMessagesStream';
+import { Message } from '@/shared/schema';
 
 interface HomeProps {
   resetTrigger?: number;
@@ -17,6 +18,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [collaborators, setCollaborators] = useState<string[]>([]);
+  const [isLargeFileLoading, setIsLargeFileLoading] = useState(false);
   const {
     sessionId,
     fileName,
@@ -61,6 +63,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     setTotalColumns,
     setMessages,
     setSuggestions,
+    setIsLargeFileLoading,
   });
 
   const { handleFileSelect, handleSendMessage, handleUploadNew, handleEditMessage } = useHomeHandlers({
@@ -107,113 +110,201 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     }
   };
 
-  // Track if initial analysis is complete - disable SSE after that
-  const [initialAnalysisComplete, setInitialAnalysisComplete] = useState(false);
+  // Track if initial analysis has been received
+  const [initialAnalysisReceived, setInitialAnalysisReceived] = useState(false);
 
-  // Real-time chat message streaming for collaborative sessions
-  // Only enabled until initial analysis is complete, then disabled to prevent duplicates
+  // Helper function to check if a message is initial analysis
+  const isInitialAnalysisMessage = (msg: Message): boolean => {
+    if (msg.role !== 'assistant') return false;
+    
+    // Check for initial analysis by:
+    // 1. Content containing "initial analysis for" OR "I've just finished analyzing"
+    // 2. Having charts
+    // 3. Having insights
+    const content = msg.content?.toLowerCase() || '';
+    return (
+      content.includes('initial analysis for') ||
+      content.includes("i've just finished analyzing") ||
+      content.includes("just finished analyzing") ||
+      (msg.charts && msg.charts.length > 0) ||
+      (msg.insights && msg.insights.length > 0)
+    );
+  };
+
+  // Fallback: Fetch messages from session API when SSE completes but no messages received
+  const fetchMessagesFromSession = async (retryCount = 0): Promise<boolean> => {
+    if (!sessionId || initialAnalysisReceived) {
+      console.log('⏭️ Skipping fetch - no sessionId or already received initial analysis');
+      return false;
+    }
+    
+    const MAX_RETRIES = 10; // Try up to 10 times (10 seconds total)
+    
+    try {
+      console.log(`📥 Fetching messages from session API (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+      const data = await sessionsApi.getSessionDetails(sessionId);
+      const session = data.session || data;
+      
+      console.log('📋 Session data:', {
+        hasSession: !!session,
+        hasMessages: !!(session?.messages),
+        messagesLength: session?.messages?.length || 0,
+        hasCharts: !!(session?.charts?.length),
+        hasInsights: !!(session?.insights?.length)
+      });
+      
+      if (session && session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
+        console.log(`✅ Fetched ${session.messages.length} messages from session API`);
+        console.log('📝 Messages:', session.messages.map((m: Message) => ({
+          role: m.role,
+          hasContent: !!m.content,
+          contentPreview: m.content?.substring(0, 50),
+          chartsCount: m.charts?.length || 0,
+          insightsCount: m.insights?.length || 0
+        })));
+        
+        // Check if initial analysis exists using improved detection
+        const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
+        
+        if (hasInitialAnalysis) {
+          console.log('✅ Initial analysis found in session - setting messages and clearing loading state');
+          setMessages(session.messages);
+          setIsLargeFileLoading(false);
+          setInitialAnalysisReceived(true);
+          
+          // Also set metadata if available
+          if (session.dataSummary) {
+            if (session.sampleRows && session.sampleRows.length > 0) {
+              setSampleRows(session.sampleRows);
+            }
+            setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+            setNumericColumns(session.dataSummary.numericColumns || []);
+            setDateColumns(session.dataSummary.dateColumns || []);
+            setTotalRows(session.dataSummary.rowCount);
+            setTotalColumns(session.dataSummary.columnCount);
+          }
+          if (session.charts) setInitialCharts(session.charts);
+          if (session.insights) setInitialInsights(session.insights);
+          return true; // Success
+        } else {
+          console.log('⚠️ No initial analysis found in session messages yet');
+          // Check if we have charts/insights at session level (even without messages)
+          if ((session.charts && session.charts.length > 0) || (session.insights && session.insights.length > 0)) {
+            console.log('✅ Found charts/insights at session level - creating initial message');
+            // Create an initial message from session data
+            const initialMessage: Message = {
+              role: 'assistant',
+              content: `Initial analysis for ${session.fileName || 'your file'}`,
+              charts: session.charts || [],
+              insights: session.insights || [],
+              timestamp: Date.now(),
+            };
+            setMessages([initialMessage]);
+            setIsLargeFileLoading(false);
+            setInitialAnalysisReceived(true);
+            
+            // Set metadata
+            if (session.dataSummary) {
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
+            }
+            if (session.charts) setInitialCharts(session.charts);
+            if (session.insights) setInitialInsights(session.insights);
+            return true;
+          }
+        }
+      } else {
+        console.log('⚠️ No messages found in session yet');
+        // Check if we have charts/insights at session level (even without messages)
+        if (session && ((session.charts && session.charts.length > 0) || (session.insights && session.insights.length > 0))) {
+          console.log('✅ Found charts/insights at session level - creating initial message');
+          // Create an initial message from session data
+          const initialMessage: Message = {
+            role: 'assistant',
+            content: `Initial analysis for ${session.fileName || 'your file'}`,
+            charts: session.charts || [],
+            insights: session.insights || [],
+            timestamp: Date.now(),
+          };
+          setMessages([initialMessage]);
+          setIsLargeFileLoading(false);
+          setInitialAnalysisReceived(true);
+          
+          // Set metadata
+          if (session.dataSummary) {
+            if (session.sampleRows && session.sampleRows.length > 0) {
+              setSampleRows(session.sampleRows);
+            }
+            setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+            setNumericColumns(session.dataSummary.numericColumns || []);
+            setDateColumns(session.dataSummary.dateColumns || []);
+            setTotalRows(session.dataSummary.rowCount);
+            setTotalColumns(session.dataSummary.columnCount);
+          }
+          if (session.charts) setInitialCharts(session.charts);
+          if (session.insights) setInitialInsights(session.insights);
+          return true;
+        }
+      }
+    } catch (error) {
+      console.error('⚠️ Failed to fetch messages from session API:', error);
+    }
+    
+    // Retry if we haven't found messages yet and haven't exceeded max retries
+    if (retryCount < MAX_RETRIES - 1) {
+      setTimeout(() => {
+        fetchMessagesFromSession(retryCount + 1);
+      }, 1000); // Retry every 1 second
+    } else {
+      console.warn('⚠️ Max retries reached - giving up on fetching messages');
+    }
+    
+    return false;
+  };
+
+  // SSE for initial analysis only - polls for existing messages when session first loads
+  // Disabled after initial analysis is received to prevent continuous polling
+  // Regular chat messages come from chat mutation which saves to CosmosDB
   useChatMessagesStream({
     sessionId,
-    enabled: !!sessionId && !initialAnalysisComplete, // Disable after initial analysis
+    enabled: !!sessionId && !initialAnalysisReceived, // Only enabled until initial analysis is received
     onNewMessages: (newMessages) => {
-      // Append new messages to existing messages, avoiding duplicates
+      // Simply append all new messages - no cleaning, no deduplication
       setMessages((prev) => {
-        // Early return if no new messages
         if (!newMessages || newMessages.length === 0) {
           return prev;
         }
 
-        // Helper function to normalize content for comparison (remove extra whitespace, normalize quotes)
-        const normalizeContent = (content: string): string => {
-          if (!content) return '';
-          return content
-            .replace(/\s+/g, ' ')
-            .replace(/[""]/g, '"')
-            .replace(/['']/g, "'")
-            .trim()
-            .toLowerCase();
-        };
-
-        // Helper function to check if a message is the unwanted "Hi! I've just finished analyzing..." message
-        // This is different from the "Initial analysis for [filename]" message which we want to keep
-        const isUnwantedInitialMessage = (msg: Message): boolean => {
-          if (msg.role !== 'assistant' || !msg.content) return false;
-          const content = normalizeContent(msg.content);
-          // Check for the unwanted message pattern: "Hi! I've just finished analyzing your data..."
-          // This message contains dataset summary info that's redundant with the UI components
-          return (
-            (content.includes("i've just finished analyzing") || content.includes("hi! 👋 i've just finished")) &&
-            (content.includes("your dataset has") && content.includes("rows and") && content.includes("columns")) &&
-            (content.includes("numeric columns to work with") || content.includes("date columns for time-based"))
-          );
-        };
-
-        // Process new messages - only filter out unwanted initial messages
-        // Allow users to ask the same question multiple times, so we don't deduplicate regular messages
-        const uniqueNewMessages: Message[] = [];
-        const seenUnwantedInitial = new Set<string>();
+        console.log(`📥 SSE: Received ${newMessages.length} messages`);
         
-        for (const newMsg of newMessages) {
-          if (!newMsg.content) {
-            continue; // Skip messages without content
-          }
-          
-          // FILTER OUT the unwanted "Hi! I've just finished analyzing..." message
-          // We only want the "Initial analysis for [filename]" message which shows the UI components
-          if (isUnwantedInitialMessage(newMsg)) {
-            const normalizedContent = normalizeContent(newMsg.content);
-            const key = `${newMsg.role}|${normalizedContent}`;
-            
-            // Only filter if we've already seen this unwanted initial message
-            if (seenUnwantedInitial.has(key)) {
-              console.log('🔄 SSE: Filtering out duplicate unwanted initial analysis message');
-              continue;
-            }
-            
-            // Check if this unwanted message already exists in previous messages
-            const existsInPrev = prev.some(msg => {
-              if (!msg.content) return false;
-              return isUnwantedInitialMessage(msg);
-            });
-            
-            if (existsInPrev) {
-              console.log('🔄 SSE: Filtering out unwanted initial analysis message (already exists)');
-              continue;
-            }
-            
-            seenUnwantedInitial.add(key);
-          }
-          
-          // For all other messages (including regular chat), allow duplicates
-          // Users should be able to ask the same question multiple times
-          uniqueNewMessages.push(newMsg);
+        // Check if initial analysis arrived to clear loading state and disable SSE
+        const hasInitialAnalysis = newMessages.some(msg => isInitialAnalysisMessage(msg));
+        
+        if (hasInitialAnalysis && !initialAnalysisReceived) {
+          console.log('✅ Initial analysis received via SSE - disabling polling');
+          setIsLargeFileLoading(false);
+          setInitialAnalysisReceived(true); // Disable SSE polling after initial analysis
         }
         
-        // Check if this is the initial analysis message - if so, mark analysis as complete
-        // The SSE connection should already be closed by the hook, but we mark it here too
-        if (uniqueNewMessages.length > 0 && !initialAnalysisComplete) {
-          const hasInitialAnalysis = uniqueNewMessages.some(msg => 
-            msg.role === 'assistant' && 
-            msg.content && 
-            (msg.content.toLowerCase().includes('initial analysis for') || 
-             msg.charts?.length > 0 || 
-             msg.insights?.length > 0)
-          );
-          if (hasInitialAnalysis) {
-            console.log('✅ Initial analysis detected - SSE connection should already be closed');
-            setInitialAnalysisComplete(true);
-          }
-        }
-        
-        // Combine: keep all existing messages + add only unique new messages
-        const result = [...prev, ...uniqueNewMessages];
-        
-        if (uniqueNewMessages.length < newMessages.length) {
-          console.log(`✅ SSE Deduplication: ${newMessages.length} → ${uniqueNewMessages.length} unique messages added`);
-        }
-        
-        return result;
+        // Simply append all messages - no filtering
+        return [...prev, ...newMessages];
       });
+    },
+    onComplete: () => {
+      // When SSE completes, fetch messages from session API as fallback
+      // This ensures we get the initial analysis even if SSE didn't deliver it
+      console.log('✅ SSE complete event received - checking for initial analysis');
+      
+      // Start fetching with retries - will keep trying until messages are found
+      setTimeout(() => {
+        fetchMessagesFromSession(0);
+      }, 500); // Small delay to ensure backend has saved
     },
   });
 
@@ -226,95 +317,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     }
   }, [initialMode]); // Only depend on initialMode, not mode
 
-  // Deduplicate messages to catch any duplicates that might slip through
-  // Specifically ensure only ONE initial message exists
-  useEffect(() => {
-    if (messages.length <= 1) return;
-    
-    // Helper function to normalize content for comparison
-    const normalizeContent = (content: string): string => {
-      return content
-        .replace(/\s+/g, ' ')
-        .replace(/[""]/g, '"')
-        .replace(/['']/g, "'")
-        .trim()
-        .toLowerCase();
-    };
-
-    // Helper function to check if a message is the unwanted "Hi! I've just finished analyzing..." message
-    // This is different from the "Initial analysis for [filename]" message which we want to keep
-    const isUnwantedInitialMessage = (msg: Message): boolean => {
-      if (msg.role !== 'assistant' || !msg.content) return false;
-      const content = normalizeContent(msg.content);
-      // Check for the unwanted message pattern: "Hi! I've just finished analyzing your data..."
-      // This message contains dataset summary info that's redundant with the UI components
-      return (
-        (content.includes("i've just finished analyzing") || content.includes("hi! 👋 i've just finished")) &&
-        (content.includes("your dataset has") && content.includes("rows and") && content.includes("columns")) &&
-        (content.includes("numeric columns to work with") || content.includes("date columns for time-based"))
-      );
-    };
-
-    // Helper function to check if two messages are essentially the same
-    const areMessagesSimilar = (msg1: Message, msg2: Message): boolean => {
-      if (msg1.role !== msg2.role) return false;
-      if (!msg1.content || !msg2.content) return false;
-      
-      const content1 = normalizeContent(msg1.content);
-      const content2 = normalizeContent(msg2.content);
-      
-      // Exact match after normalization
-      if (content1 === content2) return true;
-      
-      // For assistant messages, check if they're very similar
-      if (msg1.role === 'assistant') {
-        // Check if one contains the other (for truncated messages)
-        if (content1.includes(content2) || content2.includes(content1)) {
-          return true;
-        }
-        
-        // Check for unwanted initial analysis message patterns - if both are unwanted initial messages, they're duplicates
-        if (isUnwantedInitialMessage(msg1) && isUnwantedInitialMessage(msg2)) {
-          return true;
-        }
-      }
-      
-      return false;
-    };
-
-    // Periodic cleanup - only filter out duplicate unwanted initial messages
-    // Allow users to ask the same question multiple times, so we don't deduplicate regular messages
-    const seenUnwantedInitial = new Set<string>();
-    let hasUnwantedInitial = false;
-    
-    const cleanedMessages = messages.filter((msg, index) => {
-      // Only filter unwanted initial messages, not regular chat messages
-      if (isUnwantedInitialMessage(msg)) {
-        const normalizedContent = normalizeContent(msg.content || '');
-        const key = `${msg.role}|${normalizedContent}`;
-        
-        // Keep only the first unwanted initial message
-        if (hasUnwantedInitial || seenUnwantedInitial.has(key)) {
-          console.log('🔄 Periodic cleanup: Removing duplicate unwanted initial analysis message');
-          return false;
-        }
-        
-        hasUnwantedInitial = true;
-        seenUnwantedInitial.add(key);
-      }
-      
-      // Keep all other messages (including duplicates of regular chat)
-      return true;
-    });
-    
-    // Only update if we removed unwanted initial message duplicates
-    if (cleanedMessages.length < messages.length) {
-      console.log(`🔄 Periodic cleanup: Removed ${messages.length - cleanedMessages.length} duplicate unwanted initial message(s)`);
-      // Use functional update to avoid dependency issues
-      setMessages(() => cleanedMessages);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length]); // Only depend on length to avoid infinite loops
+  // No message cleaning - all messages are kept as-is
 
   // Reset state only when resetTrigger changes (upload new file)
   // Only reset if resetTrigger > 0 AND we're not loading a session
@@ -322,9 +325,138 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     if (resetTrigger > 0 && !loadedSessionData) {
       resetState();
       setSuggestions([]); // Clear suggestions when resetting
-      setInitialAnalysisComplete(false); // Reset SSE completion flag
+      setIsLargeFileLoading(false); // Reset large file loading state
+      setInitialAnalysisReceived(false); // Reset to allow SSE polling for new session
     }
   }, [resetTrigger, resetState, loadedSessionData]);
+
+  // Reset initialAnalysisReceived when sessionId changes (new session)
+  useEffect(() => {
+    if (sessionId) {
+      setInitialAnalysisReceived(false); // Allow SSE polling for new session
+    }
+  }, [sessionId]);
+
+  // Check if we already have initial analysis in current messages
+  useEffect(() => {
+    if (!isLargeFileLoading || initialAnalysisReceived) {
+      return;
+    }
+
+    // Check current messages for initial analysis
+    const hasInitialAnalysis = messages.some(msg => isInitialAnalysisMessage(msg));
+
+    if (hasInitialAnalysis) {
+      console.log('✅ Initial analysis found in current messages - clearing loading state');
+      setIsLargeFileLoading(false);
+      setInitialAnalysisReceived(true);
+    }
+  }, [messages, isLargeFileLoading, initialAnalysisReceived]);
+
+  // Poll for messages when loading state is active and we haven't received initial analysis
+  // This is a fallback in case SSE doesn't deliver messages
+  useEffect(() => {
+    if (!isLargeFileLoading || !sessionId || initialAnalysisReceived) {
+      return;
+    }
+
+    console.log('🔄 Starting polling for initial analysis messages...');
+    let pollCount = 0;
+    const MAX_POLLS = 30; // Poll for up to 30 seconds
+    const POLL_INTERVAL = 1000; // Poll every 1 second
+    let isCleared = false;
+
+    const pollInterval = setInterval(async () => {
+      if (isCleared) return;
+      
+      pollCount++;
+      console.log(`🔄 Polling attempt ${pollCount}/${MAX_POLLS} for initial analysis...`);
+      
+      try {
+        const data = await sessionsApi.getSessionDetails(sessionId);
+        const session = data.session || data;
+        
+        if (session && session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
+          // Check if initial analysis exists using improved detection
+          const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
+          
+          if (hasInitialAnalysis) {
+            console.log('✅ Initial analysis found via polling - setting messages and clearing loading state');
+            setMessages(session.messages);
+            setIsLargeFileLoading(false);
+            setInitialAnalysisReceived(true);
+            
+            // Also set metadata if available
+            if (session.dataSummary) {
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
+            }
+            if (session.charts) setInitialCharts(session.charts);
+            if (session.insights) setInitialInsights(session.insights);
+            
+            clearInterval(pollInterval);
+            isCleared = true;
+            return;
+          }
+        }
+        
+        // If no messages but we have charts/insights at session level, create initial message
+        if (session && (!session.messages || session.messages.length === 0)) {
+          if ((session.charts && session.charts.length > 0) || (session.insights && session.insights.length > 0)) {
+            console.log('✅ Found charts/insights at session level (no messages) - creating initial message');
+            const initialMessage: Message = {
+              role: 'assistant',
+              content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+              charts: session.charts || [],
+              insights: session.insights || [],
+              timestamp: Date.now(),
+            };
+            setMessages([initialMessage]);
+            setIsLargeFileLoading(false);
+            setInitialAnalysisReceived(true);
+            
+            // Set metadata
+            if (session.dataSummary) {
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
+            }
+            if (session.charts) setInitialCharts(session.charts);
+            if (session.insights) setInitialInsights(session.insights);
+            
+            clearInterval(pollInterval);
+            isCleared = true;
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('⚠️ Error polling for messages:', error);
+      }
+      
+      if (pollCount >= MAX_POLLS) {
+        console.warn('⚠️ Polling timeout - giving up on fetching initial analysis');
+        clearInterval(pollInterval);
+        isCleared = true;
+      }
+    }, POLL_INTERVAL);
+
+    return () => {
+      isCleared = true;
+      clearInterval(pollInterval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLargeFileLoading, sessionId, initialAnalysisReceived]);
 
   // Load session data when provided (and populate existing chat history)
   useSessionLoader({
@@ -417,6 +549,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       collaborators={collaborators}
       mode={mode}
       sessionId={sessionId}
+      isLargeFileLoading={isLargeFileLoading}
       onModeChange={(newMode) => {
         setMode(newMode);
         // onModeChange will update the URL, which will update initialMode prop
