@@ -590,14 +590,18 @@ export async function streamChatMessages(sessionId: string, username: string, re
       messages: enrichedInitialMessages,
     });
 
-    // CRITICAL: Close the connection immediately after sending init event
-    // The client will close on its side after receiving init, but we also close here
-    // to ensure the connection is terminated and prevent any duplicate events
-    // This breaks the SSE connection as soon as the initial response is sent
+    // Send 'complete' event to indicate initial analysis is done
+    sendSSE(res, 'complete', {
+      message: 'Initial analysis complete',
+    });
+
+    // Close the connection immediately after sending initial messages
+    // This prevents continuous polling and duplicate messages
+    // The connection should NOT stay open to listen for new chat messages
     try {
       if (!res.writableEnded && !res.destroyed) {
         res.end();
-        console.log('✅ SSE connection closed immediately after sending init event');
+        console.log('✅ SSE connection closed after initial analysis');
       }
     } catch (e) {
       // Ignore errors when ending already closed connection
