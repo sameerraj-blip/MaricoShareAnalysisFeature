@@ -69,17 +69,10 @@ export const useHomeMutations = ({
       if (data.jobId && data.sessionId && data.status === 'processing') {
         setSessionId(data.sessionId);
         
-        // Show processing message IMMEDIATELY, before fetching session details
-        // This ensures the user sees feedback right away, even if session fetch fails
-        // NOTE: We only show the processing message here. The initial analysis message
-        // will come from SSE when processing completes, which will replace this message.
-        const fileName = data.fileName || 'your file';
-        const processingMessage: Message = {
-          role: 'assistant',
-          content: `📤 Your file "${fileName}" is being processed. This may take a few moments for large files. I'll update you once the analysis is complete!`,
-          timestamp: Date.now(),
-        };
-        setMessages([processingMessage]);
+        // Don't show any message here - we'll show a loading state instead
+        // The initial analysis message will come from SSE when processing completes
+        // Clear any existing messages to show clean loading state
+        setMessages([]);
         
         // Fetch session details from placeholder (now it exists!)
         // We only fetch to set metadata, NOT to show the initial message
@@ -108,14 +101,11 @@ export const useHomeMutations = ({
           }
         } catch (sessionError) {
           console.error('Failed to fetch session details:', sessionError);
-          // Processing message is already shown above, so user still sees feedback
           // The SSE stream will pick up the final message when processing completes
         }
         
-        toast({
-          title: 'Upload Accepted',
-          description: 'Your file is being processed. Analysis will be available shortly.',
-        });
+        // Don't show toast - we'll show a loading state in the UI instead
+        // The initial analysis will come from SSE when processing completes
       } 
       // Handle old synchronous format (backward compatibility)
       else if (data.sessionId && data.summary) {

@@ -4,6 +4,7 @@ import { ChatInterface } from './Components/ChatInterface';
 import { useHomeState, useHomeMutations, useHomeHandlers, useSessionLoader } from './modules';
 import { sessionsApi } from '@/lib/api';
 import { useChatMessagesStream } from '@/hooks/useChatMessagesStream';
+import { Message } from '@/shared/schema';
 
 interface HomeProps {
   resetTrigger?: number;
@@ -109,6 +110,164 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
 
   // Track if initial analysis is complete - disable SSE after that
   const [initialAnalysisComplete, setInitialAnalysisComplete] = useState(false);
+  // Track if we're waiting for initial analysis (have sessionId but no initial analysis yet)
+  const [waitingForInitialAnalysis, setWaitingForInitialAnalysis] = useState(false);
+  
+  // Set waiting state when we have a sessionId but no initial analysis yet
+  useEffect(() => {
+    if (sessionId && !initialAnalysisComplete) {
+      // Check if we already have initial analysis in messages
+      const initialAnalysisMsg = messages.find(msg => 
+        msg.role === 'assistant' && 
+        msg.content && 
+        (msg.content.toLowerCase().includes('initial analysis for') || 
+         msg.charts?.length > 0 || 
+         msg.insights?.length > 0)
+      );
+      
+      if (!initialAnalysisMsg) {
+        if (!waitingForInitialAnalysis) {
+          console.log('⏳ Setting waitingForInitialAnalysis=true - no initial analysis found yet');
+        }
+        setWaitingForInitialAnalysis(true);
+      } else {
+        if (waitingForInitialAnalysis) {
+          console.log('✅ Setting waitingForInitialAnalysis=false - initial analysis found:', {
+            chartsCount: initialAnalysisMsg.charts?.length || 0,
+            insightsCount: initialAnalysisMsg.insights?.length || 0,
+          });
+        }
+        setWaitingForInitialAnalysis(false);
+        setInitialAnalysisComplete(true);
+      }
+    } else {
+      setWaitingForInitialAnalysis(false);
+    }
+  }, [sessionId, initialAnalysisComplete, messages, waitingForInitialAnalysis]);
+
+  // Poll for initial analysis if we're waiting and don't have it yet
+  const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldPollRef = useRef(false);
+  
+  useEffect(() => {
+    shouldPollRef.current = !!sessionId && !initialAnalysisComplete && waitingForInitialAnalysis;
+  }, [sessionId, initialAnalysisComplete, waitingForInitialAnalysis]);
+
+  useEffect(() => {
+    // Clear any existing polling
+    if (pollingRef.current) {
+      clearTimeout(pollingRef.current);
+      pollingRef.current = null;
+    }
+
+    if (!shouldPollRef.current) {
+      return;
+    }
+
+    console.log('🔄 Starting polling for initial analysis...');
+    let pollCount = 0;
+    const maxPolls = 60; // Poll for up to 5 minutes (60 * 5 seconds)
+    const pollInterval = 5000; // Poll every 5 seconds
+    let isPolling = true;
+
+    const pollForInitialAnalysis = async () => {
+      // Check if we should still be polling
+      if (!shouldPollRef.current || !isPolling) {
+        console.log('🛑 Stopping polling - conditions changed');
+        return;
+      }
+
+      pollCount++;
+      console.log(`🔄 Polling for initial analysis (attempt ${pollCount}/${maxPolls})...`);
+
+      try {
+        const data = await sessionsApi.getSessionDetails(sessionId!);
+        if (data) {
+          const session = data.session || data;
+          const sessionMessages = session.messages || [];
+          
+          // Check if we have initial analysis in the session
+          const hasInitialAnalysis = sessionMessages.some((msg: any) => 
+            msg.role === 'assistant' && 
+            msg.content && 
+            (msg.content.toLowerCase().includes('initial analysis for') || 
+             msg.charts?.length > 0 || 
+             msg.insights?.length > 0)
+          );
+
+          if (hasInitialAnalysis && sessionMessages.length > 0) {
+            console.log('✅ Initial analysis found via polling! Loading messages...', {
+              messagesCount: sessionMessages.length,
+              chartsCount: session.charts?.length || 0,
+              insightsCount: session.insights?.length || 0,
+            });
+            
+            // Stop polling
+            isPolling = false;
+            if (pollingRef.current) {
+              clearTimeout(pollingRef.current);
+              pollingRef.current = null;
+            }
+            
+            // Load the messages - replace existing messages
+            setMessages(sessionMessages as any);
+            
+            // Also update other state if available
+            if (session.charts && session.charts.length > 0) {
+              setInitialCharts(session.charts);
+            }
+            if (session.insights && session.insights.length > 0) {
+              setInitialInsights(session.insights);
+            }
+            
+            // Update metadata if available
+            if (session.dataSummary) {
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              if (session.dataSummary.columns) {
+                setColumns(session.dataSummary.columns.map((c: any) => c.name));
+              }
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
+            }
+            
+            setInitialAnalysisComplete(true);
+            setWaitingForInitialAnalysis(false);
+            return; // Stop polling
+          }
+        }
+
+        // Continue polling if we haven't found it yet and haven't exceeded max polls
+        if (isPolling && pollCount < maxPolls && shouldPollRef.current) {
+          pollingRef.current = setTimeout(pollForInitialAnalysis, pollInterval);
+        } else if (pollCount >= maxPolls) {
+          console.warn('⚠️ Polling timeout: Initial analysis not found after maximum attempts');
+          isPolling = false;
+        }
+      } catch (error) {
+        console.error('❌ Error polling for initial analysis:', error);
+        // Continue polling on error (might be temporary)
+        if (isPolling && pollCount < maxPolls && shouldPollRef.current) {
+          pollingRef.current = setTimeout(pollForInitialAnalysis, pollInterval);
+        }
+      }
+    };
+
+    // Start polling after a short delay
+    pollingRef.current = setTimeout(pollForInitialAnalysis, pollInterval);
+
+    // Cleanup: stop polling if component unmounts or dependencies change
+    return () => {
+      isPolling = false;
+      if (pollingRef.current) {
+        clearTimeout(pollingRef.current);
+        pollingRef.current = null;
+      }
+    };
+  }, [sessionId, waitingForInitialAnalysis, initialAnalysisComplete, setMessages, setInitialCharts, setInitialInsights, setSampleRows, setColumns, setNumericColumns, setDateColumns, setTotalRows, setTotalColumns]);
 
   // Real-time chat message streaming for collaborative sessions
   // Only enabled until initial analysis is complete, then disabled to prevent duplicates
@@ -148,8 +307,31 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
           );
         };
 
-        // Process new messages - only filter out unwanted initial messages
-        // Allow users to ask the same question multiple times, so we don't deduplicate regular messages
+        // Helper function to check if a message already exists in previous messages
+        const messageExists = (msg: Message, existingMessages: Message[]): boolean => {
+          if (!msg.content || !msg.timestamp) return false;
+          
+          // Check for exact match (same role, content, and timestamp)
+          const exactMatch = existingMessages.some(existing => 
+            existing.role === msg.role &&
+            existing.content === msg.content &&
+            existing.timestamp === msg.timestamp
+          );
+          
+          if (exactMatch) return true;
+          
+          // Check for similar match (same role and content, timestamp within 5 seconds)
+          // This handles cases where timestamps might differ slightly
+          const similarMatch = existingMessages.some(existing => 
+            existing.role === msg.role &&
+            existing.content === msg.content &&
+            Math.abs((existing.timestamp || 0) - (msg.timestamp || 0)) < 5000
+          );
+          
+          return similarMatch;
+        };
+
+        // Process new messages - filter out duplicates and user messages that are already in state
         const uniqueNewMessages: Message[] = [];
         const seenUnwantedInitial = new Set<string>();
         
@@ -158,50 +340,92 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
             continue; // Skip messages without content
           }
           
-          // FILTER OUT the unwanted "Hi! I've just finished analyzing..." message
-          // We only want the "Initial analysis for [filename]" message which shows the UI components
-          if (isUnwantedInitialMessage(newMsg)) {
-            const normalizedContent = normalizeContent(newMsg.content);
-            const key = `${newMsg.role}|${normalizedContent}`;
-            
-            // Only filter if we've already seen this unwanted initial message
-            if (seenUnwantedInitial.has(key)) {
-              console.log('🔄 SSE: Filtering out duplicate unwanted initial analysis message');
+          // CRITICAL FIX: Filter out user messages from SSE
+          // User messages are already in local state when the user sends them
+          // Receiving them again from SSE can cause loops and duplicate submissions
+          if (newMsg.role === 'user') {
+            // Check if this user message already exists in previous messages
+            if (messageExists(newMsg, prev)) {
+              console.log('🔄 SSE: Filtering out duplicate user message from SSE:', newMsg.content.substring(0, 50));
               continue;
             }
-            
-            // Check if this unwanted message already exists in previous messages
-            const existsInPrev = prev.some(msg => {
-              if (!msg.content) return false;
-              return isUnwantedInitialMessage(msg);
-            });
-            
-            if (existsInPrev) {
-              console.log('🔄 SSE: Filtering out unwanted initial analysis message (already exists)');
+            // Even if it doesn't exist, we should be cautious about adding user messages from SSE
+            // Only add if it's significantly different (more than 10 seconds old, suggesting it's from another session/collaborator)
+            const messageAge = Date.now() - (newMsg.timestamp || 0);
+            if (messageAge < 10000) {
+              console.log('🔄 SSE: Filtering out recent user message from SSE (likely duplicate):', newMsg.content.substring(0, 50));
               continue;
             }
-            
-            seenUnwantedInitial.add(key);
           }
           
-          // For all other messages (including regular chat), allow duplicates
-          // Users should be able to ask the same question multiple times
+          // FILTER OUT the unwanted "Hi! I've just finished analyzing..." message
+          // BUT: Keep messages that have charts or insights - those are the real initial analysis
+          // We only filter out the unwanted message if it has NO charts/insights (just text summary)
+          if (isUnwantedInitialMessage(newMsg)) {
+            // CRITICAL: Don't filter if message has charts or insights - that's the real initial analysis
+            if (newMsg.charts && newMsg.charts.length > 0) {
+              console.log('✅ Keeping initial analysis message with charts (even if content matches unwanted pattern)');
+              // Don't filter - this is the real initial analysis
+            } else if (newMsg.insights && newMsg.insights.length > 0) {
+              console.log('✅ Keeping initial analysis message with insights (even if content matches unwanted pattern)');
+              // Don't filter - this is the real initial analysis
+            } else {
+              // Only filter if it's just the text summary without charts/insights
+              const normalizedContent = normalizeContent(newMsg.content);
+              const key = `${newMsg.role}|${normalizedContent}`;
+              
+              // Only filter if we've already seen this unwanted initial message
+              if (seenUnwantedInitial.has(key)) {
+                console.log('🔄 SSE: Filtering out duplicate unwanted initial analysis message (no charts/insights)');
+                continue;
+              }
+              
+              // Check if this unwanted message already exists in previous messages
+              const existsInPrev = prev.some(msg => {
+                if (!msg.content) return false;
+                return isUnwantedInitialMessage(msg) && !msg.charts?.length && !msg.insights?.length;
+              });
+              
+              if (existsInPrev) {
+                console.log('🔄 SSE: Filtering out unwanted initial analysis message (already exists, no charts/insights)');
+                continue;
+              }
+              
+              seenUnwantedInitial.add(key);
+            }
+          }
+          
+          // Check if this message already exists in previous messages (deduplication)
+          if (messageExists(newMsg, prev)) {
+            console.log('🔄 SSE: Filtering out duplicate message:', newMsg.content.substring(0, 50));
+            continue;
+          }
+          
           uniqueNewMessages.push(newMsg);
         }
-        
+
         // Check if this is the initial analysis message - if so, mark analysis as complete
         // The SSE connection should already be closed by the hook, but we mark it here too
         if (uniqueNewMessages.length > 0 && !initialAnalysisComplete) {
-          const hasInitialAnalysis = uniqueNewMessages.some(msg => 
+          const initialAnalysisMsg = uniqueNewMessages.find(msg => 
             msg.role === 'assistant' && 
             msg.content && 
             (msg.content.toLowerCase().includes('initial analysis for') || 
              msg.charts?.length > 0 || 
              msg.insights?.length > 0)
           );
-          if (hasInitialAnalysis) {
+          
+          if (initialAnalysisMsg) {
             console.log('✅ Initial analysis detected - SSE connection should already be closed');
-            setInitialAnalysisComplete(true);
+            console.log('📊 Initial analysis message details:', {
+              hasContent: !!initialAnalysisMsg.content,
+              chartsCount: initialAnalysisMsg.charts?.length || 0,
+              insightsCount: initialAnalysisMsg.insights?.length || 0,
+              contentPreview: initialAnalysisMsg.content?.substring(0, 100),
+            });
+          setInitialAnalysisComplete(true);
+            setWaitingForInitialAnalysis(false); // Stop showing loading state
+            console.log('✅ State updated: initialAnalysisComplete=true, waitingForInitialAnalysis=false');
           }
         }
         
@@ -323,6 +547,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       resetState();
       setSuggestions([]); // Clear suggestions when resetting
       setInitialAnalysisComplete(false); // Reset SSE completion flag
+      setWaitingForInitialAnalysis(false); // Reset waiting state
     }
   }, [resetTrigger, resetState, loadedSessionData]);
 
@@ -389,6 +614,26 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
           <p className="text-gray-600">Loading analysis...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show loading state when waiting for initial analysis from backend
+  if (waitingForInitialAnalysis && sessionId) {
+    return (
+      <div className="h-[calc(100vh-80px)] bg-gradient-to-br from-slate-50 to-white flex items-center justify-center">
+        <div className="text-center">
+          <div className="relative mb-4">
+            <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+            </div>
+          </div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-1">Analyzing your data...</h3>
+          <p className="text-sm text-gray-500">This may take a few moments for large files</p>
+          {fileName && (
+            <p className="text-xs text-gray-400 mt-2">Processing: {fileName}</p>
+          )}
         </div>
       </div>
     );
