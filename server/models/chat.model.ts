@@ -466,8 +466,53 @@ export const addMessagesBySessionId = async (
       throw new Error("Chat document not found for sessionId");
     }
 
-    console.log("🗂️ Appending to doc:", chatDocument.id, "partition:", chatDocument.username, "existing messages:", chatDocument.messages?.length || 0);
-    chatDocument.messages.push(...messages);
+    // Prevent duplicate messages by checking if they already exist
+    // Use a composite key: role + content + timestamp (within 5 seconds tolerance)
+    const existingMessages = chatDocument.messages || [];
+    const existingKeys = new Set<string>();
+    
+    existingMessages.forEach(msg => {
+      // Exact match key
+      const exactKey = `${msg.role}|${msg.content}|${msg.timestamp}`;
+      existingKeys.add(exactKey);
+      
+      // Similar match key (for timestamp within 5 seconds) - helps catch duplicates with slightly different timestamps
+      const roundedTimestamp = Math.floor(msg.timestamp / 5000) * 5000;
+      const similarKey = `${msg.role}|${msg.content}|${roundedTimestamp}`;
+      existingKeys.add(similarKey);
+    });
+    
+    // Filter out duplicate messages
+    const uniqueMessages = messages.filter(msg => {
+      // Check for exact match
+      const exactKey = `${msg.role}|${msg.content}|${msg.timestamp}`;
+      if (existingKeys.has(exactKey)) {
+        console.log(`⚠️ Duplicate message detected (exact match): ${msg.role} message with timestamp ${msg.timestamp}`);
+        return false;
+      }
+      
+      // Check for similar match (content+role with timestamp within 5 seconds)
+      const roundedTimestamp = Math.floor(msg.timestamp / 5000) * 5000;
+      const similarKey = `${msg.role}|${msg.content}|${roundedTimestamp}`;
+      if (existingKeys.has(similarKey)) {
+        console.log(`⚠️ Duplicate message detected (similar match): ${msg.role} message with timestamp ${msg.timestamp}`);
+        return false;
+      }
+      
+      return true;
+    });
+    
+    if (uniqueMessages.length === 0) {
+      console.log("⚠️ All messages were duplicates, skipping add");
+      return chatDocument;
+    }
+    
+    if (uniqueMessages.length < messages.length) {
+      console.log(`⚠️ Filtered out ${messages.length - uniqueMessages.length} duplicate messages`);
+    }
+
+    console.log("🗂️ Appending to doc:", chatDocument.id, "partition:", chatDocument.username, "existing messages:", existingMessages.length, "new unique messages:", uniqueMessages.length);
+    chatDocument.messages.push(...uniqueMessages);
 
     // Collect any charts from assistant messages into top-level charts
     // IMPORTANT: Charts passed here should have FULL data (not stripped)

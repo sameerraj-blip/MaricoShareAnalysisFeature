@@ -8,9 +8,10 @@ import { registerRoutes } from "./routes/index.js";
 export function createApp() {
   const app = express();
 
-  // Middleware (increase payload limits for chat history and chart data)
-  app.use(express.json({ limit: '500mb' }));
-  app.use(express.urlencoded({ extended: false, limit: '500mb' }));
+  // Middleware (increase payload limits for large file uploads and chat history)
+  // Set to 1GB to support large CSV files (50MB+)
+  app.use(express.json({ limit: '1gb' }));
+  app.use(express.urlencoded({ extended: false, limit: '1gb' }));
 
   // Handle preflight requests explicitly
   app.options('*', corsConfig);

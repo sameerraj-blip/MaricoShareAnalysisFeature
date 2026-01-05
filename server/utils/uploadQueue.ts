@@ -100,6 +100,16 @@ class UploadQueue {
    * Process a single job
    */
   private async processJob(job: UploadJob): Promise<void> {
+    const JOB_TIMEOUT = 30 * 60 * 1000; // 30 minutes timeout for large files
+    const timeoutId = setTimeout(() => {
+      if (job.status !== 'completed' && job.status !== 'failed') {
+        job.status = 'failed';
+        job.error = 'Processing timeout: File processing took too long. Please try with a smaller file or contact support.';
+        job.completedAt = Date.now();
+        console.error(`⏱️ Upload job ${job.jobId} timed out after ${JOB_TIMEOUT / 1000 / 60} minutes`);
+      }
+    }, JOB_TIMEOUT);
+    
     try {
       job.startedAt = Date.now();
       job.status = 'uploading';
@@ -107,6 +117,7 @@ class UploadQueue {
 
       // Import processing functions dynamically to avoid circular dependencies
       const { parseFile, createDataSummary, convertDashToZeroForNumericColumns } = await import('../lib/fileParser.js');
+      const { processLargeFile, shouldUseLargeFileProcessing, getDataForAnalysis } = await import('../lib/largeFileProcessor.js');
       const { analyzeUpload } = await import('../lib/dataAnalyzer.js');
       const { generateAISuggestions } = await import('../lib/suggestionGenerator.js');
       const { createChatDocument, generateColumnStatistics, getChatBySessionIdEfficient, updateChatDocument, addMessagesBySessionId } = await import('../models/chat.model.js');
@@ -114,24 +125,98 @@ class UploadQueue {
       const { chunkData, clearVectorStore } = await import('../lib/ragService.js');
       const queryCache = (await import('../lib/cache.js')).default;
 
-      // Step 1: Parse file
-      job.status = 'parsing';
-      job.progress = 15;
-      let data = await parseFile(job.fileBuffer, job.fileName);
+      // Check if file should use large file processing
+      const useLargeFileProcessing = shouldUseLargeFileProcessing(job.fileBuffer.length);
       
-      if (data.length === 0) {
-        throw new Error('No data found in file');
-      }
+      let data: Record<string, any>[];
+      let summary: DataSummary;
+      let storagePath: string | undefined;
 
-      // Step 2: Create data summary
-      job.progress = 25;
-      const summary = createDataSummary(data);
-      data = convertDashToZeroForNumericColumns(data, summary.numericColumns);
+      if (useLargeFileProcessing) {
+        // Use streaming and columnar storage for large files
+        console.log(`📦 Large file detected (${(job.fileBuffer.length / 1024 / 1024).toFixed(2)}MB). Using streaming pipeline...`);
+        
+        job.status = 'parsing';
+        job.progress = 10;
+        
+        try {
+          const result = await processLargeFile(
+            job.fileBuffer,
+            job.sessionId,
+            job.fileName,
+            (progress) => {
+              job.progress = progress.progress;
+              if (progress.message) {
+                console.log(`  ${progress.message}`);
+              }
+            }
+          );
+          
+          summary = result.summary;
+          storagePath = result.storagePath;
+          
+          // For large files, we don't load all data into memory
+          // Instead, we'll use sampled data for AI analysis
+          // Get a representative sample for analysis (up to 50k rows)
+          const sampleSize = Math.min(50000, result.rowCount);
+          data = await getDataForAnalysis(job.sessionId, undefined, sampleSize);
+          
+          console.log(`✅ Large file processed: ${result.rowCount} rows, using ${data.length} sample rows for analysis`);
+        } catch (largeFileError) {
+          const errorMsg = largeFileError instanceof Error ? largeFileError.message : String(largeFileError);
+          throw new Error(`Failed to process large file: ${errorMsg}`);
+        }
+      } else {
+        // Use traditional processing for smaller files
+        // Step 1: Parse file
+        job.status = 'parsing';
+        job.progress = 15;
+        try {
+          data = await parseFile(job.fileBuffer, job.fileName);
+        } catch (parseError) {
+          const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+          if (errorMsg.includes('memory') || errorMsg.includes('heap') || errorMsg.includes('too large')) {
+            throw new Error('File is too large to parse. Please try with a smaller file (under 100MB) or reduce the number of rows.');
+          }
+          throw new Error(`Failed to parse file: ${errorMsg}`);
+        }
+        
+        if (data.length === 0) {
+          throw new Error('No data found in file');
+        }
+
+        // Step 2: Create data summary
+        job.progress = 25;
+        try {
+          summary = createDataSummary(data);
+          data = convertDashToZeroForNumericColumns(data, summary.numericColumns);
+        } catch (summaryError) {
+          const errorMsg = summaryError instanceof Error ? summaryError.message : String(summaryError);
+          if (errorMsg.includes('memory') || errorMsg.includes('heap')) {
+            throw new Error('File is too large to analyze. Please try with a smaller file or reduce the number of columns.');
+          }
+          throw new Error(`Failed to create data summary: ${errorMsg}`);
+        }
+      }
 
       // Step 3: Analyze with AI (this is the slowest part)
       job.status = 'analyzing';
       job.progress = 40;
-      const { charts, insights } = await analyzeUpload(data, summary, job.fileName);
+      let charts, insights;
+      try {
+        const result = await analyzeUpload(data, summary, job.fileName);
+        charts = result.charts;
+        insights = result.insights;
+      } catch (analyzeError) {
+        const errorMsg = analyzeError instanceof Error ? analyzeError.message : String(analyzeError);
+        if (errorMsg.includes('timeout') || errorMsg.includes('TIMEOUT')) {
+          throw new Error('AI analysis timed out. The file is too large or complex. Please try with a smaller file or fewer columns.');
+        }
+        if (errorMsg.includes('rate limit') || errorMsg.includes('quota')) {
+          throw new Error('AI service rate limit reached. Please try again in a few minutes.');
+        }
+        throw new Error(`AI analysis failed: ${errorMsg}`);
+      }
 
       // Step 4: Generate suggestions
       job.progress = 60;
@@ -208,17 +293,25 @@ class UploadQueue {
       const columnStatistics = generateColumnStatistics(data, summary.numericColumns);
       
       // Step 8: Prepare sample rows
-      const sampleRows = data.slice(0, 50).map(row => {
-        const serializedRow: Record<string, any> = {};
-        for (const [key, value] of Object.entries(row)) {
-          if (value instanceof Date) {
-            serializedRow[key] = value.toISOString();
-          } else {
-            serializedRow[key] = value;
+      // For large files, sampleRows are already provided from columnar storage
+      // For small files, slice from in-memory data
+      let sampleRows: Record<string, any>[];
+      if (useLargeFileProcessing) {
+        // Get fresh sample from columnar storage
+        sampleRows = await getDataForAnalysis(job.sessionId, undefined, 50);
+      } else {
+        sampleRows = data.slice(0, 50).map(row => {
+          const serializedRow: Record<string, any> = {};
+          for (const [key, value] of Object.entries(row)) {
+            if (value instanceof Date) {
+              serializedRow[key] = value.toISOString();
+            } else {
+              serializedRow[key] = value;
+            }
           }
-        }
-        return serializedRow;
-      });
+          return serializedRow;
+        });
+      }
 
       // Step 9: Save to database
       job.status = 'saving';
@@ -264,11 +357,14 @@ class UploadQueue {
           }
           
           // Estimate rawData size and decide if we should store it
-          const estimatedSize = JSON.stringify(data).length;
+          // For large files processed with columnar storage, never store raw data
+          const estimatedSize = useLargeFileProcessing ? Infinity : JSON.stringify(data).length;
           const MAX_DOCUMENT_SIZE = 3 * 1024 * 1024; // 3MB safety margin
-          const shouldStoreRawData = estimatedSize < MAX_DOCUMENT_SIZE && data.length < 10000;
+          const shouldStoreRawData = !useLargeFileProcessing && estimatedSize < MAX_DOCUMENT_SIZE && data.length < 10000;
           
-          if (!shouldStoreRawData) {
+          if (useLargeFileProcessing) {
+            console.log(`📊 Large file: Data stored in columnar format at ${storagePath}. Only sampleRows stored in CosmosDB.`);
+          } else if (!shouldStoreRawData) {
             console.log(`⚠️ Large dataset detected (${data.length} rows, ~${(estimatedSize / 1024 / 1024).toFixed(2)}MB). Storing only sampleRows in CosmosDB.`);
           }
           
@@ -279,6 +375,8 @@ class UploadQueue {
             chartReferences: chartReferences.length > 0 ? chartReferences : undefined,
             rawData: shouldStoreRawData ? data : [],
             sampleRows,
+            // Store columnar storage path for large files
+            columnarStoragePath: useLargeFileProcessing ? storagePath : undefined,
             columnStatistics,
             insights,
             analysisMetadata: {
@@ -338,7 +436,18 @@ class UploadQueue {
           );
         }
       } catch (cosmosError) {
+        const errorMsg = cosmosError instanceof Error ? cosmosError.message : String(cosmosError);
         console.error("Failed to save chat document:", cosmosError);
+        
+        // Provide more helpful error messages for common issues
+        if (errorMsg.includes('RequestEntityTooLarge') || errorMsg.includes('413') || errorMsg.includes('too large')) {
+          throw new Error('File or analysis results are too large to save. Please try with a smaller file or fewer columns.');
+        } else if (errorMsg.includes('timeout') || errorMsg.includes('TIMEOUT') || errorMsg.includes('ETIMEDOUT')) {
+          throw new Error('Database connection timeout. The file may be too large. Please try with a smaller file.');
+        } else if (errorMsg.includes('ECONNREFUSED') || errorMsg.includes('connection')) {
+          throw new Error('Database connection failed. Please check your connection and try again.');
+        }
+        // If it's not a critical error, continue - the document might still be partially saved
       }
 
       // Step 10: Complete
@@ -360,12 +469,26 @@ class UploadQueue {
       // Note: We can't explicitly free the buffer, but removing the reference helps GC
       // The buffer will be garbage collected when the job is cleaned up
       delete (job as any).fileBuffer;
+      
+      // Clear timeout on successful completion
+      clearTimeout(timeoutId);
 
     } catch (error) {
       job.status = 'failed';
       job.error = error instanceof Error ? error.message : 'Unknown error occurred';
       job.completedAt = Date.now();
       console.error(`Upload job ${job.jobId} failed:`, error);
+      
+      // Clear timeout on error
+      clearTimeout(timeoutId);
+      
+      // If it's a memory or timeout error, provide more helpful message
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('timeout') || errorMessage.includes('TIMEOUT')) {
+        job.error = 'Processing timeout: The file is too large or processing took too long. Please try with a smaller file or split your data into multiple files.';
+      } else if (errorMessage.includes('memory') || errorMessage.includes('Memory') || errorMessage.includes('heap')) {
+        job.error = 'Memory error: The file is too large to process. Please try with a smaller file or reduce the number of rows/columns.';
+      }
     }
   }
 

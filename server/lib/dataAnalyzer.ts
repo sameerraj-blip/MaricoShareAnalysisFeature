@@ -1,6 +1,7 @@
 import { ChartSpec, Insight, DataSummary, Message } from '../shared/schema.js';
 import { openai, MODEL } from './openai.js';
 import { processChartData } from './chartGenerator.js';
+import { optimizeChartData } from './chartDownsampling.js';
 import { analyzeCorrelations } from './correlationAnalyzer.js';
 import { generateChartInsights } from './insightGenerator.js';
 import { retrieveRelevantContext, retrieveSimilarPastQA, chunkData, generateChunkEmbeddings, clearVectorStore } from './ragService.js';
@@ -22,7 +23,10 @@ export async function analyzeUpload(
 
   // Process data for each chart and generate insights
   const charts = await Promise.all(chartSpecs.map(async (spec) => {
-    const processedData = processChartData(data, spec);
+    let processedData = processChartData(data, spec);
+    
+    // Apply optimization to ensure max points limit (server-side downsampling)
+    processedData = optimizeChartData(processedData, spec);
     
     // Calculate smart axis domains based on statistical measures
     const smartDomains = calculateSmartDomainsForChart(
@@ -43,7 +47,7 @@ export async function analyzeUpload(
       ...spec,
       xLabel: spec.x,
       yLabel: spec.y,
-      data: processedData,
+      data: processedData, // Already optimized/downsampled
       ...smartDomains, // Add smart domains
       keyInsight: chartInsights.keyInsight,
     };
@@ -3318,7 +3322,7 @@ TECHNICAL RULES:
         ['line', 'bar', 'scatter', 'pie', 'area'].includes(spec.type)
       );
 
-      processedCharts = await Promise.all(sanitized.map(async (spec: ChartSpec) => {
+      const chartsResult = await Promise.all(sanitized.map(async (spec: ChartSpec) => {
         console.log(`🔍 Processing chart: "${spec.title}"`);
         console.log(`   Original spec: x="${spec.x}", y="${spec.y}", aggregate="${spec.aggregate}"`);
         console.log(`   Working data rows: ${workingData.length}`);
@@ -3508,10 +3512,12 @@ TECHNICAL RULES:
           data: processedData,
           keyInsight: chartInsights.keyInsight,
         };
-      })).filter((chart): chart is ChartSpec => chart !== null);
+      }));
+      
+      processedCharts = chartsResult.filter((chart): chart is ChartSpec => chart !== null);
       
       // If all charts failed, return error message
-      if (processedCharts.length === 0 && sanitized.length > 0) {
+      if (processedCharts && processedCharts.length === 0 && sanitized.length > 0) {
         const allCols = summary.columns.map(c => c.name);
         const firstSpec = sanitized[0];
         const xExists = allCols.some(c => c.toLowerCase() === firstSpec.x.toLowerCase());

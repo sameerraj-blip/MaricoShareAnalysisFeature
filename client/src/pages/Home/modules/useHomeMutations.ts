@@ -69,7 +69,14 @@ export const useHomeMutations = ({
       if (data.jobId && data.sessionId && data.status === 'processing') {
         setSessionId(data.sessionId);
         
+        // Don't show any message here - we'll show a loading state instead
+        // The initial analysis message will come from SSE when processing completes
+        // Clear any existing messages to show clean loading state
+        setMessages([]);
+        
         // Fetch session details from placeholder (now it exists!)
+        // We only fetch to set metadata, NOT to show the initial message
+        // The initial message will come from SSE when processing completes
         try {
           const sessionData = await sessionsApi.getSessionDetails(data.sessionId);
           const session = sessionData.session || sessionData;
@@ -79,9 +86,8 @@ export const useHomeMutations = ({
             setInitialCharts(session.charts || []);
             setInitialInsights(session.insights || []);
             
-            // Handle placeholder session (dataSummary might be empty)
+            // Only set metadata if full data is available
             if (session.dataSummary && session.dataSummary.rowCount > 0) {
-              // Full data is available
               if (session.sampleRows && session.sampleRows.length > 0) {
                 setSampleRows(session.sampleRows);
               }
@@ -90,36 +96,16 @@ export const useHomeMutations = ({
               setDateColumns(session.dataSummary.dateColumns || []);
               setTotalRows(session.dataSummary.rowCount);
               setTotalColumns(session.dataSummary.columnCount);
-              
-              // Create initial assistant message
-              const initialMessage: Message = {
-                role: 'assistant',
-                content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary.rowCount} rows and ${session.dataSummary.columnCount} columns\n🔢 ${session.dataSummary.numericColumns.length} numeric columns to work with\n📅 ${session.dataSummary.dateColumns.length} date columns for time-based analysis\n\nI've created ${(session.charts || []).length} visualizations and ${(session.insights || []).length} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
-                charts: session.charts || [],
-                insights: session.insights || [],
-                timestamp: Date.now(),
-              };
-              setMessages([initialMessage]);
-            } else {
-              // Placeholder session - show processing message
-              const processingMessage: Message = {
-                role: 'assistant',
-                content: `📤 Your file "${session.fileName}" is being processed. This may take a few moments for large files. I'll update you once the analysis is complete!`,
-                timestamp: Date.now(),
-              };
-              setMessages([processingMessage]);
             }
+            // Don't set the initial message here - let SSE handle it to avoid duplicates
           }
         } catch (sessionError) {
           console.error('Failed to fetch session details:', sessionError);
-          // Still set sessionId so user can see the session
-          setSessionId(data.sessionId);
+          // The SSE stream will pick up the final message when processing completes
         }
         
-        toast({
-          title: 'Upload Accepted',
-          description: 'Your file is being processed. Analysis will be available shortly.',
-        });
+        // Don't show toast - we'll show a loading state in the UI instead
+        // The initial analysis will come from SSE when processing completes
       } 
       // Handle old synchronous format (backward compatibility)
       else if (data.sessionId && data.summary) {

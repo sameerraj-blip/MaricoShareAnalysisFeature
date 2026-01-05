@@ -171,6 +171,8 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
   //   2. Store full charts in top-level session.charts array
   // - Only message-level charts should be stripped of data to prevent CosmosDB size limit
   // - addMessagesBySessionId will handle saving charts to blob and stripping data from message charts
+  // - addMessagesBySessionId will also check for duplicates before adding
+  const assistantMessageTimestamp = Date.now();
   try {
     const userEmail = username?.toLowerCase();
     const userMessageTimestamp = targetTimestamp || Date.now();
@@ -180,6 +182,7 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
     // 1. Save large charts to blob storage
     // 2. Store charts in top-level session.charts (with data for small charts, without data for large ones)
     // 3. Strip data from message-level charts to prevent CosmosDB size issues
+    // 4. Check for duplicates before adding
     await addMessagesBySessionId(sessionId, [
       {
         role: 'user',
@@ -192,7 +195,7 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
         content: validated.answer,
         charts: validated.charts || [], // Pass FULL charts with data - addMessagesBySessionId will handle blob storage
         insights: validated.insights,
-        timestamp: Date.now(),
+        timestamp: assistantMessageTimestamp,
       },
     ]);
     console.log(`✅ Messages saved to chat: ${chatDocument.id}`);

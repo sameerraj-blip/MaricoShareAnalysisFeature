@@ -275,6 +275,8 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     // This prevents duplicate messages when the SSE polling picks up the saved messages
     // IMPORTANT: Pass FULL charts with data to addMessagesBySessionId
     // It will handle saving large charts to blob and stripping data from message charts
+    // Use a consistent timestamp for assistant message to prevent duplicates
+    const assistantMessageTimestamp = Date.now();
     try {
       const userEmail = username?.toLowerCase();
       const userMessageTimestamp = targetTimestamp || Date.now();
@@ -283,6 +285,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       // 1. Save large charts to blob storage
       // 2. Store charts in top-level session.charts
       // 3. Strip data from message-level charts to prevent CosmosDB size issues
+      // 4. Check for duplicates before adding
       await addMessagesBySessionId(sessionId, [
         {
           role: 'user',
@@ -295,7 +298,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
           content: transformedResponse.answer,
           charts: transformedResponse.charts || [], // Pass FULL charts with data
           insights: transformedResponse.insights,
-          timestamp: Date.now(),
+          timestamp: assistantMessageTimestamp,
         },
       ]);
       console.log(`✅ Messages saved to chat: ${chatDocument.id}`);
@@ -477,10 +480,48 @@ export async function streamChatMessages(sessionId: string, username: string, re
         // Only send update if message count changed
         if (currentMessageCount !== lastMessageCount) {
           const newMessages = currentChat.messages?.slice(lastMessageCount) || [];
+          
+          // Deduplicate new messages before sending (in case backend has duplicates)
+          const uniqueNewMessages = newMessages.filter((msg, index, self) => {
+            // Check for exact duplicates (same role, content, and timestamp)
+            const firstIndex = self.findIndex(m => 
+              m.role === msg.role && 
+              m.content === msg.content && 
+              m.timestamp === msg.timestamp
+            );
+            
+            // If this is not the first occurrence, it's a duplicate
+            if (firstIndex !== index) {
+              console.log(`🔄 SSE: Filtering duplicate message (exact match): ${msg.content?.substring(0, 50)}`);
+              return false;
+            }
+            
+            // Check for similar messages (same role and content, different timestamp within 10 seconds)
+            const similarIndex = self.findIndex(m => 
+              m.role === msg.role && 
+              m.content === msg.content && 
+              m !== msg &&
+              Math.abs(m.timestamp - msg.timestamp) < 10000
+            );
+            
+            if (similarIndex !== -1 && similarIndex < index) {
+              console.log(`🔄 SSE: Filtering duplicate message (similar match): ${msg.content?.substring(0, 50)}`);
+              return false;
+            }
+            
+            return true;
+          });
+          
+          if (uniqueNewMessages.length === 0) {
+            // No unique new messages, just update the count
+            lastMessageCount = currentMessageCount;
+            return true;
+          }
+          
           lastMessageCount = currentMessageCount;
           
           // Enrich new messages with chart data
-          const enrichedMessages = await enrichMessagesWithCharts(newMessages, currentChartsWithData);
+          const enrichedMessages = await enrichMessagesWithCharts(uniqueNewMessages, currentChartsWithData);
           
           const sent = sendSSE(res, 'messages', {
             messages: enrichedMessages,
@@ -505,46 +546,67 @@ export async function streamChatMessages(sessionId: string, username: string, re
     };
 
     // Enrich initial messages with chart data
+    const allMessages = chatDocument.messages || [];
+    
+    // Deduplicate initial messages before sending (in case backend has duplicates)
+    const uniqueInitialMessages = allMessages.filter((msg, index, self) => {
+      // Check for exact duplicates (same role, content, and timestamp)
+      const firstIndex = self.findIndex(m => 
+        m.role === msg.role && 
+        m.content === msg.content && 
+        m.timestamp === msg.timestamp
+      );
+      
+      // If this is not the first occurrence, it's a duplicate
+      if (firstIndex !== index) {
+        console.log(`🔄 SSE init: Filtering duplicate message (exact match): ${msg.content?.substring(0, 50)}`);
+        return false;
+      }
+      
+      // Check for similar messages (same role and content, different timestamp within 10 seconds)
+      const similarIndex = self.findIndex(m => 
+        m.role === msg.role && 
+        m.content === msg.content && 
+        m !== msg &&
+        Math.abs(m.timestamp - msg.timestamp) < 10000
+      );
+      
+      if (similarIndex !== -1 && similarIndex < index) {
+        console.log(`🔄 SSE init: Filtering duplicate message (similar match): ${msg.content?.substring(0, 50)}`);
+        return false;
+      }
+      
+      return true;
+    });
+    
     const enrichedInitialMessages = await enrichMessagesWithCharts(
-      chatDocument.messages || [],
+      uniqueInitialMessages,
       chartsWithData
     );
 
     // Send initial message count
     sendSSE(res, 'init', {
-      messageCount: lastMessageCount,
+      messageCount: uniqueInitialMessages.length,
       messages: enrichedInitialMessages,
     });
 
-    // Set up polling to check for new messages every 2 seconds
-    const checkInterval = setInterval(async () => {
-      // Check if connection is still open
-      if (res.writableEnded || res.destroyed || !res.writable) {
-        clearInterval(checkInterval);
-        return;
+    // CRITICAL: Close the connection immediately after sending init event
+    // The client will close on its side after receiving init, but we also close here
+    // to ensure the connection is terminated and prevent any duplicate events
+    // This breaks the SSE connection as soon as the initial response is sent
+    try {
+      if (!res.writableEnded && !res.destroyed) {
+        res.end();
+        console.log('✅ SSE connection closed immediately after sending init event');
       }
+    } catch (e) {
+      // Ignore errors when ending already closed connection
+    }
 
-      const stillConnected = await sendMessageUpdate();
-      if (!stillConnected) {
-        clearInterval(checkInterval);
-        try {
-          res.end();
-        } catch (e) {
-          // Ignore errors when ending already closed connection
-        }
-      }
-    }, 2000); // Check every 2 seconds
-
-    // Clean up on client disconnect
+    // Clean up on client disconnect (though connection should already be closed)
     req.on('close', () => {
-      clearInterval(checkInterval);
-      try {
-        if (!res.writableEnded && !res.destroyed) {
-          res.end();
-        }
-      } catch (e) {
-        // Ignore errors when ending already closed connection
-      }
+      // Connection already closed, just log
+      console.log('🚫 Client disconnected from SSE (initial analysis stream)');
     });
 
     // Handle errors - only log unexpected errors
@@ -552,14 +614,6 @@ export async function streamChatMessages(sessionId: string, username: string, re
       // ECONNRESET is expected when clients disconnect normally
       if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ECONNABORTED') {
         console.error('SSE connection error:', error);
-      }
-      clearInterval(checkInterval);
-      try {
-        if (!res.writableEnded && !res.destroyed) {
-          res.end();
-        }
-      } catch (e) {
-        // Ignore errors when ending already closed connection
       }
     });
 

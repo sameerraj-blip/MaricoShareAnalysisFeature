@@ -6,6 +6,7 @@
 import { ChatDocument } from "../models/chat.model.js";
 import { getFileFromBlob } from "../lib/blobStorage.js";
 import { parseFile, createDataSummary, convertDashToZeroForNumericColumns } from "../lib/fileParser.js";
+import { getDataForAnalysis } from "../lib/largeFileProcessor.js";
 
 /**
  * Normalize data by converting string numbers to actual numbers
@@ -139,6 +140,28 @@ export async function loadLatestData(
   console.log(`   - sampleRows: ${chatDocument.sampleRows?.length || 0} rows`);
   console.log(`   - currentDataBlob: ${chatDocument.currentDataBlob?.blobName || 'none'}`);
   console.log(`   - original blob: ${chatDocument.blobInfo?.blobName || 'none'}`);
+  console.log(`   - columnarStorage: ${(chatDocument as any).columnarStoragePath || 'none'}`);
+  
+  // Priority 0: For large files, use columnar storage
+  if ((chatDocument as any).columnarStoragePath) {
+    try {
+      console.log(`📊 Loading from columnar storage for large file...`);
+      // For large files, get sampled/aggregated data instead of full dataset
+      const limit = requiredColumns && requiredColumns.length > 0 ? 50000 : 10000;
+      fullData = await getDataForAnalysis(chatDocument.sessionId, requiredColumns, limit);
+      
+      // Normalize numeric columns
+      fullData = normalizeNumericColumns(fullData);
+      const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+      fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
+      
+      console.log(`✅ Loaded ${fullData.length} rows from columnar storage`);
+      return fullData;
+    } catch (error) {
+      console.error('⚠️ Failed to load from columnar storage, trying other sources:', error);
+      // Fall through to other methods
+    }
+  }
   
   // Priority 1: Try to load from currentDataBlob (modified data from data operations)
   // This ensures we get the latest data including any transformations
