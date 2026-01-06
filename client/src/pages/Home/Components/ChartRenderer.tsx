@@ -11,7 +11,11 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Slider } from '@/components/ui/slider';
-import { Filter, Plus, X } from 'lucide-react';
+import { Filter, Plus, X, Loader2, Settings2 } from 'lucide-react';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Progress } from '@/components/ui/progress';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   ResponsiveContainer,
   LineChart,
@@ -50,6 +54,8 @@ interface ChartRendererProps {
   enableFilters?: boolean;
   filters?: ActiveChartFilters;
   onFiltersChange?: (filters: ActiveChartFilters) => void;
+  isLoading?: boolean; // Loading state for correlation charts
+  loadingProgress?: { processed: number; total: number; message?: string }; // Progress info
 }
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4'];
@@ -146,10 +152,18 @@ export function ChartRenderer({
   enableFilters = false,
   filters,
   onFiltersChange,
+  isLoading = false,
+  loadingProgress,
 }: ChartRendererProps) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDashboardModalOpen, setIsDashboardModalOpen] = useState(false);
   const [internalFilters, setInternalFilters] = useState<ActiveChartFilters>({});
+  const [showDots, setShowDots] = useState(false); // State for showing/hiding dots on line charts
+  const [hideOutliers, setHideOutliers] = useState(false); // Hide outliers for scatter plots
+  // Point visibility controls for scatter plots
+  const [pointSize, setPointSize] = useState<'small' | 'medium' | 'large'>('medium');
+  const [pointOpacity, setPointOpacity] = useState<'low' | 'medium' | 'high'>('medium');
+  const [pointDensity, setPointDensity] = useState<'low' | 'medium' | 'high' | 'all'>('medium');
   const { type, title, data: chartDataSource = [], x, y, xDomain, yDomain, trendLine, xLabel, yLabel } = chart;
   const chartColor = COLORS[index % COLORS.length];
 
@@ -287,6 +301,53 @@ export function ChartRenderer({
   const baseChartData = enableFilters ? filteredData : originalData;
   
   const chartData = baseChartData;
+  
+  // Process scatter plot data for display (only outlier filtering) - show ALL data points
+  const processedScatterData = useMemo(() => {
+    if (type !== 'scatter') return chartData;
+    
+    let displayData = [...chartData];
+    
+    // Filter out outliers if enabled (user choice)
+    if (hideOutliers && displayData.length > 0) {
+      const validData = displayData.filter((d: any) => {
+        const xVal = typeof d[x] === 'number' ? d[x] : Number(d[x]);
+        const yVal = typeof d[y] === 'number' ? d[y] : Number(d[y]);
+        return !isNaN(xVal) && !isNaN(yVal);
+      });
+      
+      if (validData.length > 0) {
+        const xValues = validData.map((d: any) => (typeof d[x] === 'number' ? d[x] : Number(d[x])));
+        const yValues = validData.map((d: any) => (typeof d[y] === 'number' ? d[y] : Number(d[y])));
+        
+        // Calculate IQR for outlier detection
+        const sortedX = [...xValues].sort((a, b) => a - b);
+        const sortedY = [...yValues].sort((a, b) => a - b);
+        
+        const q1X = sortedX[Math.floor(sortedX.length * 0.25)];
+        const q3X = sortedX[Math.floor(sortedX.length * 0.75)];
+        const iqrX = q3X - q1X;
+        const lowerBoundX = q1X - 1.5 * iqrX;
+        const upperBoundX = q3X + 1.5 * iqrX;
+        
+        const q1Y = sortedY[Math.floor(sortedY.length * 0.25)];
+        const q3Y = sortedY[Math.floor(sortedY.length * 0.75)];
+        const iqrY = q3Y - q1Y;
+        const lowerBoundY = q1Y - 1.5 * iqrY;
+        const upperBoundY = q3Y + 1.5 * iqrY;
+        
+        displayData = validData.filter((d: any) => {
+          const xVal = typeof d[x] === 'number' ? d[x] : Number(d[x]);
+          const yVal = typeof d[y] === 'number' ? d[y] : Number(d[y]);
+          return xVal >= lowerBoundX && xVal <= upperBoundX && 
+                 yVal >= lowerBoundY && yVal <= upperBoundY;
+        });
+      }
+    }
+    
+    // Always show all data points - no sampling
+    return displayData;
+  }, [type, chartData, hideOutliers, x, y]);
   const shouldCompactView = type === 'bar' && !fillParent && !isSingleChart && chartData.length > MAX_COMPACT_X_TICKS;
   const compactBarData = useMemo(() => {
     if (!shouldCompactView) return chartData;
@@ -631,7 +692,7 @@ export function ChartRenderer({
                 name={chart.y2 ? (yLabel || y) : undefined}
                 stroke={leftAxisColor}
                 strokeWidth={2}
-                dot={false}
+                dot={showDots ? { r: 4, fill: leftAxisColor } : false}
                 activeDot={{ r: 4 }}
                 {...(chart.y2 ? { yAxisId: 'left' } : {})}
               />
@@ -645,7 +706,7 @@ export function ChartRenderer({
                       name={chart.y2Label || chart.y2}
                       stroke={rightAxisColor}
                       strokeWidth={2}
-                      dot={false}
+                      dot={showDots ? { r: 4, fill: rightAxisColor } : false}
                       activeDot={{ r: 4 }}
                       yAxisId="right"
                     />
@@ -663,7 +724,7 @@ export function ChartRenderer({
                         name={series}
                         stroke={seriesColor}
                         strokeWidth={2}
-                        dot={false}
+                        dot={showDots ? { r: 4, fill: seriesColor } : false}
                         activeDot={{ r: 4 }}
                         yAxisId="right"
                       />
@@ -712,10 +773,54 @@ export function ChartRenderer({
           return 6;
         };
 
-        // Calculate trendline if not provided but we have data
+        // Optimize scatter data for rendering performance (keep trend line accurate)
+        // Adjust max points based on user preference
+        const getMaxRenderPoints = () => {
+          switch (pointDensity) {
+            case 'low': return 2000;
+            case 'medium': return 10000;
+            case 'high': return 20000;
+            case 'all': return processedScatterData.length; // Show all, but warn if too many
+            default: return 10000;
+          }
+        };
+        
+        const MAX_RENDER_POINTS = getMaxRenderPoints();
+        const optimizedScatterData = useMemo(() => {
+          if (processedScatterData.length <= MAX_RENDER_POINTS) {
+            return processedScatterData;
+          }
+          
+          // Stratified sampling to preserve distribution
+          const step = Math.ceil(processedScatterData.length / MAX_RENDER_POINTS);
+          return processedScatterData.filter((_, idx) => idx % step === 0).slice(0, MAX_RENDER_POINTS);
+        }, [processedScatterData, MAX_RENDER_POINTS]);
+        
+        const isLargeDataset = optimizedScatterData.length > 5000;
+        
+        // Calculate point size and opacity based on user preferences
+        const getPointSize = () => {
+          switch (pointSize) {
+            case 'small': return 1;
+            case 'medium': return isLargeDataset ? 2 : 3;
+            case 'large': return isLargeDataset ? 3 : 5;
+            default: return 3;
+          }
+        };
+        
+        const getPointOpacity = () => {
+          switch (pointOpacity) {
+            case 'low': return 0.15;
+            case 'medium': return isLargeDataset ? 0.3 : 0.6;
+            case 'high': return isLargeDataset ? 0.5 : 0.9;
+            default: return 0.6;
+          }
+        };
+
+        // Use processed scatter data for display (trend line calculated from all data below)
         let trendlineData = trendLine;
         if (!trendlineData && chartData.length > 0) {
-          // Calculate linear regression from data points
+          // Calculate linear regression from ALL data points
           const validData = chartData.filter((d: any) => {
             const xVal = typeof d[x] === 'number' ? d[x] : Number(d[x]);
             const yVal = typeof d[y] === 'number' ? d[y] : Number(d[y]);
@@ -786,7 +891,7 @@ export function ChartRenderer({
         // Use ComposedChart to render scatter with trendline
         return (
           <ResponsiveContainer width="100%" height={fillParent ? '100%' : isSingleChart ? 400 : 250}>
-            <ComposedChart data={chartData} margin={{ left: 50, right: 10, top: 10, bottom: 30 }}>
+            <ComposedChart data={optimizedScatterData} margin={{ left: 50, right: 10, top: 10, bottom: 30 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
               <XAxis
                 dataKey={x}
@@ -808,7 +913,7 @@ export function ChartRenderer({
                 label={{ value: yLabel || y, angle: -90, position: 'left', style: { textAnchor: 'middle', fill: 'hsl(var(--foreground))', fontSize: 12, fontWeight: 600 } }}
               />
               <Tooltip
-                cursor={{ strokeDasharray: '3 3' }}
+                cursor={!isLargeDataset ? { strokeDasharray: '3 3' } : false}
                 formatter={(_value: any, _name: any, props: any) => {
                   const p = (props && props.payload) || {};
                   const yVal = p[y];
@@ -819,9 +924,20 @@ export function ChartRenderer({
                   const xVal = p ? p[x] : '';
                   return `${xLabel || x}: ${String(xVal)}`;
                 }}
-                content={renderScatterTooltip as any}
+                content={!isLargeDataset ? renderScatterTooltip as any : undefined}
               />
-              <Scatter name={`${y}`} data={chartData} dataKey={y} fill={chartColor} fillOpacity={0.6} isAnimationActive={false} />
+              <Scatter 
+                name={`${y}`} 
+                data={optimizedScatterData} 
+                dataKey={y} 
+                fill={chartColor} 
+                fillOpacity={getPointOpacity()} 
+                isAnimationActive={false}
+                shape={(props: any) => {
+                  const radius = getPointSize();
+                  return <circle {...props} r={radius} />;
+                }}
+              />
               {trendlineData && trendlineData.length === 2 && (
                 <Line
                   type="linear"
@@ -915,7 +1031,120 @@ export function ChartRenderer({
         >
           {!fillParent && (
             <div className="mb-2 flex items-start justify-between gap-2">
-              <h3 className="line-clamp-2 text-sm font-semibold text-foreground">{title}</h3>
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <h3 className="line-clamp-2 text-sm font-semibold text-foreground">{title}</h3>
+                {type === 'scatter' && (
+                  <div className="text-[11px] text-muted-foreground">
+                    <p>{processedScatterData.length.toLocaleString()} visualization points</p>
+                    {(chart as any)._correlationMetadata && (
+                      <p className="text-[10px] mt-0.5">
+                        Total: {(chart as any)._correlationMetadata.totalDataPoints?.toLocaleString() || 'N/A'} pairs
+                        {typeof (chart as any)._correlationMetadata.correlation === 'number' && (
+                          <span className="ml-2">
+                            (r = {(chart as any)._correlationMetadata.correlation.toFixed(2)})
+                          </span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+                {type === 'line' && (
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id={`show-dots-${index}`}
+                      checked={showDots}
+                      onCheckedChange={(checked) => setShowDots(checked === true)}
+                    />
+                    <Label
+                      htmlFor={`show-dots-${index}`}
+                      className="text-xs text-muted-foreground cursor-pointer whitespace-nowrap"
+                    >
+                      Show dots
+                    </Label>
+                  </div>
+                )}
+                {type === 'scatter' && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <Checkbox
+                        id={`hide-outliers-${index}`}
+                        checked={hideOutliers}
+                        onCheckedChange={(checked) => setHideOutliers(checked === true)}
+                      />
+                      <Label
+                        htmlFor={`hide-outliers-${index}`}
+                        className="text-xs text-muted-foreground cursor-pointer whitespace-nowrap"
+                      >
+                        Hide outliers
+                      </Label>
+                    </div>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={(e) => e.stopPropagation()}
+                          title="Point Display Settings"
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-64" onClick={(e) => e.stopPropagation()}>
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <Label className="text-xs font-semibold">Point Size</Label>
+                            <Select value={pointSize} onValueChange={(value: 'small' | 'medium' | 'large') => setPointSize(value)}>
+                              <SelectTrigger className="h-8 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="small">Small (1px)</SelectItem>
+                                <SelectItem value="medium">Medium (2-3px)</SelectItem>
+                                <SelectItem value="large">Large (3-5px)</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-xs font-semibold">Point Opacity</Label>
+                            <Select value={pointOpacity} onValueChange={(value: 'low' | 'medium' | 'high') => setPointOpacity(value)}>
+                              <SelectTrigger className="h-8 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="low">Low (15%)</SelectItem>
+                                <SelectItem value="medium">Medium (30-60%)</SelectItem>
+                                <SelectItem value="high">High (50-90%)</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-xs font-semibold">Point Density</Label>
+                            <Select value={pointDensity} onValueChange={(value: 'low' | 'medium' | 'high' | 'all') => setPointDensity(value)}>
+                              <SelectTrigger className="h-8 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="low">Low (2k points)</SelectItem>
+                                <SelectItem value="medium">Medium (10k points)</SelectItem>
+                                <SelectItem value="high">High (20k points)</SelectItem>
+                                <SelectItem value="all">All Points {processedScatterData.length > 20000 && '(may lag)'}</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          {pointDensity === 'all' && processedScatterData.length > 20000 && (
+                            <p className="text-xs text-muted-foreground">
+                              ⚠️ Showing all {processedScatterData.length.toLocaleString()} points may cause performance issues
+                            </p>
+                          )}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  </>
+                )}
+              </div>
             </div>
           )}
 
@@ -948,7 +1177,28 @@ export function ChartRenderer({
             </div>
           )}
 
-          <div className={`w-full flex-1 ${fillParent ? 'min-h-0' : ''}`}>{renderChart()}</div>
+          {/* Loading state for correlation charts */}
+          {isLoading && type === 'scatter' && (chart as any)._isCorrelationChart ? (
+            <div className={`w-full flex-1 flex flex-col items-center justify-center ${fillParent ? 'min-h-0' : 'min-h-[400px]'}`}>
+              <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
+              <p className="text-sm text-muted-foreground mb-2">
+                {loadingProgress?.message || 'Computing correlation...'}
+              </p>
+              {loadingProgress && loadingProgress.total > 0 && (
+                <div className="w-full max-w-md space-y-2">
+                  <Progress 
+                    value={(loadingProgress.processed / loadingProgress.total) * 100} 
+                    className="h-2"
+                  />
+                  <p className="text-xs text-muted-foreground text-center">
+                    {loadingProgress.processed.toLocaleString()} / {loadingProgress.total.toLocaleString()} rows processed
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className={`w-full flex-1 ${fillParent ? 'min-h-0' : ''}`}>{renderChart()}</div>
+          )}
         </div>
         {showAddButton && (
           <div className="mt-3 flex justify-end">

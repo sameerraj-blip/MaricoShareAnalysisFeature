@@ -73,18 +73,11 @@ export const useHomeMutations = ({
       if (data.jobId && data.sessionId && data.status === 'processing') {
         setSessionId(data.sessionId);
         
-        // Check if file is large (>= 50MB) and show loading state instead of message
-        const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
-        const isLargeFile = variables.fileSize >= LARGE_FILE_THRESHOLD;
-        
-        if (isLargeFile && setIsLargeFileLoading) {
-          // Show loading state for large files instead of processing message
+        // Show loading state for ALL files until initial analysis is received
+        if (setIsLargeFileLoading) {
           setIsLargeFileLoading(true);
-          setMessages([]); // Clear messages to show loading state
-        } else {
-          // For small files, don't show any message - just wait for SSE
-          setMessages([]);
         }
+        setMessages([]); // Clear messages to show loading state
         
         // Fetch session details from placeholder (now it exists!)
         // We only fetch to set metadata, NOT to show the initial message

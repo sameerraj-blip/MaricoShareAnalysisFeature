@@ -1,5 +1,5 @@
 import { forwardRef, useState, useMemo, memo } from 'react';
-import { Message, ThinkingStep } from '@/shared/schema';
+import { Message, ThinkingStep, ChartSpec } from '@/shared/schema';
 import { User, Bot, Edit2, Check, X as XIcon } from 'lucide-react';
 import { ChartRenderer } from './ChartRenderer';
 import { InsightCard } from './InsightCard';
@@ -10,6 +10,64 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { getUserEmail } from '@/utils/userStorage';
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
+
+/**
+ * Extract loading state for a correlation chart from thinking steps
+ */
+function extractCorrelationChartLoadingState(
+  chart: ChartSpec,
+  thinkingSteps: ThinkingStep[],
+  chartIndex: number
+): { isLoading: boolean; progress?: { processed: number; total: number; message?: string } } {
+  // Look for correlation-related thinking steps
+  const correlationSteps = thinkingSteps.filter(step => 
+    step.step.toLowerCase().includes('correlation') || 
+    step.step.toLowerCase().includes('computing') ||
+    step.details?.toLowerCase().includes('rows')
+  );
+
+  if (correlationSteps.length === 0) {
+    return { isLoading: false };
+  }
+
+  // Check if any correlation step is still active
+  const activeStep = correlationSteps.find(step => step.status === 'active');
+  if (!activeStep) {
+    // Check if the last step is completed
+    const lastStep = correlationSteps[correlationSteps.length - 1];
+    if (lastStep?.status === 'completed') {
+      return { isLoading: false };
+    }
+    return { isLoading: false };
+  }
+
+  // Extract progress from step details (format: "X/Y rows" or "X/Y rows processed")
+  let progress: { processed: number; total: number; message?: string } | undefined;
+  if (activeStep.details) {
+    const match = activeStep.details.match(/(\d+(?:,\d+)*)\s*\/\s*(\d+(?:,\d+)*)\s*rows/i);
+    if (match) {
+      const processed = parseInt(match[1].replace(/,/g, ''), 10);
+      const total = parseInt(match[2].replace(/,/g, ''), 10);
+      if (!isNaN(processed) && !isNaN(total)) {
+        progress = {
+          processed,
+          total,
+          message: activeStep.step,
+        };
+      }
+    }
+  }
+
+  // If chart has data, it's no longer loading
+  if (chart.data && Array.isArray(chart.data) && chart.data.length > 0) {
+    return { isLoading: false };
+  }
+
+  return {
+    isLoading: true,
+    progress: progress || { processed: 0, total: 0, message: activeStep.step },
+  };
+}
 
 interface MessageBubbleProps {
   message: Message;
@@ -183,22 +241,92 @@ const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
           </div>
         )}
 
-        {!isUser && message.charts && message.charts.length > 0 && (
-          <div className={`mt-3 grid gap-4 ${
-            message.charts.length === 1 
-              ? 'grid-cols-1' 
-              : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
-          }`}>
-            {message.charts.map((chart, idx) => (
-              <ChartRenderer 
-                key={idx} 
-                chart={chart} 
-                index={idx}
-                isSingleChart={message.charts!.length === 1}
-                enableFilters
-              />
-            ))}
-          </div>
+        {!isUser && (
+          <>
+            {/* Show existing charts */}
+            {message.charts && message.charts.length > 0 && (
+              <div className={`mt-3 grid gap-4 ${
+                message.charts.length === 1 
+                  ? 'grid-cols-1' 
+                  : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
+              }`}>
+                {message.charts.map((chart, idx) => {
+                  // Check if this correlation chart is still loading based on thinking steps
+                  const isCorrelationChart = chart.type === 'scatter' && (chart as any)._isCorrelationChart;
+                  const chartLoadingState = isCorrelationChart && thinkingSteps 
+                    ? extractCorrelationChartLoadingState(chart, thinkingSteps, idx)
+                    : { isLoading: false };
+                  
+                  return (
+                    <ChartRenderer 
+                      key={idx} 
+                      chart={chart} 
+                      index={idx}
+                      isSingleChart={message.charts!.length === 1}
+                      enableFilters
+                      isLoading={chartLoadingState.isLoading}
+                      loadingProgress={chartLoadingState.progress}
+                    />
+                  );
+                })}
+              </div>
+            )}
+            
+            {/* Show loading placeholders for correlation charts being generated */}
+            {thinkingSteps && thinkingSteps.some(step => 
+              step.status === 'active' && 
+              (step.step.toLowerCase().includes('correlation') || step.step.toLowerCase().includes('computing'))
+            ) && (!message.charts || message.charts.length === 0) && (
+              <div className="mt-3 grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+                {[0, 1, 2].map((idx) => {
+                  const correlationSteps = thinkingSteps.filter(step => 
+                    step.step.toLowerCase().includes('correlation') || 
+                    step.step.toLowerCase().includes('computing')
+                  );
+                  const activeStep = correlationSteps.find(step => step.status === 'active');
+                  
+                  let progress: { processed: number; total: number; message?: string } | undefined;
+                  if (activeStep?.details) {
+                    const match = activeStep.details.match(/(\d+(?:,\d+)*)\s*\/\s*(\d+(?:,\d+)*)\s*rows/i);
+                    if (match) {
+                      const processed = parseInt(match[1].replace(/,/g, ''), 10);
+                      const total = parseInt(match[2].replace(/,/g, ''), 10);
+                      if (!isNaN(processed) && !isNaN(total)) {
+                        progress = {
+                          processed,
+                          total,
+                          message: activeStep.step,
+                        };
+                      }
+                    }
+                  }
+                  
+                  // Create placeholder chart for loading
+                  const placeholderChart: ChartSpec = {
+                    type: 'scatter',
+                    title: `Correlation Chart ${idx + 1}`,
+                    x: 'x',
+                    y: 'y',
+                    xLabel: 'x',
+                    yLabel: 'y',
+                    data: [],
+                    _isCorrelationChart: true,
+                  };
+                  
+                  return (
+                    <ChartRenderer 
+                      key={`loading-${idx}`}
+                      chart={placeholderChart}
+                      index={idx}
+                      enableFilters={false}
+                      isLoading={true}
+                      loadingProgress={progress || { processed: 0, total: 0, message: activeStep?.step }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
 
         {!isUser && message.insights && message.insights.length > 0 && (

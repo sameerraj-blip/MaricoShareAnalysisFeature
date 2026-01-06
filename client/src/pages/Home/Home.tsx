@@ -138,7 +138,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       return false;
     }
     
-    const MAX_RETRIES = 10; // Try up to 10 times (10 seconds total)
+    const MAX_RETRIES = 60; // Try up to 60 times (60 seconds total) - analysis can take time
     
     try {
       console.log(`📥 Fetching messages from session API (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
@@ -153,6 +153,70 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         hasInsights: !!(session?.insights?.length)
       });
       
+      // Check for charts/insights FIRST - this indicates analysis is ready
+      // Even if messages exist, we need charts/insights to show the analysis
+      const hasCharts = session?.charts && Array.isArray(session.charts) && session.charts.length > 0;
+      const hasInsights = session?.insights && Array.isArray(session.insights) && session.insights.length > 0;
+      
+      if (hasCharts || hasInsights) {
+        console.log('✅ Analysis ready - charts/insights found');
+        
+        // If we have messages with charts/insights, use them
+        if (session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
+          const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
+          if (hasInitialAnalysis) {
+            console.log('✅ Initial analysis found in messages - setting messages and clearing loading state');
+            setMessages(session.messages);
+            setIsLargeFileLoading(false);
+            setInitialAnalysisReceived(true);
+            
+            // Set metadata
+            if (session.dataSummary) {
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
+            }
+            if (session.charts) setInitialCharts(session.charts);
+            if (session.insights) setInitialInsights(session.insights);
+            return true;
+          }
+        }
+        
+        // Create initial message from charts/insights if no messages yet
+        console.log('✅ Creating initial message from charts/insights');
+        const initialMessage: Message = {
+          role: 'assistant',
+          content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+          charts: session.charts || [],
+          insights: session.insights || [],
+          timestamp: Date.now(),
+        };
+        setMessages([initialMessage]);
+        setIsLargeFileLoading(false);
+        setInitialAnalysisReceived(true);
+        
+        // Set metadata
+        if (session.dataSummary) {
+          if (session.sampleRows && session.sampleRows.length > 0) {
+            setSampleRows(session.sampleRows);
+          }
+          setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+          setNumericColumns(session.dataSummary.numericColumns || []);
+          setDateColumns(session.dataSummary.dateColumns || []);
+          setTotalRows(session.dataSummary.rowCount);
+          setTotalColumns(session.dataSummary.columnCount);
+        }
+        if (session.charts) setInitialCharts(session.charts);
+        if (session.insights) setInitialInsights(session.insights);
+        return true;
+      }
+      
+      // Check messages only if charts/insights aren't ready yet
       if (session && session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
         console.log(`✅ Fetched ${session.messages.length} messages from session API`);
         console.log('📝 Messages:', session.messages.map((m: Message) => ({
@@ -187,70 +251,10 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
           if (session.insights) setInitialInsights(session.insights);
           return true; // Success
         } else {
-          console.log('⚠️ No initial analysis found in session messages yet');
-          // Check if we have charts/insights at session level (even without messages)
-          if ((session.charts && session.charts.length > 0) || (session.insights && session.insights.length > 0)) {
-            console.log('✅ Found charts/insights at session level - creating initial message');
-            // Create an initial message from session data
-            const initialMessage: Message = {
-              role: 'assistant',
-              content: `Initial analysis for ${session.fileName || 'your file'}`,
-              charts: session.charts || [],
-              insights: session.insights || [],
-              timestamp: Date.now(),
-            };
-            setMessages([initialMessage]);
-            setIsLargeFileLoading(false);
-            setInitialAnalysisReceived(true);
-            
-            // Set metadata
-            if (session.dataSummary) {
-              if (session.sampleRows && session.sampleRows.length > 0) {
-                setSampleRows(session.sampleRows);
-              }
-              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
-              setNumericColumns(session.dataSummary.numericColumns || []);
-              setDateColumns(session.dataSummary.dateColumns || []);
-              setTotalRows(session.dataSummary.rowCount);
-              setTotalColumns(session.dataSummary.columnCount);
-            }
-            if (session.charts) setInitialCharts(session.charts);
-            if (session.insights) setInitialInsights(session.insights);
-            return true;
-          }
+          console.log('⚠️ Messages found but no initial analysis detected - waiting for charts/insights');
         }
       } else {
-        console.log('⚠️ No messages found in session yet');
-        // Check if we have charts/insights at session level (even without messages)
-        if (session && ((session.charts && session.charts.length > 0) || (session.insights && session.insights.length > 0))) {
-          console.log('✅ Found charts/insights at session level - creating initial message');
-          // Create an initial message from session data
-          const initialMessage: Message = {
-            role: 'assistant',
-            content: `Initial analysis for ${session.fileName || 'your file'}`,
-            charts: session.charts || [],
-            insights: session.insights || [],
-            timestamp: Date.now(),
-          };
-          setMessages([initialMessage]);
-          setIsLargeFileLoading(false);
-          setInitialAnalysisReceived(true);
-          
-          // Set metadata
-          if (session.dataSummary) {
-            if (session.sampleRows && session.sampleRows.length > 0) {
-              setSampleRows(session.sampleRows);
-            }
-            setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
-            setNumericColumns(session.dataSummary.numericColumns || []);
-            setDateColumns(session.dataSummary.dateColumns || []);
-            setTotalRows(session.dataSummary.rowCount);
-            setTotalColumns(session.dataSummary.columnCount);
-          }
-          if (session.charts) setInitialCharts(session.charts);
-          if (session.insights) setInitialInsights(session.insights);
-          return true;
-        }
+        console.log('⚠️ No messages found in session yet - waiting for analysis to complete');
       }
     } catch (error) {
       console.error('⚠️ Failed to fetch messages from session API:', error);
@@ -355,15 +359,19 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
 
   // Poll for messages when loading state is active and we haven't received initial analysis
   // This is a fallback in case SSE doesn't deliver messages
+  // Also poll for all files (not just large ones) to ensure initial analysis is received
   useEffect(() => {
-    if (!isLargeFileLoading || !sessionId || initialAnalysisReceived) {
+    // Poll if: (1) large file loading is active, OR (2) we have a session but no messages yet
+    const shouldPoll = (isLargeFileLoading || (sessionId && messages.length === 0)) && !initialAnalysisReceived;
+    
+    if (!shouldPoll || !sessionId) {
       return;
     }
 
     console.log('🔄 Starting polling for initial analysis messages...');
     let pollCount = 0;
-    const MAX_POLLS = 30; // Poll for up to 30 seconds
-    const POLL_INTERVAL = 1000; // Poll every 1 second
+    const MAX_POLLS = 120; // Poll for up to 120 seconds (2 minutes) - analysis can take time
+    const POLL_INTERVAL = 2000; // Poll every 2 seconds to reduce server load
     let isCleared = false;
 
     const pollInterval = setInterval(async () => {
@@ -376,69 +384,74 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         const data = await sessionsApi.getSessionDetails(sessionId);
         const session = data.session || data;
         
-        if (session && session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
-          // Check if initial analysis exists using improved detection
-          const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
-          
-          if (hasInitialAnalysis) {
-            console.log('✅ Initial analysis found via polling - setting messages and clearing loading state');
-            setMessages(session.messages);
-            setIsLargeFileLoading(false);
-            setInitialAnalysisReceived(true);
-            
-            // Also set metadata if available
-            if (session.dataSummary) {
-              if (session.sampleRows && session.sampleRows.length > 0) {
-                setSampleRows(session.sampleRows);
-              }
-              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
-              setNumericColumns(session.dataSummary.numericColumns || []);
-              setDateColumns(session.dataSummary.dateColumns || []);
-              setTotalRows(session.dataSummary.rowCount);
-              setTotalColumns(session.dataSummary.columnCount);
-            }
-            if (session.charts) setInitialCharts(session.charts);
-            if (session.insights) setInitialInsights(session.insights);
-            
-            clearInterval(pollInterval);
-            isCleared = true;
-            return;
-          }
-        }
+        // Check for charts/insights FIRST - this indicates analysis is ready
+        const hasCharts = session?.charts && Array.isArray(session.charts) && session.charts.length > 0;
+        const hasInsights = session?.insights && Array.isArray(session.insights) && session.insights.length > 0;
         
-        // If no messages but we have charts/insights at session level, create initial message
-        if (session && (!session.messages || session.messages.length === 0)) {
-          if ((session.charts && session.charts.length > 0) || (session.insights && session.insights.length > 0)) {
-            console.log('✅ Found charts/insights at session level (no messages) - creating initial message');
-            const initialMessage: Message = {
-              role: 'assistant',
-              content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
-              charts: session.charts || [],
-              insights: session.insights || [],
-              timestamp: Date.now(),
-            };
-            setMessages([initialMessage]);
-            setIsLargeFileLoading(false);
-            setInitialAnalysisReceived(true);
-            
-            // Set metadata
-            if (session.dataSummary) {
-              if (session.sampleRows && session.sampleRows.length > 0) {
-                setSampleRows(session.sampleRows);
+        if (hasCharts || hasInsights) {
+          console.log('✅ Analysis ready via polling - charts/insights found');
+          
+          // If we have messages with charts/insights, use them
+          if (session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
+            const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
+            if (hasInitialAnalysis) {
+              console.log('✅ Initial analysis found in messages - setting messages and clearing loading state');
+              setMessages(session.messages);
+              setIsLargeFileLoading(false);
+              setInitialAnalysisReceived(true);
+              
+              // Set metadata
+              if (session.dataSummary) {
+                if (session.sampleRows && session.sampleRows.length > 0) {
+                  setSampleRows(session.sampleRows);
+                }
+                setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+                setNumericColumns(session.dataSummary.numericColumns || []);
+                setDateColumns(session.dataSummary.dateColumns || []);
+                setTotalRows(session.dataSummary.rowCount);
+                setTotalColumns(session.dataSummary.columnCount);
               }
-              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
-              setNumericColumns(session.dataSummary.numericColumns || []);
-              setDateColumns(session.dataSummary.dateColumns || []);
-              setTotalRows(session.dataSummary.rowCount);
-              setTotalColumns(session.dataSummary.columnCount);
+              if (session.charts) setInitialCharts(session.charts);
+              if (session.insights) setInitialInsights(session.insights);
+              
+              clearInterval(pollInterval);
+              isCleared = true;
+              return;
             }
-            if (session.charts) setInitialCharts(session.charts);
-            if (session.insights) setInitialInsights(session.insights);
-            
-            clearInterval(pollInterval);
-            isCleared = true;
-            return;
           }
+          
+          // Create initial message from charts/insights
+          console.log('✅ Creating initial message from charts/insights');
+          const initialMessage: Message = {
+            role: 'assistant',
+            content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+            charts: session.charts || [],
+            insights: session.insights || [],
+            timestamp: Date.now(),
+          };
+          setMessages([initialMessage]);
+          setIsLargeFileLoading(false);
+          setInitialAnalysisReceived(true);
+          
+          // Set metadata
+          if (session.dataSummary) {
+            if (session.sampleRows && session.sampleRows.length > 0) {
+              setSampleRows(session.sampleRows);
+            }
+            setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+            setNumericColumns(session.dataSummary.numericColumns || []);
+            setDateColumns(session.dataSummary.dateColumns || []);
+            setTotalRows(session.dataSummary.rowCount);
+            setTotalColumns(session.dataSummary.columnCount);
+          }
+          if (session.charts) setInitialCharts(session.charts);
+          if (session.insights) setInitialInsights(session.insights);
+          
+          clearInterval(pollInterval);
+          isCleared = true;
+          return;
+        } else {
+          console.log(`⏳ Analysis not ready yet - no charts/insights (attempt ${pollCount}/${MAX_POLLS})`);
         }
       } catch (error) {
         console.error('⚠️ Error polling for messages:', error);
@@ -456,7 +469,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       clearInterval(pollInterval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLargeFileLoading, sessionId, initialAnalysisReceived]);
+  }, [isLargeFileLoading, sessionId, initialAnalysisReceived, messages.length]);
 
   // Load session data when provided (and populate existing chat history)
   useSessionLoader({

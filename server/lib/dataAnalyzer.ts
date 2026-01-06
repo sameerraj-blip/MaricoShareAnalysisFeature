@@ -1355,6 +1355,16 @@ export async function answerQuestion(
       const wantsAscendingGeneral = /\bascending|lowest\s+to\s+highest|low\s+to\s+high|smallest\s+to\s+largest|smallest\s+to\s+biggest\b/i.test(question);
       const sortOrderGeneral = wantsDescendingGeneral ? 'descending' : wantsAscendingGeneral ? 'ascending' : undefined; // Only set if user explicitly requested
       
+      // Send progress update for correlation computation
+      if (onThinkingStep) {
+        onThinkingStep({
+          step: `Computing correlations for ${targetCol}...`,
+          status: 'active',
+          timestamp: Date.now(),
+          details: `Analyzing ${workingData.length.toLocaleString()} rows`,
+        });
+      }
+
       const { charts, insights } = await analyzeCorrelations(
         workingData,
         targetCol,
@@ -1362,8 +1372,27 @@ export async function answerQuestion(
         correlationFilter,
         sortOrderGeneral,
         chatInsights,
-        undefined // No limit for legacy dataAnalyzer
+        undefined, // No limit for legacy dataAnalyzer
+        (message, processed, total) => {
+          // Send progress updates via thinking steps
+          if (onThinkingStep) {
+            onThinkingStep({
+              step: message,
+              status: processed && total && processed < total ? 'active' : 'completed',
+              timestamp: Date.now(),
+              details: processed && total ? `${processed.toLocaleString()}/${total.toLocaleString()} rows` : undefined,
+            });
+          }
+        }
       );
+
+      if (onThinkingStep) {
+        onThinkingStep({
+          step: `Correlation analysis complete`,
+          status: 'completed',
+          timestamp: Date.now(),
+        });
+      }
 
       // Fallback: if for any reason charts came back without per-chart insights,
       // enrich them here so the UI always gets keyInsight.
