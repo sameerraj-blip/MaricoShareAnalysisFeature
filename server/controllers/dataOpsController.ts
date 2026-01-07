@@ -17,7 +17,7 @@ import * as XLSX from 'xlsx';
 export const dataOpsChatWithAI = async (req: Request, res: Response) => {
   try {
     console.log('📨 dataOpsChatWithAI() called');
-    const { sessionId, message, chatHistory, dataOpsMode } = req.body;
+    const { sessionId, message, dataOpsMode } = req.body;
     const username = requireUsername(req);
 
     // Validate required fields
@@ -25,11 +25,10 @@ export const dataOpsChatWithAI = async (req: Request, res: Response) => {
       return sendValidationError(res, 'Missing required fields');
     }
 
-    // Process data operation
+    // Process data operation (chatHistory will be fetched from Cosmos DB in the service)
     const result = await processDataOperation({
       sessionId,
       message,
-      chatHistory,
       dataOpsMode,
       username,
     });
@@ -48,7 +47,7 @@ export const dataOpsChatWithAI = async (req: Request, res: Response) => {
 export const dataOpsChatWithAIStream = async (req: Request, res: Response) => {
   try {
     console.log('📨 dataOpsChatWithAIStream() called');
-    const { sessionId, message, chatHistory, dataOpsMode } = req.body;
+    const { sessionId, message, dataOpsMode } = req.body;
     const username = requireUsername(req);
 
     // Validate required fields
@@ -56,11 +55,10 @@ export const dataOpsChatWithAIStream = async (req: Request, res: Response) => {
       return;
     }
     
-    // Process streaming data operation
+    // Process streaming data operation (chatHistory will be fetched from Cosmos DB in the service)
     await processStreamDataOperation({
       sessionId,
       message,
-      chatHistory,
       dataOpsMode,
       username,
       res,

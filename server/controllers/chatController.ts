@@ -16,10 +16,10 @@ import { sendError, sendValidationError, sendNotFound } from "../utils/responseF
 export const chatWithAI = async (req: Request, res: Response) => {
   try {
     console.log('📨 chatWithAI() called');
-    const { sessionId, message, chatHistory, targetTimestamp } = req.body;
+    const { sessionId, message, targetTimestamp } = req.body;
     const username = requireUsername(req);
 
-    console.log('📥 Request body:', { sessionId, message: message?.substring(0, 50), chatHistoryLength: chatHistory?.length, targetTimestamp });
+    console.log('📥 Request body:', { sessionId, message: message?.substring(0, 50), targetTimestamp });
 
     // Validate required fields
     if (!sessionId || !message) {
@@ -27,11 +27,10 @@ export const chatWithAI = async (req: Request, res: Response) => {
       return sendValidationError(res, 'Missing required fields');
     }
 
-    // Process chat message
+    // Process chat message (chatHistory will be fetched from Cosmos DB in the service)
     const result = await processChatMessage({
       sessionId,
       message,
-      chatHistory,
       targetTimestamp,
       username,
     });
@@ -58,10 +57,10 @@ export const chatWithAI = async (req: Request, res: Response) => {
 export const chatWithAIStream = async (req: Request, res: Response) => {
   try {
     console.log('📨 chatWithAIStream() called');
-    const { sessionId, message, chatHistory, targetTimestamp, mode } = req.body;
+    const { sessionId, message, targetTimestamp, mode } = req.body;
     const username = requireUsername(req);
 
-    console.log('📥 Request body:', { sessionId, message: message?.substring(0, 50), chatHistoryLength: chatHistory?.length, targetTimestamp, mode });
+    console.log('📥 Request body:', { sessionId, message: message?.substring(0, 50), targetTimestamp, mode });
 
     // Validate required fields
     if (!sessionId || !message) {
@@ -74,11 +73,10 @@ export const chatWithAIStream = async (req: Request, res: Response) => {
       ? (mode === 'general' ? undefined : mode)
       : undefined;
 
-    // Process streaming chat
+    // Process streaming chat (chatHistory will be fetched from Cosmos DB in the service)
     await processStreamChat({
       sessionId,
       message,
-      chatHistory,
       targetTimestamp,
       username,
       res,

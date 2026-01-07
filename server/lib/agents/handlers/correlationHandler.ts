@@ -304,7 +304,9 @@ export class CorrelationHandler extends BaseHandler {
           filter,
           sortOrder,
           context.chatInsights,
-          maxResults
+          maxResults,
+          undefined, // onProgress
+          context.sessionId // sessionId for caching
       );
 
       // Post-process: Apply general constraint system (works for ANY relationship type, not just "sister brands")

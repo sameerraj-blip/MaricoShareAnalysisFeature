@@ -1383,7 +1383,8 @@ export async function answerQuestion(
               details: processed && total ? `${processed.toLocaleString()}/${total.toLocaleString()} rows` : undefined,
             });
           }
-        }
+        },
+        sessionId // Pass sessionId for caching
       );
 
       if (onThinkingStep) {

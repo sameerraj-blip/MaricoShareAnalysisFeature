@@ -17,12 +17,13 @@ import { enrichCharts, validateAndEnrichResponse } from "./chatResponse.service.
 import { sendSSE, setSSEHeaders } from "../../utils/sse.helper.js";
 import { loadLatestData } from "../../utils/dataLoader.js";
 import { classifyMode } from "../../lib/agents/modeClassifier.js";
+import { extractColumnsFromMessage } from "../../lib/columnExtractor.js";
+import { analyzeChatWithColumns } from "../../lib/chatAnalyzer.js";
 import { Response } from "express";
 
 export interface ProcessStreamChatParams {
   sessionId: string;
   message: string;
-  chatHistory?: Message[];
   targetTimestamp?: number;
   username: string;
   res: Response;
@@ -33,7 +34,7 @@ export interface ProcessStreamChatParams {
  * Process a streaming chat message
  */
 export async function processStreamChat(params: ProcessStreamChatParams): Promise<void> {
-  const { sessionId, message, chatHistory, targetTimestamp, username, res, mode } = params;
+  const { sessionId, message, targetTimestamp, username, res, mode } = params;
 
   // Set SSE headers
   setSSEHeaders(res);
@@ -118,11 +119,82 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       return;
     }
 
-    // For edited messages, use full history from database for mode detection (same as new messages)
+    // Extract columns from chat message using RegEx (ONLY place RegEx is used for column extraction)
+    const availableColumns = chatDocument.dataSummary.columns.map(c => c.name);
+    onThinkingStep({
+      step: 'Extracting columns from message',
+      status: 'active',
+      timestamp: Date.now(),
+    });
+
+    const extractedColumns = extractColumnsFromMessage(message, availableColumns);
+    console.log(`📋 Extracted columns from message using RegEx:`, extractedColumns);
+
+    onThinkingStep({
+      step: 'Extracting columns from message',
+      status: 'completed',
+      timestamp: Date.now(),
+      details: extractedColumns.length > 0 
+        ? `Found columns: ${extractedColumns.join(', ')}`
+        : 'No columns explicitly mentioned',
+    });
+
+    // Analyze chat message with AI using extracted columns
+    onThinkingStep({
+      step: 'Analyzing user intent',
+      status: 'active',
+      timestamp: Date.now(),
+    });
+
+    let chatAnalysis;
+    try {
+      chatAnalysis = await analyzeChatWithColumns(
+        message,
+        extractedColumns,
+        chatDocument.dataSummary
+      );
+      console.log(`🤖 AI Analysis Results:`);
+      console.log(`   Intent: ${chatAnalysis.intent}`);
+      console.log(`   User Intent: ${chatAnalysis.userIntent}`);
+      console.log(`   Relevant Columns:`, chatAnalysis.relevantColumns);
+      console.log(`   Analysis: ${chatAnalysis.analysis.substring(0, 200)}...`);
+
+      onThinkingStep({
+        step: 'Analyzing user intent',
+        status: 'completed',
+        timestamp: Date.now(),
+        details: `Intent: ${chatAnalysis.intent}${chatAnalysis.relevantColumns.length > 0 ? ` | Columns: ${chatAnalysis.relevantColumns.join(', ')}` : ''}`,
+      });
+    } catch (error) {
+      console.error('⚠️ Chat analysis failed:', error);
+      onThinkingStep({
+        step: 'Analyzing user intent',
+        status: 'completed',
+        timestamp: Date.now(),
+        details: `Using extracted columns: ${extractedColumns.length > 0 ? extractedColumns.join(', ') : 'none'}`,
+      });
+      // Continue with extracted columns even if AI analysis fails
+      chatAnalysis = {
+        intent: 'general',
+        analysis: '',
+        relevantColumns: extractedColumns,
+        userIntent: message,
+      };
+    }
+
+    // Log summary of column extraction and analysis
+    console.log(`📊 Column Extraction & Analysis Summary:`);
+    console.log(`   RegEx Extracted: ${extractedColumns.length > 0 ? extractedColumns.join(', ') : 'none'}`);
+    console.log(`   AI Identified: ${chatAnalysis.relevantColumns.length > 0 ? chatAnalysis.relevantColumns.join(', ') : 'none'}`);
+    console.log(`   Final Relevant Columns: ${chatAnalysis.relevantColumns.length > 0 ? chatAnalysis.relevantColumns.join(', ') : 'none'}`);
+
+    // Fetch last 15 messages from Cosmos DB for mode detection
+    // For edited messages, use full history from database for mode detection
     // This ensures context-aware mode detection works correctly
+    const allMessages = chatDocument.messages || [];
     const modeDetectionChatHistory = targetTimestamp 
-      ? (chatDocument.messages || []) // Use full history from database for edits
-      : (chatHistory || []); // Use provided history for new messages
+      ? allMessages // Use full history from database for edits
+      : allMessages.slice(-15); // Use last 15 messages for new messages
 
     // Determine mode: use provided mode (user override) or auto-detect
     // Treat 'general' the same as no mode (auto-detect)
@@ -168,11 +240,12 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
       console.log(`🎯 Using user-specified mode: ${mode}`);
     }
 
-    // For edited messages, use full history from database for processing (same as new messages)
+    // Fetch last 15 messages from Cosmos DB for processing
+    // For edited messages, use full history from database for processing
     // This ensures context-aware processing works correctly
     const processingChatHistory = targetTimestamp 
-      ? (chatDocument.messages || []) // Use full history from database for edits
-      : (chatHistory || []); // Use provided history for new messages
+      ? allMessages // Use full history from database for edits
+      : allMessages.slice(-15); // Use last 15 messages for new messages
 
     // Answer the question with streaming using the latest data
     const result = await answerQuestion(
@@ -227,7 +300,7 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     let suggestions: string[] = [];
     try {
       const updatedChatHistory = [
-        ...(chatHistory || []),
+        ...allMessages.slice(-15), // Use last 15 messages from DB
         { role: 'user' as const, content: message, timestamp: Date.now() },
         { role: 'assistant' as const, content: transformedResponse.answer, timestamp: Date.now() }
       ];

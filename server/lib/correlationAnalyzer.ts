@@ -3,6 +3,7 @@ import { calculateSmartDomainsForChart } from './axisScaling.js';
 import { openai, MODEL } from './openai.js';
 import { generateChartInsights } from './insightGenerator.js';
 import { generateStreamingCorrelationChart } from './streamingCorrelationAnalyzer.js';
+import { getCachedCorrelation, cacheCorrelation } from './redisCache.js';
 
 // Helper to clean numeric values (strip %, commas, etc.)
 function toNumber(value: any): number {
@@ -50,12 +51,37 @@ export async function analyzeCorrelations(
   sortOrder?: 'ascending' | 'descending',
   chatInsights?: Insight[],
   maxResults?: number,
-  onProgress?: (message: string, processed?: number, total?: number) => void
+  onProgress?: (message: string, processed?: number, total?: number) => void,
+  sessionId?: string
 ): Promise<{ charts: ChartSpec[]; insights: Insight[] }> {
   console.log('=== CORRELATION ANALYSIS DEBUG ===');
   console.log('Target variable:', targetVariable);
   console.log('Numeric columns to analyze:', numericColumns);
   console.log('Data rows:', data.length);
+  
+  // Check Redis cache first if sessionId is provided
+  if (sessionId) {
+    const cached = await getCachedCorrelation<{ charts: ChartSpec[]; insights: Insight[] }>(
+      sessionId,
+      targetVariable,
+      numericColumns
+    );
+    if (cached) {
+      console.log('✅ Using cached correlation results');
+      // Apply filter to cached results if needed
+      if (filter !== 'all' && cached.charts) {
+        // Filter charts based on correlation sign
+        const filteredCharts = cached.charts.filter((chart: any) => {
+          const correlation = chart.metadata?.correlation;
+          if (filter === 'positive') return correlation > 0;
+          if (filter === 'negative') return correlation < 0;
+          return true;
+        });
+        return { charts: filteredCharts, insights: cached.insights };
+      }
+      return cached;
+    }
+  }
   
   // Calculate correlations
   const correlations = calculateCorrelations(data, targetVariable, numericColumns);
@@ -253,7 +279,14 @@ export async function analyzeCorrelations(
   // Pass topCorrelations (same as used in charts) to ensure insights match what's displayed
   const insights = await generateCorrelationInsights(targetVariable, topCorrelations, data, summaryStub, filter);
 
-  return { charts, insights };
+  const result = { charts, insights };
+
+  // Cache the result if sessionId is provided
+  if (sessionId) {
+    await cacheCorrelation(sessionId, targetVariable, numericColumns, result);
+  }
+
+  return result;
 }
 
 function calculateCorrelations(

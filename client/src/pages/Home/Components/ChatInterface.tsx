@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Message, ThinkingStep } from '@/shared/schema';
 import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
+import { ColumnSidebar } from '@/pages/Home/Components/ColumnSidebar';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles, Loader2, ChevronUp, ChevronDown } from 'lucide-react';
@@ -474,8 +475,35 @@ export function ChatInterface({
     }));
   }, []);
 
+  // Sidebar hover state
+  const [isColumnSidebarOpen, setIsColumnSidebarOpen] = useState(false);
+
+  // Handle column click - insert column name into input
+  const handleColumnClick = useCallback((column: string) => {
+    const textarea = inputRef.current;
+    if (textarea) {
+      const currentValue = textarea.value;
+      const selectionStart = textarea.selectionStart ?? currentValue.length;
+      const selectionEnd = textarea.selectionEnd ?? selectionStart;
+      
+      const before = currentValue.slice(0, selectionStart);
+      const after = currentValue.slice(selectionEnd);
+      const insertion = `${column} `;
+      const nextValue = `${before}${insertion}${after}`;
+      const nextCaretPosition = before.length + insertion.length;
+
+      setInputValue(nextValue);
+      
+      // Focus and set cursor position
+      setTimeout(() => {
+        textarea.focus();
+        textarea.setSelectionRange(nextCaretPosition, nextCaretPosition);
+      }, 0);
+    }
+  }, []);
+
   return (
-    <div className="flex flex-col bg-gradient-to-br from-slate-50 to-white h-[calc(100vh-80px)] relative">
+    <div className="flex h-[calc(100vh-80px)] relative bg-gradient-to-br from-slate-50 to-white">
       {/* Loading Overlay when replacing analysis */}
       {isReplacingAnalysis && (
         <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-50 flex items-center justify-center">
@@ -505,8 +533,11 @@ export function ChatInterface({
           </div>
         </div>
       )}
-      {/* Messages Area */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto">
+      
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Messages Area */}
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto">
         <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
           {/* Header with Filter dropdown */}
           {(sessionId || messages.length > 0) && collaborators.length > 0 && (
@@ -735,10 +766,14 @@ export function ChatInterface({
           </form>
         </div>
       </div>
+      </div>
 
-      {/* Fixed Scroll Buttons - Right Center */}
+      {/* Fixed Scroll Buttons - Right Center (adjusted for sidebar) */}
       {(showScrollToTop || showScrollToBottom) && (
-        <div className="fixed right-8 top-1/2 -translate-y-1/2 z-40 flex flex-col gap-2">
+        <div 
+          className="fixed top-1/2 -translate-y-1/2 z-40 flex flex-col gap-2"
+          style={{ right: columns && columns.length > 0 && isColumnSidebarOpen ? '280px' : '32px' }}
+        >
           {showScrollToTop && (
             <Button
               onClick={scrollToTop}
@@ -759,6 +794,26 @@ export function ChatInterface({
               <ChevronDown className="w-5 h-5 text-gray-700" />
             </Button>
           )}
+        </div>
+      )}
+      
+      {/* Right Sidebar - Column Navigator (hover to expand) */}
+      {columns && columns.length > 0 && (
+        <div
+          className={`h-full flex-shrink-0 transition-[width] duration-200 ease-out border-l border-gray-200 bg-white/80 backdrop-blur-sm ${
+            isColumnSidebarOpen ? 'w-64 shadow-sm' : 'w-3'
+          }`}
+          onMouseEnter={() => setIsColumnSidebarOpen(true)}
+          onMouseLeave={() => setIsColumnSidebarOpen(false)}
+        >
+          <ColumnSidebar
+            columns={columns}
+            numericColumns={numericColumns}
+            dateColumns={dateColumns}
+            onColumnClick={handleColumnClick}
+            collapsed={!isColumnSidebarOpen}
+            className="w-full h-full border-0 shadow-none bg-transparent"
+          />
         </div>
       )}
     </div>

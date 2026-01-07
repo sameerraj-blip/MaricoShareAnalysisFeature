@@ -164,14 +164,19 @@ export async function getDataForAnalysis(
 
   try {
     if (requiredColumns && requiredColumns.length > 0) {
-      // Query only required columns
+      // Query only required columns - no limit by default (load all rows)
       const columnsStr = requiredColumns.map(col => `"${col}"`).join(', ');
       const limitClause = limit ? `LIMIT ${limit}` : '';
       const query = `SELECT ${columnsStr} FROM data ${limitClause}`;
       return await storage.executeQuery(query);
     } else {
-      // Get sample rows
-      return await storage.getSampleRows(limit || 10000);
+      // Get all rows if no limit specified, otherwise use limit
+      if (limit) {
+        return await storage.getSampleRows(limit);
+      } else {
+        // Load all rows - use streaming for large datasets
+        return await storage.getAllRows();
+      }
     }
   } finally {
     await storage.close();

@@ -235,19 +235,10 @@ export const useHomeMutations = ({
         setThinkingTargetTimestamp(null);
       }
       
-      // Send full chat history for context (last 15 messages to maintain conversation flow)
-      // Truncate long messages to reduce token usage
-      const chatHistory = currentMessages.slice(-15).map(msg => ({
-        role: msg.role,
-        content: msg.content.length > 500 
-          ? msg.content.substring(0, 500) + '...' 
-          : msg.content,
-      }));
-      
+      // Backend will fetch last 15 messages from Cosmos DB
       console.log('📤 Request payload:', {
         sessionId,
         message,
-        chatHistoryLength: chatHistory.length,
       });
       
       // Route to Data Ops, Modeling, or regular chat based on mode
@@ -258,7 +249,6 @@ export const useHomeMutations = ({
           streamDataOpsChatRequest(
             sessionId,
             message,
-            chatHistory,
             {
               onThinkingStep: (step: ThinkingStep) => {
                 console.log('🧠 Data Ops thinking step received:', step);
@@ -334,7 +324,6 @@ export const useHomeMutations = ({
         streamChatRequest(
           sessionId,
           message,
-          chatHistory,
           {
             onThinkingStep: (step: ThinkingStep) => {
               console.log('🧠 Thinking step received:', step);

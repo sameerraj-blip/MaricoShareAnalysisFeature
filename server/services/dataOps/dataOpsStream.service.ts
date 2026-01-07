@@ -17,7 +17,6 @@ import { Response } from "express";
 export interface ProcessStreamDataOpsParams {
   sessionId: string;
   message: string;
-  chatHistory?: Message[];
   dataOpsMode?: boolean;
   username: string;
   res: Response;
@@ -41,7 +40,7 @@ async function loadDataForOperation(
  * Process a streaming data operations request
  */
 export async function processStreamDataOperation(params: ProcessStreamDataOpsParams): Promise<void> {
-  const { sessionId, message, chatHistory, dataOpsMode, username, res } = params;
+  const { sessionId, message, dataOpsMode, username, res } = params;
 
   // Set SSE headers
   setSSEHeaders(res);
@@ -153,7 +152,12 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       return; // Client disconnected
     }
 
-    const intent = await parseDataOpsIntent(message, chatHistory || [], chatDocument.dataSummary, chatDocument);
+    // Fetch last 15 messages from Cosmos DB for context
+    const allMessages = chatDocument.messages || [];
+    const chatHistory = allMessages.slice(-15);
+    console.log(`📚 Using ${chatHistory.length} messages from database for context`);
+
+    const intent = await parseDataOpsIntent(message, chatHistory, chatDocument.dataSummary, chatDocument);
 
     // Check connection after parsing
     if (!checkConnection()) {
@@ -168,27 +172,8 @@ export async function processStreamDataOperation(params: ProcessStreamDataOpsPar
       return; // Client disconnected
     }
 
-    // Get full chat history - always use database messages as source of truth
-    // Merge frontend chatHistory with database messages to ensure we have the latest
-    let fullChatHistory: Message[] = [];
-    try {
-      // Always prefer database messages as they're the source of truth
-      const dbMessages = chatDocument.messages || [];
-      const frontendMessages = chatHistory || [];
-      
-      // Merge: use database messages if available, otherwise use frontend
-      // Database messages are more complete as they include the latest assistant responses
-      if (dbMessages.length > 0) {
-        fullChatHistory = dbMessages;
-        console.log(`📚 Using ${dbMessages.length} messages from database for context`);
-      } else if (frontendMessages.length > 0) {
-        fullChatHistory = frontendMessages;
-        console.log(`📱 Using ${frontendMessages.length} messages from frontend for context`);
-      }
-    } catch (error) {
-      console.warn('⚠️ Could not access chat history, using frontend history:', error);
-      fullChatHistory = chatHistory || [];
-    }
+    // Use last 15 messages for full chat history
+    const fullChatHistory = chatHistory;
 
     // Check connection before executing
     if (!checkConnection()) {
