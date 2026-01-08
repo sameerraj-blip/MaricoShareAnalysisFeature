@@ -363,6 +363,9 @@ YOUR TASK:
 - If the user asks for "monthly revenue", "yearly sales", "by month", "by year", "aggregate by month", "aggregated over year", etc., 
   set "dateAggregationPeriod" to "month", "monthOnly", "year", "quarter", or "day" accordingly. This indicates that 
   date columns should be normalized to this period before grouping/aggregation.
+- CRITICAL: If the user asks about "seasonal patterns", "seasonal trends", "seasonal variations", or "patterns over time", 
+  set "dateAggregationPeriod" to "month" (to show trends over time with month-year grouping). Also ensure the date column 
+  is included in "groupBy" if not already specified.
 - IMPORTANT: Distinguish between:
   * "month" - groups by month-year (e.g., "Jan 2024", "Jan 2022" are separate)
   * "monthOnly" - groups by month name only, combining all years (e.g., all "Jan" values combined regardless of year)
@@ -373,8 +376,22 @@ YOUR TASK:
   For example, if dateAggregationPeriod is "year" and the date column is "Month", set groupBy to ["Month"], not ["year"].
 - If the user specifies numeric conditions (>, <, between, etc.), capture in valueFilters.
 - If the user wants to exclude categories, use exclusionFilters.
+- CRITICAL: If the user asks for "aggregated value for category X", "aggregated value for X", "aggregated column name value for the column category X", or similar aggregation queries with category filters, extract:
+  * The category value (e.g., "men's fashion") from patterns like:
+    - "for the column category X"
+    - "for category X"
+    - "for X"
+  * Determine which column contains the category (look for columns like "category", "Category", "product_category", etc.)
+  * If no specific aggregation column is mentioned, default to aggregating common numeric columns (total, qty_ordered, price, etc.) with sum operation
+  * Set aggregations to sum the numeric columns if not specified
+  * Create appropriate filters to filter data by the category value
 - If the user asks for top/bottom N, populate topBottom.
 - Capture requested aggregations (sum, mean, count, etc.) and groupings.
+- IMPORTANT: When user says "aggregated value" without specifying which column, infer a default aggregation:
+  * If "total" column exists, use sum(total)
+  * Else if "qty_ordered" exists, use sum(qty_ordered)
+  * Else if "price" exists, use sum(price)
+  * Else use sum() of the first numeric column
 - Identify chart type hints (line, bar, scatter, pie, area) if strongly implied.
 - List key variables mentioned.
 - Provide a confidence score between 0 and 1.

@@ -46,6 +46,31 @@ export function parseFlexibleDate(dateStr: string | Date): Date | null {
   const str = String(dateStr).trim();
   if (!str) return null;
   
+  // Try numeric month-year formats: "11-2020", "11/2020", "11 2020" (MM-YYYY)
+  const numericMonthYearMatch = str.match(/^(\d{1,2})[-/](\d{2,4})$/);
+  if (numericMonthYearMatch) {
+    const part1 = parseInt(numericMonthYearMatch[1], 10);
+    const part2 = parseInt(numericMonthYearMatch[2], 10);
+    
+    // If part2 is 2-4 digits, it's likely a year (MM-YYYY format)
+    // If part2 is 2 digits and part1 <= 12, it could be MM-YY or MM-YYYY
+    if (part1 >= 1 && part1 <= 12) {
+      let year: number;
+      if (part2 >= 100) {
+        // 4-digit year (e.g., 11-2020)
+        year = part2;
+      } else {
+        // 2-digit year (e.g., 11-20)
+        // Common convention: 00-30 = 2000-2030, 31-99 = 1931-1999
+        year = part2 <= 30 ? 2000 + part2 : 1900 + part2;
+      }
+      
+      if (year >= 1900 && year <= 2100) {
+        return new Date(year, part1 - 1, 1); // month is 0-indexed
+      }
+    }
+  }
+  
   // Try month-year formats: "Jan-24", "January 2024", "Jan/24", "Jan 2024", "Jan24"
   const monthYearMatch = str.match(/^([A-Za-z]{3,})[-\s/]?(\d{2,4})$/i);
   if (monthYearMatch) {

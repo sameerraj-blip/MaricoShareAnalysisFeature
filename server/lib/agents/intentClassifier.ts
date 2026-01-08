@@ -142,15 +142,29 @@ CLASSIFICATION RULES:
    * Set confidence to 0.9+ for these patterns (including advice-style questions about models and follow-up responses in modeling context)
 2. "correlation" - User asks about relationships, what affects/influences something, or correlation between variables
    * HIGH PRIORITY: Questions like "what impacts X?", "what affects X?", "what influences X?", "correlation of X with all other variables" should ALWAYS be classified as "correlation"
+   * CRITICAL: Questions that contain correlation language (impacts, affects, influences, correlation) should be classified as "correlation" EVEN IF they also mention charts/visualizations
+   * Examples: "show me a chart to visualize does X impact Y", "create a chart showing what affects X", "visualize the correlation between X and Y" → ALL should be "correlation"
    * These are correlation queries even if the target variable (X) is not immediately recognizable
    * Set confidence to 0.9+ for these patterns
    * IMPORTANT: Questions about "trends in X over time" or "X over time" should be classified as "chart", NOT "correlation"
-3. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area)
+3. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area) WITHOUT correlation/impact language
    * HIGH PRIORITY: Questions about "trends in X over time", "X over time", "show trends for X", "trend line for X" should be classified as "chart" with chartType "line"
+   * CRITICAL: Questions about "seasonal patterns", "seasonal trends", "seasonal variations" should be classified as "chart" with chartType "line"
+   * Examples: "Are there seasonal patterns in X?", "seasonal trends in X", "seasonal patterns in X or Y", "monthly patterns", "yearly patterns", "patterns over time"
    * These are time-series visualization requests, not correlation analysis
-   * Patterns: "trends in X over time", "X over time", "show trends for X", "trend line for X", "analyze trends in X"
+   * Patterns: "trends in X over time", "X over time", "show trends for X", "trend line for X", "analyze trends in X", "seasonal patterns", "seasonal trends", "monthly patterns", "yearly patterns"
+   * IMPORTANT: If question mentions "chart" BUT also contains correlation language (impacts, affects, influences, correlation), classify as "correlation" instead
+   * IMPORTANT: Questions about "seasonal patterns" or "patterns over time" should be classified as "chart" even if they mention multiple columns
+   * CRITICAL: For seasonal pattern questions like "Are there seasonal patterns in X or Y?", extract ALL mentioned variables (X, Y, etc.) into the variables array
+   * CRITICAL: For seasonal pattern questions, set axisMapping.x to the date column (e.g., order_date, date, Month) if available
    * Set confidence to 0.9+ for these patterns and extract chartType as "line"
 4. "statistical" - User asks for statistics (mean, median, average, sum, count, max, min, highest, lowest, best, worst) OR asks "which month/row/period has the [highest/lowest/best/worst] [variable]" - these are statistical queries, NOT comparison queries
+   * ALSO: Questions asking for a specific value lookup like "What is the value of X on Y date?" or "What is X on date Y?" should be classified as "statistical" or "custom"
+   * Examples: "What is the value of qty_ordered on 11-2020", "What is total on November 2020", "Show me discount_amount for 2020-11"
+   * These are direct value lookups, not statistical aggregations, but they should be handled by the statistical or general handler
+   * ALSO: Questions asking for "aggregated value for category X" or "aggregated column name value for the column category X" should be classified as "statistical" or "custom"
+   * Examples: "what is the aggregated value for the category men's fashion", "what is the aggregated column name value for the column category men's fashion"
+   * These are aggregation queries with category filters and should be handled by the general handler
 5. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
 6. "conversational" - Greetings, thanks, casual chat, questions about the bot
 7. "custom" - Doesn't fit other categories

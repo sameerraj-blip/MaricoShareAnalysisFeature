@@ -52,7 +52,8 @@ export async function analyzeCorrelations(
   chatInsights?: Insight[],
   maxResults?: number,
   onProgress?: (message: string, processed?: number, total?: number) => void,
-  sessionId?: string
+  sessionId?: string,
+  generateCharts: boolean = true // New parameter to control chart generation
 ): Promise<{ charts: ChartSpec[]; insights: Insight[] }> {
   console.log('=== CORRELATION ANALYSIS DEBUG ===');
   console.log('Target variable:', targetVariable);
@@ -135,10 +136,15 @@ export async function analyzeCorrelations(
     console.log(`Limiting to top ${maxResults} correlations as requested`);
   }
 
-  // Generate scatter plots for top 3 correlations using streaming computation
-  // IMPORTANT: For correlation/impact questions, target variable ALWAYS goes on Y-axis
-  // X-axis = factor variable (what we can change), Y-axis = target variable (what we want to improve)
-  const scatterChartsPromises = topCorrelations.slice(0, 3).map(async (corr, idx) => {
+  // Only generate charts if explicitly requested
+  let scatterCharts: ChartSpec[] = [];
+  let charts: ChartSpec[] = [];
+  
+  if (generateCharts) {
+    // Generate scatter plots for top 3 correlations using streaming computation
+    // IMPORTANT: For correlation/impact questions, target variable ALWAYS goes on Y-axis
+    // X-axis = factor variable (what we can change), Y-axis = target variable (what we want to improve)
+    const scatterChartsPromises = topCorrelations.slice(0, 3).map(async (corr, idx) => {
     // Helper function to convert Date objects to strings for schema validation
     const convertValueForSchema = (value: any): string | number | null => {
       if (value === null || value === undefined) return null;
@@ -191,13 +197,13 @@ export async function analyzeCorrelations(
     };
   });
   
-  // Wait for all charts to be generated
-  const scatterCharts = await Promise.all(scatterChartsPromises);
+    // Wait for all charts to be generated
+    scatterCharts = await Promise.all(scatterChartsPromises);
 
-  // Only add bar chart if we have multiple correlations
-  const charts: ChartSpec[] = [...scatterCharts];
-  
-  if (topCorrelations.length > 1) {
+    // Only add bar chart if we have multiple correlations
+    charts = [...scatterCharts];
+    
+    if (topCorrelations.length > 1) {
     // IMPORTANT: Do NOT modify correlation signs - show actual positive/negative values
     console.log('=== BAR CHART CORRELATION VALUES DEBUG ===');
     topCorrelations.forEach((corr, idx) => {
@@ -240,10 +246,14 @@ export async function analyzeCorrelations(
     });
     console.log('=== END FINAL BAR CHART DEBUG ===');
     
-    charts.push(correlationBarChart);
-  }
+      charts.push(correlationBarChart);
+    }
 
-  console.log('Total charts generated:', charts.length);
+    console.log('Total charts generated:', charts.length);
+  } else {
+    console.log('Charts generation skipped (user did not explicitly request charts)');
+  }
+  
   console.log('=== END CORRELATION DEBUG ===');
 
   // Enrich each chart with keyInsight and recommendation
@@ -289,7 +299,7 @@ export async function analyzeCorrelations(
   return result;
 }
 
-function calculateCorrelations(
+export function calculateCorrelations(
   data: Record<string, any>[],
   targetVariable: string,
   numericColumns: string[]

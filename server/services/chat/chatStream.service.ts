@@ -375,6 +375,15 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
         },
       ]);
       console.log(`✅ Messages saved to chat: ${chatDocument.id}`);
+      
+      // Store conversation context in RAG (non-blocking)
+      try {
+        const { storeConversationContext } = await import('../../lib/ragService.js');
+        await storeConversationContext(message, transformedResponse.answer, sessionId);
+      } catch (ragError) {
+        console.error('⚠️ Failed to store conversation context (non-blocking):', ragError);
+        // Don't fail the request - RAG is optional
+      }
     } catch (cosmosError) {
       console.error("⚠️ Failed to save messages to CosmosDB:", cosmosError);
     }
