@@ -13,8 +13,8 @@ export const MODELS = {
   // Text generation - more powerful
   generation: process.env.AZURE_OPENAI_DEPLOYMENT_NAME || 'gpt-4o',
   
-  // Embeddings
-  embeddings: 'text-embedding-ada-002',
+  // Embeddings - Azure OpenAI compatible models
+  embeddings: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'text-embedding-3-small',
 } as const;
 
 export type ModelType = keyof typeof MODELS;

@@ -376,15 +376,27 @@ YOUR TASK:
   For example, if dateAggregationPeriod is "year" and the date column is "Month", set groupBy to ["Month"], not ["year"].
 - If the user specifies numeric conditions (>, <, between, etc.), capture in valueFilters.
 - If the user wants to exclude categories, use exclusionFilters.
-- CRITICAL: If the user asks for "aggregated value for category X", "aggregated value for X", "aggregated column name value for the column category X", or similar aggregation queries with category filters, extract:
-  * The category value (e.g., "men's fashion") from patterns like:
+- CRITICAL: If the user asks for aggregation with category filters, extract and handle immediately:
+  * Patterns include:
+    - "sum of all the value for [category] category"
+    - "sum of [column] for [category]"
+    - "aggregated value for category X"
+    - "aggregated value for X"
+    - "aggregated column name value for the column category X"
+    - "total for category X"
+    - "aggregate [column] for [category]"
+  * Extract the category value (e.g., "men's fashion", "Into the moon") from patterns like:
     - "for the column category X"
     - "for category X"
-    - "for X"
+    - "for X category"
+    - "for X" (when X appears to be a category value, not a column name)
+  * Extract the aggregation column if mentioned (e.g., "sum of total" → column: "total", operation: "sum")
+  * If no specific aggregation column is mentioned, look for patterns like "sum of all the value" → this means sum ALL numeric values
   * Determine which column contains the category (look for columns like "category", "Category", "product_category", etc.)
-  * If no specific aggregation column is mentioned, default to aggregating common numeric columns (total, qty_ordered, price, etc.) with sum operation
+  * If no specific aggregation column is mentioned, default to aggregating common numeric columns (total, qty_ordered, price, amount, value, revenue, sales) with sum operation
   * Set aggregations to sum the numeric columns if not specified
-  * Create appropriate filters to filter data by the category value
+  * Create appropriate exclusionFilters or valueFilters to filter data by the category value
+  * IMPORTANT: These are DIRECT aggregation operations - do NOT ask for clarification, just extract what you can and proceed
 - If the user asks for top/bottom N, populate topBottom.
 - Capture requested aggregations (sum, mean, count, etc.) and groupings.
 - IMPORTANT: When user says "aggregated value" without specifying which column, infer a default aggregation:

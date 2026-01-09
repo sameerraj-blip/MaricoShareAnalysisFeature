@@ -2,6 +2,7 @@ import { BaseHandler, HandlerContext, HandlerResponse } from './baseHandler.js';
 import { AnalysisIntent } from '../intentClassifier.js';
 import { findMatchingColumn } from '../utils/columnMatcher.js';
 import { ChartSpec, DataSummary } from '../../../shared/schema.js';
+import { extractColumnsFromMessage } from '../../columnExtractor.js';
 
 /**
  * Statistical Handler
@@ -26,6 +27,12 @@ export class StatisticalHandler extends BaseHandler {
 
     const question = intent.originalQuestion || intent.customRequest || '';
     const questionLower = question.toLowerCase();
+    
+    // Check if this is an aggregation query with category filter - handle immediately
+    if (this.isAggregationWithCategoryRequest(question)) {
+      console.log('📊 Detected aggregation with category request in StatisticalHandler');
+      return this.handleAggregationWithCategory(intent, context, question);
+    }
     
     // Check if this is a value lookup request (e.g., "What is the value of X on Y date?")
     if (this.isValueLookupRequest(question)) {
@@ -436,6 +443,386 @@ export class StatisticalHandler extends BaseHandler {
         answer += `Values: ${uniqueValues.slice(0, 10).join(', ')}${uniqueValues.length > 10 ? '...' : ''}`;
       }
     }
+    
+    return {
+      answer,
+    };
+  }
+
+  /**
+   * Check if question is asking for aggregation with category filter
+   */
+  private isAggregationWithCategoryRequest(question: string): boolean {
+    const lower = question.toLowerCase();
+    // Pattern 1: "sum of all the value" (with optional "of column name [column]") "for [category] category"
+    // Note: [\w\s']+ includes apostrophes for categories like "men's fashion"
+    if (/\bsum\s+of\s+(?:all\s+the\s+)?(?:value|values?)(?:\s+of\s+(?:column\s+name\s+)?[\w\s']+)?\s+for\s+[\w\s']+(?:\s+category)?/i.test(lower)) {
+      return true;
+    }
+    // Pattern 2: "sum of [column] for [category]"
+    if (/\bsum\s+of\s+[\w\s']+\s+for\s+[\w\s']+(?:\s+category)?/i.test(lower)) {
+      return true;
+    }
+    // Pattern 3: Standard aggregation patterns (include apostrophes)
+    return /\b(aggregated?\s+(?:column\s+name\s+)?value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s']+/i.test(lower) ||
+           /\b(?:what\s+is\s+)?(?:the\s+)?(?:aggregated?\s+(?:column\s+name\s+)?value|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s']+/i.test(lower) ||
+           /\b(?:aggregated?\s+value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?column\s+category\s+[\w\s']+/i.test(lower);
+  }
+
+  /**
+   * Handle aggregation queries with category filters
+   * STRICT IMPLEMENTATION: No fallbacks, explicit validation, dataset-aware resolution
+   * Same implementation as GeneralHandler for consistency
+   */
+  private async handleAggregationWithCategory(
+    intent: AnalysisIntent,
+    context: HandlerContext,
+    question: string
+  ): Promise<HandlerResponse> {
+    // DIAGNOSTIC LOGGING: Start
+    console.log(`📊 [AGGREGATION] Processing query: "${question}"`);
+    
+    const allColumns = context.summary.columns.map(c => c.name);
+    const numericColumns = context.summary.numericColumns || [];
+    const data = context.data;
+    
+    // ============================================================================
+    // STEP 1: HARD VALIDATION - Require numeric column, categorical column, filter value
+    // ============================================================================
+    
+    if (numericColumns.length === 0) {
+      const error = 'No numeric columns found in dataset. Cannot perform aggregation.';
+      console.error(`❌ [AGGREGATION] ${error}`);
+      return {
+        answer: `Error: ${error} Available columns: ${allColumns.join(', ')}`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    if (data.length === 0) {
+      const error = 'Dataset is empty. Cannot perform aggregation.';
+      console.error(`❌ [AGGREGATION] ${error}`);
+      return {
+        answer: `Error: ${error}`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // ============================================================================
+    // STEP 2: EXTRACT CATEGORY VALUE FROM QUESTION
+    // ============================================================================
+    
+    let categoryValue: string | null = null;
+    
+    // Pattern 0: "sum of all the value" (with optional "of column name [column]") "for X category"
+    const sumForCategoryMatch = question.match(/\bsum\s+of\s+(?:all\s+the\s+)?(?:value|values?)(?:\s+of\s+(?:column\s+name\s+)?[\w\s']+)?\s+for\s+(.+?)(?:\s+category|\s*$)/i);
+    if (sumForCategoryMatch && sumForCategoryMatch[1]) {
+      categoryValue = sumForCategoryMatch[1].trim().replace(/[.,;:!?]+$/, '').trim();
+      console.log(`   ✅ [AGGREGATION] Extracted category (pattern 0): "${categoryValue}"`);
+    } else {
+      // Pattern 1: "for the column category X"
+      const columnCategoryMatch = question.match(/(?:for|of|in)\s+(?:the\s+)?column\s+category\s+(.+?)(?:\s*$|\s+(?:which|that|where|when|what|how|can|will|should|is|are|was|were))/i);
+      if (columnCategoryMatch && columnCategoryMatch[1]) {
+        categoryValue = columnCategoryMatch[1].trim().replace(/[.,;:!?]+$/, '').trim();
+        console.log(`   ✅ [AGGREGATION] Extracted category (pattern 1): "${categoryValue}"`);
+      } else {
+        // Pattern 2: "for category X" or "for the category X"
+        const categoryMatch = question.match(/(?:for|of|in)\s+(?:the\s+)?category\s+(.+?)(?:\s*$|\s+(?:which|that|where|when|what|how|can|will|should|is|are|was|were|category|column|in|for|of))/i);
+        if (categoryMatch && categoryMatch[1]) {
+          categoryValue = categoryMatch[1].trim().replace(/[.,;:!?]+$/, '').trim();
+          console.log(`   ✅ [AGGREGATION] Extracted category (pattern 2): "${categoryValue}"`);
+        } else {
+          // Pattern 3: "for X" (fallback)
+          const forMatch = question.match(/(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?(.+?)(?:\s*$|\s+(?:which|that|where|when|what|how|can|will|should|is|are|was|were|category|column|in|for|of|over|across|by))/i);
+          if (forMatch && forMatch[1]) {
+            categoryValue = forMatch[1].trim().replace(/[.,;:!?]+$/, '').trim();
+            console.log(`   ✅ [AGGREGATION] Extracted category (pattern 3): "${categoryValue}"`);
+          }
+        }
+      }
+    }
+    
+    // HARD VALIDATION: Category value must be extracted
+    if (!categoryValue || categoryValue.trim().length === 0) {
+      const error = 'Could not extract category value from question';
+      console.error(`❌ [AGGREGATION] ${error}`);
+      return {
+        answer: `Error: ${error}. Please specify a category, for example: "What is the sum of value for men's fashion category?"`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // ============================================================================
+    // STEP 3: FIND CATEGORY COLUMN (DATASET-AWARE)
+    // ============================================================================
+    
+    let categoryColumn: string | null = null;
+    const categoryColumnNames = ['category', 'Category', 'product_category', 'Product Category', 'product_category_name', 'cat'];
+    
+    // First try common category column names
+    for (const colName of categoryColumnNames) {
+      const matched = findMatchingColumn(colName, allColumns);
+      if (matched) {
+        categoryColumn = matched;
+        break;
+      }
+    }
+    
+    // If not found, search dataset for columns containing the category value
+    if (!categoryColumn) {
+      const normalizedCategoryValue = categoryValue.toLowerCase().trim();
+      const searchSampleSize = Math.min(data.length, 10000);
+      const searchData = data.slice(0, searchSampleSize);
+      
+      const columnMatches: Array<{ column: string; score: number; exactMatches: number }> = [];
+      
+      for (const col of allColumns) {
+        if (!numericColumns.includes(col) && !context.summary.dateColumns.includes(col)) {
+          let exactMatches = 0;
+          
+          // Get unique values from this column
+          const uniqueValues = new Set<string>();
+          for (const row of searchData) {
+            const val = String(row[col] || '').toLowerCase().trim();
+            if (val) uniqueValues.add(val);
+          }
+          
+          // Check for exact match in unique values
+          for (const uniqueVal of uniqueValues) {
+            if (uniqueVal === normalizedCategoryValue) {
+              exactMatches++;
+            }
+          }
+          
+          if (exactMatches > 0) {
+            columnMatches.push({ column: col, score: exactMatches * 100, exactMatches });
+          }
+        }
+      }
+      
+      if (columnMatches.length > 0) {
+        columnMatches.sort((a, b) => b.score - a.score);
+        categoryColumn = columnMatches[0].column;
+        console.log(`   ✅ [AGGREGATION] Found category column by dataset search: "${categoryColumn}"`);
+      }
+    }
+    
+    // HARD VALIDATION: Category column must be found
+    if (!categoryColumn) {
+      const error = `Could not find category column in dataset`;
+      console.error(`❌ [AGGREGATION] ${error}. Available columns: ${allColumns.join(', ')}`);
+      return {
+        answer: `Error: ${error}. Available columns: ${allColumns.join(', ')}`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // ============================================================================
+    // STEP 4: DATASET-AWARE CATEGORY VALUE RESOLUTION
+    // ============================================================================
+    
+    // Get all unique values from the category column (normalized)
+    const uniqueCategoryValues = new Set<string>();
+    for (const row of data) {
+      const val = String(row[categoryColumn] || '').toLowerCase().trim();
+      if (val) uniqueCategoryValues.add(val);
+    }
+    
+    // Normalize the extracted category value
+    const normalizedCategoryValue = categoryValue.toLowerCase().trim();
+    
+    // Find exact match in dataset values
+    let resolvedCategoryValue: string | null = null;
+    for (const datasetValue of uniqueCategoryValues) {
+      if (datasetValue === normalizedCategoryValue) {
+        // Find the original case version from dataset
+        for (const row of data) {
+          const val = String(row[categoryColumn] || '');
+          if (val.toLowerCase().trim() === normalizedCategoryValue) {
+            resolvedCategoryValue = val.trim();
+            break;
+          }
+        }
+        break;
+      }
+    }
+    
+    // HARD VALIDATION: Category value must exist in dataset
+    if (!resolvedCategoryValue) {
+      const availableCategories = Array.from(uniqueCategoryValues).slice(0, 20);
+      const error = `No rows found for category = "${categoryValue}"`;
+      console.error(`❌ [AGGREGATION] ${error}. Available categories: ${availableCategories.join(', ')}${uniqueCategoryValues.size > 20 ? '...' : ''}`);
+      return {
+        answer: `Error: ${error}. Available categories in "${categoryColumn}": ${availableCategories.join(', ')}${uniqueCategoryValues.size > 20 ? '...' : ''}`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // ============================================================================
+    // STEP 5: RESOLVE NUMERIC COLUMN TO AGGREGATE
+    // ============================================================================
+    
+    let aggregateColumn: string | null = null;
+    
+    // Step 5.1: Check for explicit "column name value" pattern
+    const columnNameValueMatch = question.match(/(?:column\s+name|column)\s+(\w+)/i);
+    if (columnNameValueMatch && columnNameValueMatch[1]) {
+      const explicitColumn = columnNameValueMatch[1].trim();
+      const matchedColumn = findMatchingColumn(explicitColumn, allColumns);
+      if (matchedColumn && numericColumns.includes(matchedColumn)) {
+        aggregateColumn = matchedColumn;
+        console.log(`   ✅ [AGGREGATION] Using explicit column from "column name ${explicitColumn}": "${aggregateColumn}"`);
+      }
+    }
+    
+    // Step 5.2: Extract mentioned columns
+    if (!aggregateColumn) {
+      const mentionedColumns = extractColumnsFromMessage(question, allColumns);
+      for (const mentionedCol of mentionedColumns) {
+        if (numericColumns.includes(mentionedCol)) {
+          aggregateColumn = mentionedCol;
+          console.log(`   ✅ [AGGREGATION] Using mentioned numeric column: "${aggregateColumn}"`);
+          break;
+        }
+      }
+    }
+    
+    // Step 5.3: If user says "sum of all the value", prioritize "value" column
+    if (!aggregateColumn && /\bsum\s+of\s+(?:all\s+the\s+)?value/i.test(question)) {
+      const valueColumn = findMatchingColumn('value', numericColumns);
+      if (valueColumn) {
+        aggregateColumn = valueColumn;
+        console.log(`   ✅ [AGGREGATION] Using "value" column from pattern: "${aggregateColumn}"`);
+      }
+    }
+    
+    // Step 5.4: Fallback to preferred columns
+    if (!aggregateColumn) {
+      const preferredColumns = ['total', 'qty_ordered', 'price', 'amount', 'value', 'revenue', 'sales'];
+      for (const prefCol of preferredColumns) {
+        const matched = findMatchingColumn(prefCol, numericColumns);
+        if (matched) {
+          aggregateColumn = matched;
+          console.log(`   ✅ [AGGREGATION] Using preferred column: "${aggregateColumn}"`);
+          break;
+        }
+      }
+    }
+    
+    // Step 5.5: Final fallback to first numeric column
+    if (!aggregateColumn && numericColumns.length > 0) {
+      aggregateColumn = numericColumns[0];
+      console.log(`   ✅ [AGGREGATION] Using first numeric column: "${aggregateColumn}"`);
+    }
+    
+    // HARD VALIDATION: Aggregate column must be found
+    if (!aggregateColumn) {
+      const error = 'Could not determine which numeric column to aggregate';
+      console.error(`❌ [AGGREGATION] ${error}`);
+      return {
+        answer: `Error: ${error}. Available numeric columns: ${numericColumns.join(', ')}`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // DIAGNOSTIC LOGGING: Resolved columns and filter
+    console.log(`📊 [AGGREGATION] Resolved:`);
+    console.log(`   - Numeric column: "${aggregateColumn}"`);
+    console.log(`   - Category column: "${categoryColumn}"`);
+    console.log(`   - Filter value: "${resolvedCategoryValue}"`);
+    
+    // ============================================================================
+    // STEP 6: NORMALIZE AND FILTER ROWS
+    // ============================================================================
+    
+    const normalizedFilterValue = resolvedCategoryValue.toLowerCase().trim();
+    const filteredRows: Record<string, any>[] = [];
+    
+    for (const row of data) {
+      const rowCategoryValue = String(row[categoryColumn] || '').toLowerCase().trim();
+      if (rowCategoryValue === normalizedFilterValue) {
+        filteredRows.push(row);
+      }
+    }
+    
+    // DIAGNOSTIC LOGGING: Filtered row count
+    console.log(`📊 [AGGREGATION] Filtered rows: ${filteredRows.length} out of ${data.length}`);
+    
+    // HARD VALIDATION: Must have filtered rows
+    if (filteredRows.length === 0) {
+      const error = `No rows found for category = "${resolvedCategoryValue}"`;
+      console.error(`❌ [AGGREGATION] ${error}`);
+      return {
+        answer: `Error: ${error}. Please check the category value.`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // ============================================================================
+    // STEP 7: EXPLICIT AGGREGATION EXECUTION
+    // ============================================================================
+    
+    // Extract numeric values (normalized and validated)
+    const numericValues: number[] = [];
+    for (const row of filteredRows) {
+      const val = row[aggregateColumn];
+      if (val === null || val === undefined || val === '') continue;
+      
+      let numValue: number | null = null;
+      if (typeof val === 'number') {
+        numValue = isNaN(val) ? null : val;
+      } else {
+        const cleaned = String(val).replace(/[%,$]/g, '').trim();
+        const parsed = Number(cleaned);
+        numValue = isNaN(parsed) ? null : parsed;
+      }
+      
+      if (numValue !== null) {
+        numericValues.push(numValue);
+      }
+    }
+    
+    // HARD VALIDATION: Must have numeric values
+    if (numericValues.length === 0) {
+      const error = `No numeric values found in column "${aggregateColumn}" for category "${resolvedCategoryValue}"`;
+      console.error(`❌ [AGGREGATION] ${error}`);
+      return {
+        answer: `Error: ${error}`,
+        error,
+        requiresClarification: true,
+      };
+    }
+    
+    // Execute aggregation operations
+    const sum = numericValues.reduce((a, b) => a + b, 0);
+    const count = numericValues.length;
+    const avg = sum / count;
+    const min = Math.min(...numericValues);
+    const max = Math.max(...numericValues);
+    
+    // ============================================================================
+    // STEP 8: RESPONSE CONTRACT - Must contain computed result
+    // ============================================================================
+    
+    const answer = `The sum of "${aggregateColumn}" for category "${resolvedCategoryValue}" is ${sum.toFixed(2)}.\n\n` +
+      `Aggregation details:\n` +
+      `- Column aggregated: ${aggregateColumn}\n` +
+      `- Category filter: ${categoryColumn} = "${resolvedCategoryValue}"\n` +
+      `- Rows filtered: ${filteredRows.length}\n` +
+      `- Sum: ${sum.toFixed(2)}\n` +
+      `- Average: ${avg.toFixed(2)}\n` +
+      `- Minimum: ${min.toFixed(2)}\n` +
+      `- Maximum: ${max.toFixed(2)}\n` +
+      `- Count: ${count} records`;
+    
+    console.log(`✅ [AGGREGATION] Success: Sum = ${sum.toFixed(2)}, Count = ${count}`);
     
     return {
       answer,

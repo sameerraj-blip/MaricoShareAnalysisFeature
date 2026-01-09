@@ -162,13 +162,29 @@ CLASSIFICATION RULES:
    * ALSO: Questions asking for a specific value lookup like "What is the value of X on Y date?" or "What is X on date Y?" should be classified as "statistical" or "custom"
    * Examples: "What is the value of qty_ordered on 11-2020", "What is total on November 2020", "Show me discount_amount for 2020-11"
    * These are direct value lookups, not statistical aggregations, but they should be handled by the statistical or general handler
-   * ALSO: Questions asking for "aggregated value for category X" or "aggregated column name value for the column category X" should be classified as "statistical" or "custom"
-   * Examples: "what is the aggregated value for the category men's fashion", "what is the aggregated column name value for the column category men's fashion"
-   * These are aggregation queries with category filters and should be handled by the general handler
+   * CRITICAL: Questions asking for aggregation with category filters should be classified as "custom" with HIGH confidence (0.9+)
+   * These include patterns like:
+   *   - "what is the sum of all the value for [category] category"
+   *   - "what is the aggregated value for the category [X]"
+   *   - "what is the aggregated column name value for the column category [X]"
+   *   - "sum of [column] for [category]"
+   *   - "total for category [X]"
+   *   - "aggregate [column] for [category]"
+   * Examples: 
+   *   - "What is the sum of all the value for men's fashion category?" → "custom" (confidence: 0.95)
+   *   - "what is the aggregated value for the category men's fashion" → "custom" (confidence: 0.95)
+   *   - "what is the aggregated column name value for the column category men's fashion" → "custom" (confidence: 0.95)
+   *   - "sum of total for Into the moon" → "custom" (confidence: 0.95)
+   * These are DIRECT aggregation queries with category filters and should be handled immediately by the general handler WITHOUT asking for clarification
+   * Set requiresClarification: false and confidence >= 0.9 for these queries
 5. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
 6. "conversational" - Greetings, thanks, casual chat, questions about the bot
 7. "custom" - Doesn't fit other categories
    * Also includes general yes/no questions that are not clearly about modeling, correlation, charts, or statistics
+   * HIGH PRIORITY: Aggregation queries with category filters should ALWAYS be classified as "custom" with high confidence
+   * These are direct data operations that should be executed immediately without asking for clarification
+   * Patterns: "sum of [X] for [category]", "aggregated value for category [X]", "total for [category]", "aggregate [column] for [category]"
+   * Set confidence to 0.9+ and requiresClarification: false for these queries
 
 IMPORTANT: Questions like "what is the best competitor to X?" or "which product is best for Y?" should be classified as "comparison", NOT "correlation" or "custom".
 

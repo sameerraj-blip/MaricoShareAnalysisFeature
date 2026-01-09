@@ -3,8 +3,30 @@ import { DataSummary, Message } from '../shared/schema.js';
 import { getRedisClient } from './redisClient.js';
 
 // Embedding model configuration
-const EMBEDDING_DEPLOYMENT_NAME = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'text-embedding-3-large';
-const EMBEDDING_DIMENSION = parseInt(process.env.AZURE_OPENAI_EMBEDDING_DIMENSION || '3072', 10);
+// Azure OpenAI compatible embedding models:
+// - text-embedding-ada-002 (1536 dimensions)
+// - text-embedding-3-small (1536 dimensions, default)
+// - text-embedding-3-large (3072 dimensions)
+const EMBEDDING_DEPLOYMENT_NAME = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'text-embedding-3-small';
+const EMBEDDING_DIMENSION = parseInt(process.env.AZURE_OPENAI_EMBEDDING_DIMENSION || '1536', 10);
+
+// Log embedding configuration at startup
+console.log('📊 Embedding Configuration:');
+console.log(`   AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'not set (using default)'}`);
+console.log(`   Resolved embedding model: ${EMBEDDING_DEPLOYMENT_NAME}`);
+console.log(`   Embedding dimensions: ${EMBEDDING_DIMENSION}`);
+
+// Validate embedding model at startup
+if (EMBEDDING_DEPLOYMENT_NAME.includes('gpt-4') || EMBEDDING_DEPLOYMENT_NAME.includes('gpt-3.5')) {
+  console.error(`❌ ERROR: Invalid embedding model configured: ${EMBEDDING_DEPLOYMENT_NAME}`);
+  console.error(`   Chat models (gpt-4, gpt-3.5) cannot be used for embeddings.`);
+  console.error(`   Please set AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME to a valid embedding model:`);
+  console.error(`   - text-embedding-3-small (recommended)`);
+  console.error(`   - text-embedding-3-large`);
+  console.error(`   - text-embedding-ada-002`);
+  console.error(`   Current value from env: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'not set'}`);
+  throw new Error(`Invalid embedding model: ${EMBEDDING_DEPLOYMENT_NAME}. Chat models cannot be used for embeddings.`);
+}
 
 // Chunk interface
 export interface DataChunk {
@@ -246,18 +268,88 @@ function cosineSimilarity(a: number[], b: number[]): number {
 // Generate embedding for text
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
-    // Azure OpenAI embeddings endpoint
-    // Use deployment name for Azure OpenAI
+    // Get the embedding deployment name
+    const embeddingModel = EMBEDDING_DEPLOYMENT_NAME;
+    
+    // Validate embedding model name
+    if (embeddingModel.includes('gpt-4') || embeddingModel.includes('gpt-3.5')) {
+      console.error(`❌ Invalid embedding model: ${embeddingModel}. Chat models cannot be used for embeddings.`);
+      throw new Error(`Invalid embedding model: ${embeddingModel}. Please set AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME to a valid embedding model.`);
+    }
+    
+    // For Azure OpenAI, the embeddings client baseURL already includes the deployment name
+    // The model parameter should match the deployment name in the baseURL
+    // Since the baseURL is set to: /openai/deployments/{embeddingDeployment}
+    // The SDK will automatically append /embeddings to make the full path:
+    // {baseURL}/embeddings?api-version={version}
+    console.log(`📊 [EMBEDDING] Calling embeddings.create with:`);
+    console.log(`   Model: ${embeddingModel}`);
+    console.log(`   Dimensions: ${EMBEDDING_DIMENSION}`);
+    console.log(`   Input length: ${text.length} characters`);
+    console.log(`   Expected full URL: ${(openai.embeddings as any).client?.baseURL || 'N/A'}/embeddings`);
+    
     const response = await openai.embeddings.create({
-      model: EMBEDDING_DEPLOYMENT_NAME, // Use deployment name
+      model: embeddingModel, // Must match the deployment name in baseURL
       input: text,
-      dimensions: EMBEDDING_DIMENSION, // Specify dimensions
+      dimensions: EMBEDDING_DIMENSION, // Specify dimensions (only for text-embedding-3 models)
     });
     
+    console.log(`✅ [EMBEDDING] Successfully generated embedding`);
+    
     return response.data[0].embedding;
-  } catch (error) {
-    console.error('Embedding generation error:', error);
-    // Return zero vector as fallback
+  } catch (error: any) {
+    console.error('❌ Embedding generation error:', error);
+    console.error(`   Attempted model: ${EMBEDDING_DEPLOYMENT_NAME}`);
+    console.error(`   Environment variable AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME}`);
+    console.error(`   AZURE_OPENAI_ENDPOINT: ${process.env.AZURE_OPENAI_ENDPOINT}`);
+    
+    // Handle DeploymentNotFound error specifically
+    if (error?.code === 'DeploymentNotFound' || error?.error?.code === 'DeploymentNotFound') {
+      const errorMsg = 
+        `❌ DEPLOYMENT NOT FOUND ERROR\n` +
+        `The deployment "${EMBEDDING_DEPLOYMENT_NAME}" was not found at the configured endpoint.\n\n` +
+        `TROUBLESHOOTING STEPS:\n` +
+        `1. Check your .env file - ensure AZURE_OPENAI_ENDPOINT matches where you created the deployment:\n` +
+        `   Current endpoint: ${process.env.AZURE_OPENAI_ENDPOINT}\n` +
+        `   Expected format: https://YOUR-RESOURCE-NAME.cognitiveservices.azure.com/\n\n` +
+        `2. Verify the deployment exists in Azure Portal:\n` +
+        `   - Go to Azure Portal → Your OpenAI resource → Deployments\n` +
+        `   - Find "${EMBEDDING_DEPLOYMENT_NAME}" deployment\n` +
+        `   - Copy the exact endpoint URL from the deployment details\n` +
+        `   - Update AZURE_OPENAI_ENDPOINT in your .env file\n\n` +
+        `3. Check deployment name matches exactly (case-sensitive):\n` +
+        `   Current: "${EMBEDDING_DEPLOYMENT_NAME}"\n` +
+        `   Must match exactly as shown in Azure Portal\n\n` +
+        `4. Ensure deployment status is "Succeeded" in Azure Portal\n\n` +
+        `5. If deployment was just created, wait 2-5 minutes for propagation\n\n` +
+        `NOTE: The endpoint in your .env must match the Azure OpenAI resource where the deployment exists.\n` +
+        `If you created the deployment in a different resource, update AZURE_OPENAI_ENDPOINT accordingly.`;
+      
+      console.error(errorMsg);
+      // Don't throw - allow the system to continue without embeddings
+      // Return zero vector as fallback
+      console.warn(`⚠️ Returning zero vector fallback for embedding (dimension: ${EMBEDDING_DIMENSION})`);
+      return new Array(EMBEDDING_DIMENSION).fill(0);
+    }
+    
+    // If the error is about model incompatibility
+    if (error?.code === 'OperationNotSupported' || error?.message?.includes('embeddings operation')) {
+      const errorMsg = 
+        `Embedding model error: ${error.message}\n` +
+        `Current AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'not set'}\n` +
+        `Please ensure AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME is set to a valid embedding model ` +
+        `(e.g., text-embedding-3-small, text-embedding-3-large, or text-embedding-ada-002) ` +
+        `and NOT a chat model like gpt-4o. ` +
+        `Also ensure this deployment exists in your Azure OpenAI resource.`;
+      
+      console.error(`❌ ${errorMsg}`);
+      // Return zero vector as fallback instead of throwing
+      console.warn(`⚠️ Returning zero vector fallback for embedding (dimension: ${EMBEDDING_DIMENSION})`);
+      return new Array(EMBEDDING_DIMENSION).fill(0);
+    }
+    
+    // For other errors, return zero vector as fallback
+    console.warn(`⚠️ Returning zero vector fallback for embedding (dimension: ${EMBEDDING_DIMENSION})`);
     return new Array(EMBEDDING_DIMENSION).fill(0);
   }
 }
