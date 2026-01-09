@@ -5,7 +5,7 @@ interface UseHomeHandlersProps {
   messages: Message[];
   setMessages: (messages: Message[] | ((prev: Message[]) => Message[])) => void;
   uploadMutation: {
-    mutate: (file: File) => void;
+    mutate: (payload: { file: File; fileSize: number }) => void;
   };
   chatMutation: {
     mutate: (payload: { message: string; targetTimestamp?: number }) => void;
@@ -22,7 +22,7 @@ export const useHomeHandlers = ({
   resetState,
 }: UseHomeHandlersProps) => {
   const handleFileSelect = (file: File) => {
-    uploadMutation.mutate(file);
+    uploadMutation.mutate({ file, fileSize: file.size });
   };
 
   const handleSendMessage = (message: string) => {

@@ -21,7 +21,6 @@ import queryCache from "../../lib/cache.js";
 export interface ProcessChatMessageParams {
   sessionId: string;
   message: string;
-  chatHistory?: Message[];
   targetTimestamp?: number;
   username: string;
 }
@@ -37,7 +36,7 @@ export interface ProcessChatMessageResult {
  * Process a chat message and generate response
  */
 export async function processChatMessage(params: ProcessChatMessageParams): Promise<ProcessChatMessageResult> {
-  const { sessionId, message, chatHistory, targetTimestamp, username } = params;
+  const { sessionId, message, targetTimestamp, username } = params;
 
   // Get chat document FIRST (with full history) so processing uses complete context
   console.log('🔍 Fetching chat document for sessionId:', sessionId);
@@ -49,11 +48,13 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
 
   console.log('✅ Chat document found, loading latest data...');
   
-  // For edited messages, use full history from database for processing (same as new messages)
+  // Fetch last 15 messages from Cosmos DB for context
+  // For edited messages, use full history from database for processing
   // This ensures context-aware processing works correctly
+  const allMessages = chatDocument.messages || [];
   const processingChatHistory = targetTimestamp 
-    ? (chatDocument.messages || []) // Use full history from database for edits
-    : (chatHistory || []); // Use provided history for new messages
+    ? allMessages // Use full history from database for edits
+    : allMessages.slice(-15); // Use last 15 messages for new messages
 
   // Extract required columns for optimized loading
   let requiredColumns: string[] = [];
@@ -81,14 +82,24 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
   }
   
   // Check cache before loading data
-  const cachedResult = queryCache.get<ProcessChatMessageResult>(
-    sessionId,
-    message,
-    requiredColumns
-  );
-  if (cachedResult) {
-    console.log(`✅ Returning cached result`);
-    return cachedResult;
+  // BUT: Skip cache for aggregation queries with category filters (data operations)
+  const isAggregationWithCategory = /\b(aggregated?\s+(?:column\s+name\s+)?value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s]+/i.test(message) ||
+                                     /\b(?:what\s+is\s+)?(?:the\s+)?(?:aggregated?\s+(?:column\s+name\s+)?value|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s]+/i.test(message) ||
+                                     /\b(?:aggregated?\s+value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?column\s+category\s+[\w\s]+/i.test(message);
+
+  let cachedResult: ProcessChatMessageResult | null = null;
+  if (!isAggregationWithCategory) {
+    cachedResult = queryCache.get<ProcessChatMessageResult>(
+      sessionId,
+      message,
+      requiredColumns
+    );
+    if (cachedResult) {
+      console.log(`✅ Returning cached result`);
+      return cachedResult;
+    }
+  } else {
+    console.log(`🔄 Skipping cache for aggregation query (data operation)`);
   }
   
   // Load the latest data (including any modifications from data operations)
@@ -199,6 +210,15 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
       },
     ]);
     console.log(`✅ Messages saved to chat: ${chatDocument.id}`);
+    
+    // Store conversation context in RAG (non-blocking)
+    try {
+      const { storeConversationContext } = await import('../../lib/ragService.js');
+      await storeConversationContext(message, validated.answer, sessionId);
+    } catch (ragError) {
+      console.error('⚠️ Failed to store conversation context (non-blocking):', ragError);
+      // Don't fail the request - RAG is optional
+    }
   } catch (cosmosError) {
     console.error("⚠️ Failed to save messages to CosmosDB:", cosmosError);
     // Continue without failing the chat - CosmosDB is optional

@@ -212,7 +212,9 @@ export class ComparisonHandler extends BaseHandler {
         'all', // Get all correlations (positive and negative)
         sortOrder,
         context.chatInsights,
-        undefined // No limit for comparison handler
+        undefined, // No limit for comparison handler
+        undefined, // onProgress
+        context.sessionId // sessionId for caching
       );
       
       console.log(`📊 Correlation analyzer returned ${charts?.length || 0} charts and ${insights?.length || 0} insights`);

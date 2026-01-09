@@ -110,6 +110,7 @@ export interface DataOpsIntent {
     | 'modify_column'
     | 'normalize_column'
     | 'remove_column'
+    | 'rename_column'
     | 'remove_rows'
     | 'add_row'
     | 'aggregate'
@@ -119,6 +120,7 @@ export interface DataOpsIntent {
     | 'revert'
     | 'unknown';
   column?: string;
+  oldColumnName?: string; // For rename_column - the column to rename
   method?: 'delete' | 'mean' | 'median' | 'mode' | 'custom';
   customValue?: any;
   targetType?: 'numeric' | 'string' | 'date' | 'percentage' | 'boolean';
@@ -162,6 +164,7 @@ export interface DataOpsContext {
     timestamp: number;
   };
   lastQuery?: string;
+  lastCreatedColumn?: string; // Track the most recently created column name
   timestamp: number;
 }
 
@@ -182,11 +185,32 @@ export async function parseDataOpsIntent(
   // AI is more flexible and can handle natural language variations better than regex
   // ---------------------------------------------------------------------------
   
-  // Try AI detection first for ALL operations
+  // Resolve context references BEFORE AI detection
+  const { resolveContextReferences, findLastCreatedColumn } = await import('../agents/contextResolver.js');
+  let resolvedMessage = message;
+  if (chatHistory && chatHistory.length > 0) {
+    resolvedMessage = resolveContextReferences(message, chatHistory);
+    if (resolvedMessage !== message) {
+      console.log(`🔄 Context resolved: "${message}" → "${resolvedMessage}"`);
+    }
+  }
+
+  // Try AI detection first for ALL operations (using resolved message)
   try {
-    const aiIntent = await detectDataOpsIntentWithAI(message, availableColumns);
+    const aiIntent = await detectDataOpsIntentWithAI(resolvedMessage, availableColumns, chatHistory, sessionDoc);
     if (aiIntent && aiIntent.operation !== 'unknown') {
       console.log(`✅ AI detected intent: ${aiIntent.operation}`);
+      
+      // If rename_column and no column specified, try to find from context
+      if (aiIntent.operation === 'rename_column' && !aiIntent.column && !aiIntent.oldColumnName) {
+        const lastColumn = findLastCreatedColumn(chatHistory || []);
+        if (lastColumn) {
+          aiIntent.oldColumnName = lastColumn;
+          aiIntent.column = lastColumn;
+          console.log(`📋 Using context column for rename: "${lastColumn}"`);
+        }
+      }
+      
       return aiIntent;
     }
   } catch (error) {
@@ -1127,6 +1151,67 @@ export async function parseDataOpsIntent(
     }
   }
 
+  // Rename column intent - check BEFORE remove_column to avoid conflicts
+  if ((lowerMessage.includes('rename') || lowerMessage.includes('change') || lowerMessage.includes('update')) &&
+      (lowerMessage.includes('column') || lowerMessage.includes('name'))) {
+    // Pattern 1: "rename column X to Y" or "change column name from X to Y"
+    const renamePattern1 = /(?:rename|change|update)\s+(?:the\s+)?(?:column\s+)?(?:name\s+)?(?:from\s+)?["']?([^"'\s]+)["']?\s+to\s+["']?([^"'\s]+)["']?/i;
+    const match1 = message.match(renamePattern1);
+    if (match1) {
+      const oldName = match1[1].trim();
+      const newName = match1[2].trim();
+      const matchedColumn = findMatchingColumn(oldName, availableColumns);
+      return {
+        operation: 'rename_column',
+        oldColumnName: matchedColumn || oldName,
+        column: matchedColumn || oldName,
+        newColumnName: newName,
+        requiresClarification: false
+      };
+    }
+    
+    // Pattern 2: "rename column X Y" (without "to")
+    const renamePattern2 = /(?:rename|change|update)\s+(?:the\s+)?column\s+["']?([^"'\s]+)["']?\s+["']?([^"'\s]+)["']?/i;
+    const match2 = message.match(renamePattern2);
+    if (match2 && !lowerMessage.includes('to')) {
+      const oldName = match2[1].trim();
+      const newName = match2[2].trim();
+      const matchedColumn = findMatchingColumn(oldName, availableColumns);
+      return {
+        operation: 'rename_column',
+        oldColumnName: matchedColumn || oldName,
+        column: matchedColumn || oldName,
+        newColumnName: newName,
+        requiresClarification: false
+      };
+    }
+    
+    // Pattern 3: "change the above column name to X" or "rename that column to X"
+    // This will be handled by context resolution, but we can still detect the operation
+    if ((lowerMessage.includes('above') || lowerMessage.includes('that') || lowerMessage.includes('it') || 
+         lowerMessage.includes('previous') || lowerMessage.includes('last')) &&
+        lowerMessage.includes('to')) {
+      const toMatch = message.match(/\bto\s+["']?([^"'\s]+)["']?/i);
+      if (toMatch) {
+        const newName = toMatch[1].trim();
+        // Column will be resolved from context
+        return {
+          operation: 'rename_column',
+          newColumnName: newName,
+          requiresClarification: false
+        };
+      }
+    }
+    
+    // If we detected rename intent but couldn't extract names, ask for clarification
+    return {
+      operation: 'rename_column',
+      requiresClarification: true,
+      clarificationType: 'column',
+      clarificationMessage: 'Which column would you like to rename, and what should the new name be? For example: "Rename column Sales to Revenue"'
+    };
+  }
+
   // Remove column intent
   if ((lowerMessage.includes('remove') || lowerMessage.includes('delete') || lowerMessage.includes('drop')) &&
       (lowerMessage.includes('column') || lowerMessage.includes('col'))) {
@@ -1335,21 +1420,48 @@ export async function parseDataOpsIntent(
  */
 async function detectDataOpsIntentWithAI(
   message: string,
-  availableColumns: string[]
+  availableColumns: string[],
+  chatHistory?: Message[],
+  sessionDoc?: ChatDocument
 ): Promise<DataOpsIntent | null> {
   try {
     const columnsList = availableColumns.slice(0, 20).join(', '); // Limit to avoid token issues
+
+    // Build chat history context
+    const historyText = chatHistory && chatHistory.length
+      ? chatHistory
+          .slice(-10) // Keep last ~10 messages for context
+          .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+          .join('\n')
+      : 'No previous messages.';
     
-    const prompt = `You are a data operations assistant. Analyze the user's question and determine what data operation they want.
+    const prompt = `You are a data operations assistant. Your job is to infer what data operation the USER wants to perform on their dataset.
 
-User question: "${message}"
+Here is the recent conversation between USER and ASSISTANT (most recent messages are last):
+${historyText}
 
-Available columns: ${columnsList}
+The last message from the USER is:
+"${message}"
+
+The dataset has the following columns: ${columnsList}
+
+When deciding the operation:
+- Always interpret the USER's last message in the context of the conversation above.
+- The USER may reply with short confirmations like "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "sounds good", "do it", "go ahead", "please do", etc.
+  • In that case, look at the most recent ASSISTANT message(s).
+  • If the ASSISTANT just suggested a specific data operation (for example: "Should I rename column 'XYZ' to 'tuko' now?" or "Do you want me to create a new column Total = Price + Tax?" or "Just to clarify, are you asking to rename the column 'XYZ' to 'tuko'?"),
+    then treat the USER's confirmation as a request to execute that suggested operation.
+  • Infer the correct operation type and parameters (column names, new column name, expression, target variable, features, etc.) from the ASSISTANT's suggestion and the overall context.
+  • For rename operations: If the ASSISTANT asked "are you asking to rename the column 'XYZ' to 'tuko'?", extract oldColumnName: "XYZ" and newColumnName: "tuko".
+- If the USER's last message itself directly describes an operation (for example: "create a new column X = A/B", "remove nulls from column Y", "rename column Sales to Revenue"),
+  extract the appropriate operation and parameters from that message, using the column list above to match column names.
+- If you cannot confidently determine a specific operation and its parameters, return "operation": "unknown" and set "clarificationMessage" to a concise follow-up question asking the user what they want you to do (and which columns/values to use).
 
 Determine the intent and return JSON with this structure:
 {
-  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_rows" | "add_row" | "remove_column" | "aggregate" | "pivot" | "train_model" | "replace_value" | "revert" | "unknown",
+  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "revert" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
+  "oldColumnName": "OldColumnName" (if rename_column operation, the column to rename, null otherwise),
   "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
   "customValue": any (if method is "custom", the value to use for imputation),
   "newColumnName": "NewColumnName" (if creating new column, null otherwise),
@@ -1407,6 +1519,17 @@ Operations:
 - "remove_column": User wants to remove/delete/drop a column (e.g., "remove column X", "delete the column Y", "drop column Z")
   * Extract column: the name of the column to remove
   * If column name is not specified, set requiresClarification to true
+- "rename_column": User wants to rename/change the name of a column (e.g., "rename column X to Y", "change column name from X to Y", "rename the above column to Two", "change that column name to NewName")
+  * Extract oldColumnName: the current name of the column to rename (can be from context like "above", "that", "it", "previous", or from assistant's clarification message)
+  * Extract newColumnName: the new name for the column
+  * If oldColumnName is not specified but user references "above", "that", "it", "previous", try to find from context
+  * IMPORTANT: If the user replies "yes" to an assistant clarification like "are you asking to rename the column 'XYZ' to 'tuko'?", extract oldColumnName: "XYZ" and newColumnName: "tuko" from the assistant's message
+  * Examples:
+    - "rename column Sales to Revenue" → oldColumnName: "Sales", newColumnName: "Revenue"
+    - "change the above column name to Two" → oldColumnName: (from context), newColumnName: "Two"
+    - "rename that column to NewName" → oldColumnName: (from context), newColumnName: "NewName"
+    - "change column name from OldName to NewName" → oldColumnName: "OldName", newColumnName: "NewName"
+    - User says "yes" after assistant asks "are you asking to rename the column 'XYZ' to 'tuko'?" → oldColumnName: "XYZ", newColumnName: "tuko"
 - "add_row": User wants to add/append a row (e.g., "add a new row", "append row at bottom")
 - "count_nulls": User wants to count/null values (e.g., "how many nulls", "count missing values")
 - "replace_value": User wants to replace a specific value with another. Handle various phrasings:
@@ -1481,6 +1604,12 @@ Return ONLY valid JSON, no other text.`;
       const matchedColumn = findMatchingColumn(parsed.column, availableColumns);
       parsed.column = matchedColumn || parsed.column;
     }
+    
+    // Map oldColumnName for rename operations
+    if (parsed.oldColumnName) {
+      const matchedColumn = findMatchingColumn(parsed.oldColumnName, availableColumns);
+      parsed.oldColumnName = matchedColumn || parsed.oldColumnName;
+    }
 
     // Extract method for remove_nulls operation if not explicitly provided
     let method: 'delete' | 'mean' | 'median' | 'mode' | 'custom' | undefined;
@@ -1533,6 +1662,7 @@ Return ONLY valid JSON, no other text.`;
       rowCount: parsed.rowCount,
       oldValue: parsed.oldValue,
       newValue: parsed.newValue,
+      oldColumnName: parsed.oldColumnName,
       modelType: parsed.modelType,
       targetVariable: parsed.targetVariable,
       features: parsed.features,
@@ -2450,6 +2580,30 @@ function userRequestedPreview(message: string | undefined): boolean {
 }
 
 /**
+ * Check if an operation modifies data and should automatically show preview
+ */
+function isDataModificationOperation(operation: DataOpsIntent['operation']): boolean {
+  const dataModificationOperations: DataOpsIntent['operation'][] = [
+    'remove_nulls',
+    'create_column',
+    'create_derived_column',
+    'normalize_column',
+    'modify_column',
+    'remove_column',
+    'rename_column',
+    'remove_rows',
+    'add_row',
+    'replace_value',
+    'convert_type',
+    'aggregate',
+    'pivot',
+    'revert',
+  ];
+  
+  return dataModificationOperations.includes(operation);
+}
+
+/**
  * Execute data operation based on intent
  */
 export async function executeDataOperation(
@@ -2468,8 +2622,12 @@ export async function executeDataOperation(
   // For operations like aggregate/pivot that only return a table,
   // the table will be included in "data" and "saved" will be false.
 }> {
-  // Check if user explicitly requested preview (except for 'preview' operation which always shows data)
-  const shouldShowPreview = intent.operation === 'preview' || userRequestedPreview(originalMessage);
+  // Check if user explicitly requested preview OR if this is a data modification operation
+  // Data modification operations (add/remove columns/rows, etc.) should always show preview
+  const shouldShowPreview = 
+    intent.operation === 'preview' || 
+    userRequestedPreview(originalMessage) ||
+    isDataModificationOperation(intent.operation);
   
   // Detect large dataset
   const isLargeDataset = data.length > LARGE_DATASET_THRESHOLD;
@@ -2785,6 +2943,17 @@ export async function executeDataOperation(
         `Created column "${newColumnName}" with default value: ${defaultValue !== undefined ? String(defaultValue) : 'null'}`,
         sessionDoc
       );
+
+      // Update context to track last created column
+      if (sessionDoc) {
+        const context: DataOpsContext = {
+          ...(sessionDoc.dataOpsContext as DataOpsContext || {}),
+          lastCreatedColumn: newColumnName,
+          timestamp: Date.now()
+        };
+        sessionDoc.dataOpsContext = context as any;
+        await updateChatDocument(sessionDoc);
+      }
       
       // Only show preview if user explicitly requested it
       let previewData: Record<string, any>[] | undefined;
@@ -2849,6 +3018,17 @@ export async function executeDataOperation(
         `Created derived column "${newColumnName}" with expression: ${expression}`,
         sessionDoc
       );
+
+      // Update context to track last created column
+      if (sessionDoc) {
+        const context: DataOpsContext = {
+          ...(sessionDoc.dataOpsContext as DataOpsContext || {}),
+          lastCreatedColumn: newColumnName,
+          timestamp: Date.now()
+        };
+        sessionDoc.dataOpsContext = context as any;
+        await updateChatDocument(sessionDoc);
+      }
       
       // Only show preview if user explicitly requested it
       let previewData: Record<string, any>[] | undefined;
@@ -3711,6 +3891,140 @@ export async function executeDataOperation(
       };
     }
     
+    case 'rename_column': {
+      // Determine which column to rename
+      const columnToRename = intent.oldColumnName || intent.column;
+      const newName = intent.newColumnName;
+      
+      if (!columnToRename) {
+        // Try to find from context
+        const { findLastCreatedColumn } = await import('../agents/contextResolver.js');
+        const lastColumn = findLastCreatedColumn(chatHistory || []);
+        if (lastColumn) {
+          const resolvedColumn = lastColumn;
+          if (!newName) {
+            return {
+              answer: `I found column "${resolvedColumn}" from context. What would you like to rename it to?`
+            };
+          }
+          
+          // Use resolved column
+          const modifiedData = data.map(row => {
+            const newRow = { ...row };
+            if (resolvedColumn in newRow) {
+              newRow[newName] = newRow[resolvedColumn];
+              delete newRow[resolvedColumn];
+            }
+            return newRow;
+          });
+          
+          const saveResult = await saveModifiedData(
+            sessionId,
+            modifiedData,
+            'rename_column',
+            `Renamed column "${resolvedColumn}" to "${newName}"`,
+            sessionDoc
+          );
+          
+          // Update context
+          if (sessionDoc) {
+            const context: DataOpsContext = {
+              ...(sessionDoc.dataOpsContext as DataOpsContext || {}),
+              lastCreatedColumn: newName, // Update to new name
+              timestamp: Date.now()
+            };
+            sessionDoc.dataOpsContext = context as any;
+            await updateChatDocument(sessionDoc);
+          }
+          
+          let previewData: Record<string, any>[] | undefined;
+          let answerText = `✅ Successfully renamed column "${resolvedColumn}" to "${newName}".`;
+          
+          if (shouldShowPreview) {
+            previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+            answerText += ` Here's a preview of the updated data:`;
+          }
+          
+          return {
+            answer: answerText,
+            data: modifiedData,
+            preview: previewData,
+            saved: true
+          };
+        }
+        
+        return {
+          answer: 'Please specify which column you want to rename. For example: "Rename column Sales to Revenue" or "Change the above column name to Two"'
+        };
+      }
+      
+      if (!newName) {
+        return {
+          answer: `Please specify the new name for column "${columnToRename}". For example: "Rename column ${columnToRename} to NewName"`
+        };
+      }
+      
+      // Check if column exists
+      if (data.length > 0 && !(columnToRename in data[0])) {
+        return {
+          answer: `Column "${columnToRename}" not found. Available columns: ${Object.keys(data[0] || {}).join(', ')}`
+        };
+      }
+      
+      // Check if new name already exists
+      if (data.length > 0 && newName in data[0] && newName !== columnToRename) {
+        return {
+          answer: `Cannot rename: Column "${newName}" already exists. Please choose a different name.`
+        };
+      }
+      
+      // Rename the column
+      const modifiedData = data.map(row => {
+        const newRow = { ...row };
+        if (columnToRename in newRow) {
+          newRow[newName] = newRow[columnToRename];
+          delete newRow[columnToRename];
+        }
+        return newRow;
+      });
+      
+      // Save modified data first
+      const saveResult = await saveModifiedData(
+        sessionId,
+        modifiedData,
+        'rename_column',
+        `Renamed column "${columnToRename}" to "${newName}"`,
+        sessionDoc
+      );
+      
+      // Update context to track renamed column
+      if (sessionDoc) {
+        const context: DataOpsContext = {
+          ...(sessionDoc.dataOpsContext as DataOpsContext || {}),
+          lastCreatedColumn: newName, // Update to new name
+          timestamp: Date.now()
+        };
+        sessionDoc.dataOpsContext = context as any;
+        await updateChatDocument(sessionDoc);
+      }
+      
+      // Only show preview if user explicitly requested it
+      let previewData: Record<string, any>[] | undefined;
+      let answerText = `✅ Successfully renamed column "${columnToRename}" to "${newName}".`;
+      
+      if (shouldShowPreview) {
+        previewData = await getPreviewFromSavedData(sessionId, modifiedData);
+        answerText += ` Here's a preview of the updated data:`;
+      }
+      
+      return {
+        answer: answerText,
+        data: modifiedData,
+        preview: previewData,
+        saved: true
+      };
+    }
+    
     case 'convert_type': {
       if (!intent.column || !intent.targetType) {
         return {
@@ -3980,6 +4294,7 @@ export async function executeDataOperation(
           '• **Aggregate data**: "Aggregate by Month" or "Aggregate RISK_VOLUME on DEPOT"\n' +
           '• **Create pivot tables**: "Create a pivot on Brand showing Sales, Spend, ROI"\n' +
           '• **Remove columns**: "Remove column X" or "Delete column Y"\n' +
+          '• **Rename columns**: "Rename column X to Y" or "Change the above column name to Two"\n' +
           '• **Create columns**: "Create column XYZ = A + B" or "Add column Status with value Active"\n' +
           '• **Adjust column values**: "Increase column X by 50" or "Reduce column Y by 100"\n' +
           '• **Normalize columns**: "Normalize column Sales" or "Standardize metric Z"\n' +

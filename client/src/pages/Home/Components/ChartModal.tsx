@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,7 +8,8 @@ import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Slider } from '@/components/ui/slider';
-import { Filter, X, Plus } from 'lucide-react';
+import { Filter, X, Plus, Settings2 } from 'lucide-react';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ChartSpec } from '@/shared/schema';
 import { DashboardModal } from './DashboardModal/DashboardModal';
 import { ChartFilterDefinition, ActiveChartFilters } from '@/lib/chartFilters';
@@ -152,12 +153,90 @@ export function ChartModal({
   determineSliderStep = determineSliderStepLocal,
 }: ChartModalProps) {
   const [isDashboardModalOpen, setIsDashboardModalOpen] = useState(false);
+  const [showDots, setShowDots] = useState(true); // Default to showing dots in modal
+  const [hideOutliers, setHideOutliers] = useState(false); // Hide outliers for scatter plots
+  // Point visibility controls for scatter plots
+  const [pointSize, setPointSize] = useState<'small' | 'medium' | 'large'>('medium');
+  const [pointOpacity, setPointOpacity] = useState<'low' | 'medium' | 'high'>('medium');
+  const [pointDensity, setPointDensity] = useState<'low' | 'medium' | 'high' | 'all'>('medium');
   const { type, title, data: chartDataSource = [], x, y, xDomain, yDomain, trendLine, xLabel, yLabel } = chart;
   const chartColor = COLORS[0]; // Use primary color for modal
   
   // Use filtered data if available, otherwise use original data
   const baseData = enableFilters && Array.isArray(chartData) ? chartData : chartDataSource;
-  const data = Array.isArray(baseData) ? baseData : [];
+  const allData = Array.isArray(baseData) ? baseData : [];
+  
+  // Process scatter plot data for display (only outlier filtering) - show ALL data points
+  const processedScatterData = useMemo(() => {
+    if (type !== 'scatter') return allData;
+    
+    let displayData = [...allData];
+    
+    // Filter out outliers if enabled (user choice)
+    if (hideOutliers && displayData.length > 0) {
+      const validData = displayData.filter((d: any) => {
+        const xVal = typeof d[x] === 'number' ? d[x] : Number(d[x]);
+        const yVal = typeof d[y] === 'number' ? d[y] : Number(d[y]);
+        return !isNaN(xVal) && !isNaN(yVal);
+      });
+      
+      if (validData.length > 0) {
+        const xValues = validData.map((d: any) => (typeof d[x] === 'number' ? d[x] : Number(d[x])));
+        const yValues = validData.map((d: any) => (typeof d[y] === 'number' ? d[y] : Number(d[y])));
+        
+        // Calculate IQR for outlier detection
+        const sortedX = [...xValues].sort((a, b) => a - b);
+        const sortedY = [...yValues].sort((a, b) => a - b);
+        
+        const q1X = sortedX[Math.floor(sortedX.length * 0.25)];
+        const q3X = sortedX[Math.floor(sortedX.length * 0.75)];
+        const iqrX = q3X - q1X;
+        const lowerBoundX = q1X - 1.5 * iqrX;
+        const upperBoundX = q3X + 1.5 * iqrX;
+        
+        const q1Y = sortedY[Math.floor(sortedY.length * 0.25)];
+        const q3Y = sortedY[Math.floor(sortedY.length * 0.75)];
+        const iqrY = q3Y - q1Y;
+        const lowerBoundY = q1Y - 1.5 * iqrY;
+        const upperBoundY = q3Y + 1.5 * iqrY;
+        
+        displayData = validData.filter((d: any) => {
+          const xVal = typeof d[x] === 'number' ? d[x] : Number(d[x]);
+          const yVal = typeof d[y] === 'number' ? d[y] : Number(d[y]);
+          return xVal >= lowerBoundX && xVal <= upperBoundX && 
+                 yVal >= lowerBoundY && yVal <= upperBoundY;
+        });
+      }
+    }
+    
+    // Always show all data points - no sampling
+    return displayData;
+  }, [type, allData, hideOutliers, x, y]);
+  
+  const data = type === 'scatter' ? processedScatterData : allData;
+
+  // Optimize scatter data for rendering performance (computed at component level for use in metadata)
+  const getMaxRenderPoints = () => {
+    if (type !== 'scatter') return 0;
+    switch (pointDensity) {
+      case 'low': return 2000;
+      case 'medium': return 10000;
+      case 'high': return 20000;
+      case 'all': return processedScatterData.length;
+      default: return 10000;
+    }
+  };
+  
+  const MAX_RENDER_POINTS = getMaxRenderPoints();
+  const optimizedScatterData = useMemo(() => {
+    if (type !== 'scatter' || processedScatterData.length <= MAX_RENDER_POINTS) {
+      return processedScatterData;
+    }
+    
+    // Stratified sampling to preserve distribution
+    const step = Math.ceil(processedScatterData.length / MAX_RENDER_POINTS);
+    return processedScatterData.filter((_, idx) => idx % step === 0).slice(0, MAX_RENDER_POINTS);
+  }, [type, processedScatterData, MAX_RENDER_POINTS]);
 
   const renderChart = () => {
     switch (type) {
@@ -239,7 +318,7 @@ export function ChartModal({
                 name={chart.y2 ? (yLabel || y) : undefined}
                 stroke={leftAxisColor}
                 strokeWidth={3}
-                dot={{ r: 6 }}
+                dot={showDots ? { r: 6, fill: leftAxisColor } : false}
                 activeDot={{ r: 8 }}
                 {...(chart.y2 ? { yAxisId: "left" } : {})}
               />
@@ -252,7 +331,7 @@ export function ChartModal({
                       name={chart.y2Label || chart.y2}
                       stroke={rightAxisColor}
                       strokeWidth={2}
-                      dot={false}
+                      dot={showDots ? { r: 4, fill: rightAxisColor } : false}
                       activeDot={{ r: 5 }}
                       yAxisId="right"
                     />
@@ -268,7 +347,7 @@ export function ChartModal({
                         name={series}
                         stroke={seriesColor}
                         strokeWidth={2}
-                        dot={false}
+                        dot={showDots ? { r: 4, fill: seriesColor } : false}
                         activeDot={{ r: 5 }}
                         yAxisId="right"
                       />
@@ -328,11 +407,32 @@ export function ChartModal({
           return 8;
         };
 
-        // Calculate trendline if not provided but we have data
+        const isLargeDataset = optimizedScatterData.length > 5000;
+        
+        // Calculate point size and opacity based on user preferences
+        const getPointSize = () => {
+          switch (pointSize) {
+            case 'small': return 1;
+            case 'medium': return isLargeDataset ? 2 : 3;
+            case 'large': return isLargeDataset ? 3 : 5;
+            default: return 3;
+          }
+        };
+        
+        const getPointOpacity = () => {
+          switch (pointOpacity) {
+            case 'low': return 0.15;
+            case 'medium': return isLargeDataset ? 0.3 : 0.8;
+            case 'high': return isLargeDataset ? 0.5 : 0.9;
+            default: return 0.8;
+          }
+        };
+
+        // Calculate trendline from ALL data (not filtered/sampled) to keep it accurate
         let trendlineData = trendLine;
-        if (!trendlineData && data.length > 0) {
-          // Calculate linear regression from data points
-          const validData = data.filter((d: any) => {
+        if (!trendlineData && allData.length > 0) {
+          // Calculate linear regression from ALL data points
+          const validData = allData.filter((d: any) => {
             const xVal = typeof d[x] === 'number' ? d[x] : Number(d[x]);
             const yVal = typeof d[y] === 'number' ? d[y] : Number(d[y]);
             return !isNaN(xVal) && !isNaN(yVal);
@@ -383,7 +483,7 @@ export function ChartModal({
 
         return (
           <ResponsiveContainer width="100%" height={400}>
-            <ComposedChart margin={{ left: 60, right: 20, top: 20, bottom: 40 }}>
+            <ComposedChart margin={{ left: 60, right: 20, top: 20, bottom: 40 }} data={optimizedScatterData}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
               <XAxis
                 dataKey={x}
@@ -417,8 +517,19 @@ export function ChartModal({
                 }}
                 labelStyle={{ color: 'hsl(var(--foreground))', fontWeight: 600, fontSize: '14px' }}
                 itemStyle={{ color: 'hsl(var(--foreground))', fontSize: '14px' }}
+                cursor={!isLargeDataset ? { strokeDasharray: '3 3' } : false}
               />
-              <Scatter name={`${x} vs ${y}`} data={data} fill={chartColor} fillOpacity={0.8} />
+              <Scatter 
+                name={`${x} vs ${y}`} 
+                data={optimizedScatterData} 
+                fill={chartColor} 
+                fillOpacity={getPointOpacity()} 
+                isAnimationActive={false}
+                shape={(props: any) => {
+                  const radius = getPointSize();
+                  return <circle {...props} r={radius} />;
+                }}
+              />
               {trendlineData && trendlineData.length === 2 && (
                 <Line
                   type="linear"
@@ -533,10 +644,123 @@ export function ChartModal({
       <Dialog open={isOpen} onOpenChange={onClose}>
         <DialogContent className="max-w-7xl w-full max-h-[90vh] overflow-hidden [&>button]:hidden">
           <DialogHeader className="flex flex-row items-center justify-between space-y-0 pb-4 gap-4">
-            <DialogTitle className="text-xl truncate flex-1 min-w-0">
-              {title}
-            </DialogTitle>
+            <div className="flex flex-col gap-1 flex-1 min-w-0">
+              <DialogTitle className="text-xl truncate">
+                {title}
+              </DialogTitle>
+              {type === 'scatter' && (chart as any)._correlationMetadata && (
+                <div className="text-xs text-muted-foreground">
+                  <span>
+                    {optimizedScatterData.length.toLocaleString()} points shown
+                    {pointDensity !== 'all' && processedScatterData.length > optimizedScatterData.length && (
+                      <span className="ml-1">(of {processedScatterData.length.toLocaleString()})</span>
+                    )}
+                  </span>
+                  <span className="mx-2">•</span>
+                  <span>Total: {(chart as any)._correlationMetadata.totalDataPoints?.toLocaleString() || 'N/A'} pairs</span>
+                  {typeof (chart as any)._correlationMetadata.correlation === 'number' && (
+                    <>
+                      <span className="mx-2">•</span>
+                      <span>r = {(chart as any)._correlationMetadata.correlation.toFixed(2)}</span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-2 flex-shrink-0">
+              {type === 'line' && (
+                <div className="flex items-center gap-2 px-2">
+                  <Checkbox
+                    id="show-dots-modal"
+                    checked={showDots}
+                    onCheckedChange={(checked) => setShowDots(checked === true)}
+                  />
+                  <Label
+                    htmlFor="show-dots-modal"
+                    className="text-xs text-muted-foreground cursor-pointer whitespace-nowrap"
+                  >
+                    Show dots
+                  </Label>
+                </div>
+              )}
+              {type === 'scatter' && (
+                <>
+                  <div className="flex items-center gap-2 px-2">
+                    <Checkbox
+                      id="hide-outliers-modal"
+                      checked={hideOutliers}
+                      onCheckedChange={(checked) => setHideOutliers(checked === true)}
+                    />
+                    <Label
+                      htmlFor="hide-outliers-modal"
+                      className="text-xs text-muted-foreground cursor-pointer whitespace-nowrap"
+                    >
+                      Hide outliers
+                    </Label>
+                  </div>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        title="Point Display Settings"
+                      >
+                        <Settings2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-64">
+                      <div className="space-y-4">
+                        <div className="space-y-2">
+                          <Label className="text-xs font-semibold">Point Size</Label>
+                          <Select value={pointSize} onValueChange={(value: 'small' | 'medium' | 'large') => setPointSize(value)}>
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="small">Small (1px)</SelectItem>
+                              <SelectItem value="medium">Medium (2-3px)</SelectItem>
+                              <SelectItem value="large">Large (3-5px)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs font-semibold">Point Opacity</Label>
+                          <Select value={pointOpacity} onValueChange={(value: 'low' | 'medium' | 'high') => setPointOpacity(value)}>
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="low">Low (15%)</SelectItem>
+                              <SelectItem value="medium">Medium (30-80%)</SelectItem>
+                              <SelectItem value="high">High (50-90%)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs font-semibold">Point Density</Label>
+                          <Select value={pointDensity} onValueChange={(value: 'low' | 'medium' | 'high' | 'all') => setPointDensity(value)}>
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="low">Low (2k points)</SelectItem>
+                              <SelectItem value="medium">Medium (10k points)</SelectItem>
+                              <SelectItem value="high">High (20k points)</SelectItem>
+                              <SelectItem value="all">All Points {processedScatterData.length > 20000 && '(may lag)'}</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        {pointDensity === 'all' && processedScatterData.length > 20000 && (
+                          <p className="text-xs text-muted-foreground">
+                            ⚠️ Showing all {processedScatterData.length.toLocaleString()} points may cause performance issues
+                          </p>
+                        )}
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                </>
+              )}
               <Button
                 variant="outline"
                 size="sm"

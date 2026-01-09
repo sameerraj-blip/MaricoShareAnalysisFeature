@@ -1,9 +1,32 @@
 import { openai } from './openai.js';
 import { DataSummary, Message } from '../shared/schema.js';
+import { getRedisClient } from './redisClient.js';
 
-// Embedding model (Azure OpenAI supports text-embedding-ada-002 or text-embedding-3-small)
-const EMBEDDING_MODEL = 'text-embedding-ada-002';
-const EMBEDDING_DIMENSION = 1536;
+// Embedding model configuration
+// Azure OpenAI compatible embedding models:
+// - text-embedding-ada-002 (1536 dimensions)
+// - text-embedding-3-small (1536 dimensions, default)
+// - text-embedding-3-large (3072 dimensions)
+const EMBEDDING_DEPLOYMENT_NAME = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'text-embedding-3-small';
+const EMBEDDING_DIMENSION = parseInt(process.env.AZURE_OPENAI_EMBEDDING_DIMENSION || '1536', 10);
+
+// Log embedding configuration at startup
+console.log('📊 Embedding Configuration:');
+console.log(`   AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'not set (using default)'}`);
+console.log(`   Resolved embedding model: ${EMBEDDING_DEPLOYMENT_NAME}`);
+console.log(`   Embedding dimensions: ${EMBEDDING_DIMENSION}`);
+
+// Validate embedding model at startup
+if (EMBEDDING_DEPLOYMENT_NAME.includes('gpt-4') || EMBEDDING_DEPLOYMENT_NAME.includes('gpt-3.5')) {
+  console.error(`❌ ERROR: Invalid embedding model configured: ${EMBEDDING_DEPLOYMENT_NAME}`);
+  console.error(`   Chat models (gpt-4, gpt-3.5) cannot be used for embeddings.`);
+  console.error(`   Please set AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME to a valid embedding model:`);
+  console.error(`   - text-embedding-3-small (recommended)`);
+  console.error(`   - text-embedding-3-large`);
+  console.error(`   - text-embedding-ada-002`);
+  console.error(`   Current value from env: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'not set'}`);
+  throw new Error(`Invalid embedding model: ${EMBEDDING_DEPLOYMENT_NAME}. Chat models cannot be used for embeddings.`);
+}
 
 // Chunk interface
 export interface DataChunk {
@@ -15,8 +38,8 @@ export interface DataChunk {
   score?: number; // Relevance score
 }
 
-// Vector store (in-memory, can be upgraded to CosmosDB later)
-class VectorStore {
+// In-memory vector store (fallback when Redis unavailable)
+class InMemoryVectorStore {
   private chunks: Map<string, DataChunk> = new Map();
   private embeddings: Map<string, number[]> = new Map();
 
@@ -35,7 +58,6 @@ class VectorStore {
     return Array.from(this.chunks.values());
   }
 
-  // Cosine similarity search
   search(queryEmbedding: number[], topK: number = 5): DataChunk[] {
     const results: Array<{ chunk: DataChunk; score: number }> = [];
 
@@ -47,7 +69,6 @@ class VectorStore {
       results.push({ chunk, score: similarity });
     }
 
-    // Sort by score descending and return top K
     return results
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
@@ -64,14 +85,166 @@ class VectorStore {
   }
 }
 
-// Global vector store (session-based, cleared on new upload)
-const vectorStores = new Map<string, VectorStore>();
+// Redis-based persistent vector store
+class PersistentVectorStore {
+  private sessionId: string;
 
-function getVectorStore(sessionId: string): VectorStore {
-  if (!vectorStores.has(sessionId)) {
-    vectorStores.set(sessionId, new VectorStore());
+  constructor(sessionId: string) {
+    this.sessionId = sessionId;
   }
-  return vectorStores.get(sessionId)!;
+
+  async addChunk(chunk: DataChunk): Promise<void> {
+    const redis = await getRedisClient();
+    if (!redis) {
+      // Fallback to in-memory
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      inMemoryStore.addChunk(chunk);
+      return;
+    }
+
+    try {
+      const key = `rag:${this.sessionId}:chunk:${chunk.id}`;
+      await redis.set(
+        key,
+        JSON.stringify({
+          ...chunk,
+          embedding: chunk.embedding,
+        }),
+        { EX: 86400 * 30 } // 30 days expiry
+      );
+
+      // Maintain index for fast search
+      const indexKey = `rag:${this.sessionId}:index`;
+      await redis.sAdd(indexKey, chunk.id);
+    } catch (error) {
+      console.error('Failed to store chunk in Redis, using in-memory fallback:', error);
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      inMemoryStore.addChunk(chunk);
+    }
+  }
+
+  async search(queryEmbedding: number[], topK: number = 5): Promise<DataChunk[]> {
+    const redis = await getRedisClient();
+    if (!redis) {
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      return inMemoryStore.search(queryEmbedding, topK);
+    }
+
+    try {
+      const indexKey = `rag:${this.sessionId}:index`;
+      const chunkIds = await redis.sMembers(indexKey);
+
+      const results: Array<{ chunk: DataChunk; score: number }> = [];
+
+      for (const chunkId of chunkIds) {
+        const key = `rag:${this.sessionId}:chunk:${chunkId}`;
+        const chunkData = await redis.get(key);
+        if (!chunkData) continue;
+
+        const chunk: DataChunk = JSON.parse(chunkData);
+        if (!chunk.embedding) continue;
+
+        const similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
+        results.push({ chunk, score: similarity });
+      }
+
+      return results
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK)
+        .map(r => ({ ...r.chunk, score: r.score }));
+    } catch (error) {
+      console.error('Failed to search Redis, using in-memory fallback:', error);
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      return inMemoryStore.search(queryEmbedding, topK);
+    }
+  }
+
+  async getAllChunks(): Promise<DataChunk[]> {
+    const redis = await getRedisClient();
+    if (!redis) {
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      return inMemoryStore.getAllChunks();
+    }
+
+    try {
+      const indexKey = `rag:${this.sessionId}:index`;
+      const chunkIds = await redis.sMembers(indexKey);
+
+      const chunks: DataChunk[] = [];
+      for (const chunkId of chunkIds) {
+        const key = `rag:${this.sessionId}:chunk:${chunkId}`;
+        const chunkData = await redis.get(key);
+        if (chunkData) {
+          chunks.push(JSON.parse(chunkData));
+        }
+      }
+
+      return chunks;
+    } catch (error) {
+      console.error('Failed to get chunks from Redis, using in-memory fallback:', error);
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      return inMemoryStore.getAllChunks();
+    }
+  }
+
+  async clear(): Promise<void> {
+    const redis = await getRedisClient();
+    if (!redis) {
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      inMemoryStore.clear();
+      return;
+    }
+
+    try {
+      const indexKey = `rag:${this.sessionId}:index`;
+      const chunkIds = await redis.sMembers(indexKey);
+
+      // Delete all chunks
+      for (const chunkId of chunkIds) {
+        const key = `rag:${this.sessionId}:chunk:${chunkId}`;
+        await redis.del(key);
+      }
+
+      // Delete index
+      await redis.del(indexKey);
+    } catch (error) {
+      console.error('Failed to clear Redis, clearing in-memory fallback:', error);
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      inMemoryStore.clear();
+    }
+  }
+
+  async size(): Promise<number> {
+    const redis = await getRedisClient();
+    if (!redis) {
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      return inMemoryStore.size();
+    }
+
+    try {
+      const indexKey = `rag:${this.sessionId}:index`;
+      return await redis.sCard(indexKey);
+    } catch (error) {
+      console.error('Failed to get size from Redis, using in-memory fallback:', error);
+      const inMemoryStore = getInMemoryStore(this.sessionId);
+      return inMemoryStore.size();
+    }
+  }
+}
+
+// In-memory stores (fallback)
+const inMemoryStores = new Map<string, InMemoryVectorStore>();
+
+function getInMemoryStore(sessionId: string): InMemoryVectorStore {
+  if (!inMemoryStores.has(sessionId)) {
+    inMemoryStores.set(sessionId, new InMemoryVectorStore());
+  }
+  return inMemoryStores.get(sessionId)!;
+}
+
+// Get vector store (Redis-based with in-memory fallback)
+function getVectorStore(sessionId: string): PersistentVectorStore {
+  return new PersistentVectorStore(sessionId);
 }
 
 // Cosine similarity calculation
@@ -95,29 +268,98 @@ function cosineSimilarity(a: number[], b: number[]): number {
 // Generate embedding for text
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
-    // Azure OpenAI embeddings endpoint
-    // Note: Azure OpenAI uses the same API but may need deployment name
-    // If embeddings don't work, check your Azure OpenAI deployment
+    // Get the embedding deployment name
+    const embeddingModel = EMBEDDING_DEPLOYMENT_NAME;
+    
+    // Validate embedding model name
+    if (embeddingModel.includes('gpt-4') || embeddingModel.includes('gpt-3.5')) {
+      console.error(`❌ Invalid embedding model: ${embeddingModel}. Chat models cannot be used for embeddings.`);
+      throw new Error(`Invalid embedding model: ${embeddingModel}. Please set AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME to a valid embedding model.`);
+    }
+    
+    // For Azure OpenAI, the embeddings client baseURL already includes the deployment name
+    // The model parameter should match the deployment name in the baseURL
+    // Since the baseURL is set to: /openai/deployments/{embeddingDeployment}
+    // The SDK will automatically append /embeddings to make the full path:
+    // {baseURL}/embeddings?api-version={version}
+    console.log(`📊 [EMBEDDING] Calling embeddings.create with:`);
+    console.log(`   Model: ${embeddingModel}`);
+    console.log(`   Dimensions: ${EMBEDDING_DIMENSION}`);
+    console.log(`   Input length: ${text.length} characters`);
+    console.log(`   Expected full URL: ${(openai.embeddings as any).client?.baseURL || 'N/A'}/embeddings`);
+    
     const response = await openai.embeddings.create({
-      model: EMBEDDING_MODEL,
+      model: embeddingModel, // Must match the deployment name in baseURL
       input: text,
+      dimensions: EMBEDDING_DIMENSION, // Specify dimensions (only for text-embedding-3 models)
     });
     
+    console.log(`✅ [EMBEDDING] Successfully generated embedding`);
+    
     return response.data[0].embedding;
-  } catch (error) {
-    // Silently fail - RAG will be disabled for this chunk
-    // (Logging removed to reduce console noise - will enable RAG later)
-    // Return zero vector as fallback (RAG will be disabled for this chunk)
+  } catch (error: any) {
+    console.error('❌ Embedding generation error:', error);
+    console.error(`   Attempted model: ${EMBEDDING_DEPLOYMENT_NAME}`);
+    console.error(`   Environment variable AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME}`);
+    console.error(`   AZURE_OPENAI_ENDPOINT: ${process.env.AZURE_OPENAI_ENDPOINT}`);
+    
+    // Handle DeploymentNotFound error specifically
+    if (error?.code === 'DeploymentNotFound' || error?.error?.code === 'DeploymentNotFound') {
+      const errorMsg = 
+        `❌ DEPLOYMENT NOT FOUND ERROR\n` +
+        `The deployment "${EMBEDDING_DEPLOYMENT_NAME}" was not found at the configured endpoint.\n\n` +
+        `TROUBLESHOOTING STEPS:\n` +
+        `1. Check your .env file - ensure AZURE_OPENAI_ENDPOINT matches where you created the deployment:\n` +
+        `   Current endpoint: ${process.env.AZURE_OPENAI_ENDPOINT}\n` +
+        `   Expected format: https://YOUR-RESOURCE-NAME.cognitiveservices.azure.com/\n\n` +
+        `2. Verify the deployment exists in Azure Portal:\n` +
+        `   - Go to Azure Portal → Your OpenAI resource → Deployments\n` +
+        `   - Find "${EMBEDDING_DEPLOYMENT_NAME}" deployment\n` +
+        `   - Copy the exact endpoint URL from the deployment details\n` +
+        `   - Update AZURE_OPENAI_ENDPOINT in your .env file\n\n` +
+        `3. Check deployment name matches exactly (case-sensitive):\n` +
+        `   Current: "${EMBEDDING_DEPLOYMENT_NAME}"\n` +
+        `   Must match exactly as shown in Azure Portal\n\n` +
+        `4. Ensure deployment status is "Succeeded" in Azure Portal\n\n` +
+        `5. If deployment was just created, wait 2-5 minutes for propagation\n\n` +
+        `NOTE: The endpoint in your .env must match the Azure OpenAI resource where the deployment exists.\n` +
+        `If you created the deployment in a different resource, update AZURE_OPENAI_ENDPOINT accordingly.`;
+      
+      console.error(errorMsg);
+      // Don't throw - allow the system to continue without embeddings
+      // Return zero vector as fallback
+      console.warn(`⚠️ Returning zero vector fallback for embedding (dimension: ${EMBEDDING_DIMENSION})`);
+      return new Array(EMBEDDING_DIMENSION).fill(0);
+    }
+    
+    // If the error is about model incompatibility
+    if (error?.code === 'OperationNotSupported' || error?.message?.includes('embeddings operation')) {
+      const errorMsg = 
+        `Embedding model error: ${error.message}\n` +
+        `Current AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME || 'not set'}\n` +
+        `Please ensure AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME is set to a valid embedding model ` +
+        `(e.g., text-embedding-3-small, text-embedding-3-large, or text-embedding-ada-002) ` +
+        `and NOT a chat model like gpt-4o. ` +
+        `Also ensure this deployment exists in your Azure OpenAI resource.`;
+      
+      console.error(`❌ ${errorMsg}`);
+      // Return zero vector as fallback instead of throwing
+      console.warn(`⚠️ Returning zero vector fallback for embedding (dimension: ${EMBEDDING_DIMENSION})`);
+      return new Array(EMBEDDING_DIMENSION).fill(0);
+    }
+    
+    // For other errors, return zero vector as fallback
+    console.warn(`⚠️ Returning zero vector fallback for embedding (dimension: ${EMBEDDING_DIMENSION})`);
     return new Array(EMBEDDING_DIMENSION).fill(0);
   }
 }
 
 // Chunk data intelligently
-export function chunkData(
+export async function chunkData(
   data: Record<string, any>[],
   summary: DataSummary,
   sessionId: string
-): DataChunk[] {
+): Promise<DataChunk[]> {
   const chunks: DataChunk[] = [];
   const store = getVectorStore(sessionId);
   
@@ -199,7 +441,9 @@ export function chunkData(
   }
 
   // Store chunks (embeddings will be generated lazily)
-  chunks.forEach(chunk => store.addChunk(chunk));
+  for (const chunk of chunks) {
+    await store.addChunk(chunk);
+  }
   
   return chunks;
 }
@@ -207,23 +451,37 @@ export function chunkData(
 // Generate embeddings for all chunks (lazy loading)
 export async function generateChunkEmbeddings(sessionId: string): Promise<void> {
   const store = getVectorStore(sessionId);
-  const chunks = store.getAllChunks();
+  const chunks = await store.getAllChunks();
   
-  // Skip embedding generation for now (RAG disabled)
-  // Will enable later when RAG is fully configured
-  return;
+  if (chunks.length === 0) {
+    console.log('No chunks to generate embeddings for');
+    return;
+  }
+
+  console.log(`📊 Generating embeddings for ${chunks.length} chunks...`);
   
   // Generate embeddings in batches to avoid rate limits
   const batchSize = 10;
+  let processed = 0;
+  
   for (let i = 0; i < chunks.length; i += batchSize) {
     const batch = chunks.slice(i, i + batchSize);
     
     await Promise.all(
       batch.map(async (chunk) => {
         if (!chunk.embedding) {
-          const embedding = await generateEmbedding(chunk.content);
-          chunk.embedding = embedding;
-          store.addChunk(chunk);
+          try {
+            const embedding = await generateEmbedding(chunk.content);
+            chunk.embedding = embedding;
+            await store.addChunk(chunk);
+            processed++;
+            if (processed % 10 === 0) {
+              console.log(`  Processed ${processed}/${chunks.length} chunks...`);
+            }
+          } catch (error) {
+            console.error(`Failed to generate embedding for chunk ${chunk.id}:`, error);
+            // Continue with other chunks
+          }
         }
       })
     );
@@ -233,6 +491,8 @@ export async function generateChunkEmbeddings(sessionId: string): Promise<void> 
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
+  
+  console.log(`✅ Completed embedding generation for ${processed} chunks`);
 }
 
 // Retrieve relevant context for a question
@@ -244,15 +504,13 @@ export async function retrieveRelevantContext(
   sessionId: string,
   topK: number = 5
 ): Promise<DataChunk[]> {
-  // RAG disabled for now - return empty array
-  // Will enable later when RAG is fully configured
-  return [];
-  
   const store = getVectorStore(sessionId);
   
   // If store is empty, initialize it
-  if (store.size() === 0) {
-    chunkData(data, summary, sessionId);
+  const storeSize = await store.size();
+  if (storeSize === 0) {
+    console.log('📊 Initializing RAG store for session:', sessionId);
+    await chunkData(data, summary, sessionId);
     await generateChunkEmbeddings(sessionId);
   }
   
@@ -260,13 +518,14 @@ export async function retrieveRelevantContext(
   const questionEmbedding = await generateEmbedding(question);
   
   // Semantic search
-  const semanticResults = store.search(questionEmbedding, topK * 2);
+  const semanticResults = await store.search(questionEmbedding, topK * 2);
   
   // Hybrid search: also do keyword matching
   const questionLower = question.toLowerCase();
   const keywordResults: DataChunk[] = [];
+  const allChunks = await store.getAllChunks();
   
-  store.getAllChunks().forEach(chunk => {
+  allChunks.forEach(chunk => {
     const contentLower = chunk.content.toLowerCase();
     const keywords = questionLower.split(/\s+/).filter(w => w.length > 3);
     const matches = keywords.filter(kw => contentLower.includes(kw)).length;
@@ -304,26 +563,87 @@ export async function retrieveRelevantContext(
   });
   
   // Sort by combined score and return top K
-  return Array.from(combined.values())
+  const results = Array.from(combined.values())
     .sort((a, b) => (b.score || 0) - (a.score || 0))
     .slice(0, topK);
+  
+  console.log(`📊 RAG retrieved ${results.length} relevant chunks for query`);
+  return results;
 }
 
 // Clear vector store for a session (when new file uploaded)
-export function clearVectorStore(sessionId: string): void {
-  vectorStores.delete(sessionId);
+export async function clearVectorStore(sessionId: string): Promise<void> {
+  const store = getVectorStore(sessionId);
+  await store.clear();
+  inMemoryStores.delete(sessionId);
+  console.log(`🗑️ Cleared RAG store for session: ${sessionId}`);
+}
+
+// Store conversation context (Q&A pairs) in vector store
+export async function storeConversationContext(
+  question: string,
+  answer: string,
+  sessionId: string
+): Promise<void> {
+  try {
+    const store = getVectorStore(sessionId);
+    
+    // Create Q&A chunk
+    const qaChunk: DataChunk = {
+      id: `qa_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      type: 'past_qa',
+      content: `Question: "${question}"\nAnswer: "${answer.substring(0, 500)}"`, // Limit answer length
+      metadata: {
+        question,
+        answer,
+        timestamp: Date.now(),
+      },
+    };
+    
+    // Generate embedding for the Q&A pair
+    const embedding = await generateEmbedding(qaChunk.content);
+    qaChunk.embedding = embedding;
+    
+    // Store in vector store
+    await store.addChunk(qaChunk);
+    
+    console.log(`✅ Stored conversation context: ${qaChunk.id}`);
+  } catch (error) {
+    console.error('Failed to store conversation context:', error);
+    // Don't throw - this is optional
+  }
 }
 
 // Retrieve similar past questions/answers (if we have chat history)
 export async function retrieveSimilarPastQA(
   question: string,
   chatHistory: Message[],
-  topK: number = 2
+  topK: number = 2,
+  sessionId?: string
 ): Promise<DataChunk[]> {
-  // RAG disabled for now - return empty array
-  // Will enable later when RAG is fully configured
-  return [];
+  // First, try to get from vector store (if stored)
+  if (sessionId) {
+    try {
+      const store = getVectorStore(sessionId);
+      const allChunks = await store.getAllChunks();
+      const pastQAChunks = allChunks.filter(c => c.type === 'past_qa');
+      
+      if (pastQAChunks.length > 0) {
+        // Use semantic search on stored Q&A chunks
+        const questionEmbedding = await generateEmbedding(question);
+        const results = await store.search(questionEmbedding, topK * 2);
+        const qaResults = results.filter(r => r.type === 'past_qa');
+        
+        if (qaResults.length > 0) {
+          return qaResults.slice(0, topK);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to retrieve from vector store, falling back to history:', error);
+    }
+  }
   
+  // Fallback: Extract from chat history and search
   if (chatHistory.length < 2) return [];
   
   // Extract Q&A pairs from history

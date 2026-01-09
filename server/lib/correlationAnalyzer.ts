@@ -2,6 +2,8 @@ import { ChartSpec, Insight, DataSummary } from '../shared/schema.js';
 import { calculateSmartDomainsForChart } from './axisScaling.js';
 import { openai, MODEL } from './openai.js';
 import { generateChartInsights } from './insightGenerator.js';
+import { generateStreamingCorrelationChart } from './streamingCorrelationAnalyzer.js';
+import { getCachedCorrelation, cacheCorrelation } from './redisCache.js';
 
 // Helper to clean numeric values (strip %, commas, etc.)
 function toNumber(value: any): number {
@@ -48,12 +50,39 @@ export async function analyzeCorrelations(
   filter: 'all' | 'positive' | 'negative' = 'all',
   sortOrder?: 'ascending' | 'descending',
   chatInsights?: Insight[],
-  maxResults?: number
+  maxResults?: number,
+  onProgress?: (message: string, processed?: number, total?: number) => void,
+  sessionId?: string,
+  generateCharts: boolean = true // New parameter to control chart generation
 ): Promise<{ charts: ChartSpec[]; insights: Insight[] }> {
   console.log('=== CORRELATION ANALYSIS DEBUG ===');
   console.log('Target variable:', targetVariable);
   console.log('Numeric columns to analyze:', numericColumns);
   console.log('Data rows:', data.length);
+  
+  // Check Redis cache first if sessionId is provided
+  if (sessionId) {
+    const cached = await getCachedCorrelation<{ charts: ChartSpec[]; insights: Insight[] }>(
+      sessionId,
+      targetVariable,
+      numericColumns
+    );
+    if (cached) {
+      console.log('✅ Using cached correlation results');
+      // Apply filter to cached results if needed
+      if (filter !== 'all' && cached.charts) {
+        // Filter charts based on correlation sign
+        const filteredCharts = cached.charts.filter((chart: any) => {
+          const correlation = chart.metadata?.correlation;
+          if (filter === 'positive') return correlation > 0;
+          if (filter === 'negative') return correlation < 0;
+          return true;
+        });
+        return { charts: filteredCharts, insights: cached.insights };
+      }
+      return cached;
+    }
+  }
   
   // Calculate correlations
   const correlations = calculateCorrelations(data, targetVariable, numericColumns);
@@ -107,10 +136,15 @@ export async function analyzeCorrelations(
     console.log(`Limiting to top ${maxResults} correlations as requested`);
   }
 
-  // Generate scatter plots for top 3 correlations
-  // IMPORTANT: For correlation/impact questions, target variable ALWAYS goes on Y-axis
-  // X-axis = factor variable (what we can change), Y-axis = target variable (what we want to improve)
-  const scatterCharts: ChartSpec[] = topCorrelations.slice(0, 3).map((corr, idx) => {
+  // Only generate charts if explicitly requested
+  let scatterCharts: ChartSpec[] = [];
+  let charts: ChartSpec[] = [];
+  
+  if (generateCharts) {
+    // Generate scatter plots for top 3 correlations using streaming computation
+    // IMPORTANT: For correlation/impact questions, target variable ALWAYS goes on Y-axis
+    // X-axis = factor variable (what we can change), Y-axis = target variable (what we want to improve)
+    const scatterChartsPromises = topCorrelations.slice(0, 3).map(async (corr, idx) => {
     // Helper function to convert Date objects to strings for schema validation
     const convertValueForSchema = (value: any): string | number | null => {
       if (value === null || value === undefined) return null;
@@ -120,153 +154,56 @@ export async function analyzeCorrelations(
       return String(value);
     };
 
-    let scatterData = data
-      .map((row) => {
-        const factorValue = toNumber(row[corr.variable]);
-        const targetValue = toNumber(row[targetVariable]);
-        const mappedRow: Record<string, any> = {
-          [corr.variable]: isNaN(factorValue) ? null : factorValue,
-          [targetVariable]: isNaN(targetValue) ? null : targetValue,
-        };
-        // Convert any Date objects in other columns to strings (in case they're included)
-        for (const [key, value] of Object.entries(row)) {
-          if (key !== corr.variable && key !== targetVariable && value instanceof Date) {
-            mappedRow[key] = convertValueForSchema(value);
-          }
-        }
-        return mappedRow;
-      })
-      .filter((row) => !isNaN(row[corr.variable]) && !isNaN(row[targetVariable]));
-    
-    // Apply smart downsampling for large datasets (max 2000 points)
-    const MAX_POINTS_CORRELATION = 2000;
-    if (scatterData.length > MAX_POINTS_CORRELATION) {
-      // Sort by x values for better sampling
-      scatterData = scatterData.sort((a, b) => {
-        const aVal = a[corr.variable];
-        const bVal = b[corr.variable];
-        return aVal - bVal;
-      });
-      
-      // Use stratified sampling: divide into buckets and sample evenly
-      const bucketSize = Math.ceil(scatterData.length / MAX_POINTS_CORRELATION);
-      const sampled: typeof scatterData = [];
-      
-      for (let i = 0; i < scatterData.length; i += bucketSize) {
-        const bucket = scatterData.slice(i, Math.min(i + bucketSize, scatterData.length));
-        const index = Math.floor(bucket.length / 2);
-        sampled.push(bucket[index]);
-      }
-      
-      scatterData = sampled.slice(0, MAX_POINTS_CORRELATION);
-      console.log(`   Correlation scatter chart ${idx}: Downsampled to ${scatterData.length} points`);
+    // Use streaming correlation computation for large datasets
+    // This computes correlation on full dataset but only sends sampled points for visualization
+    const chartTitle = `Generating correlation chart ${idx + 1}/3: ${corr.variable} vs ${targetVariable}`;
+    if (onProgress) {
+      onProgress(chartTitle, 0, data.length);
     }
+    console.log(`📊 ${chartTitle}`);
     
-    // For correlation analysis: X-axis = factor variable, Y-axis = target variable
-    // This ensures recommendations are about "how to change X to improve Y"
-    const xAxis = corr.variable;  // Factor we can change
-    const yAxis = targetVariable; // Target we want to improve
-    
-    // Calculate smart axis domains based on statistical measures (mean, median, mode, IQR)
-    let xDomain: [number, number] | undefined;
-    let yDomain: [number, number] | undefined;
-    
-    // Calculate trend line
-    let trendLine: Array<Record<string, number>> | undefined;
-    
-    if (scatterData.length > 0) {
-      // Extract x and y values first (needed for both domain calculation and regression)
-      const xValues = scatterData.map(row => row[xAxis]);
-      const yValues = scatterData.map(row => row[yAxis]);
-      
-      // Calculate min/max values (needed for fallback domain and trend line)
-      // Use loops to avoid stack overflow on large arrays
-      let xMin = xValues[0];
-      let xMax = xValues[0];
-      for (let i = 1; i < xValues.length; i++) {
-        if (xValues[i] < xMin) xMin = xValues[i];
-        if (xValues[i] > xMax) xMax = xValues[i];
-      }
-      let yMin = yValues[0];
-      let yMax = yValues[0];
-      for (let i = 1; i < yValues.length; i++) {
-        if (yValues[i] < yMin) yMin = yValues[i];
-        if (yValues[i] > yMax) yMax = yValues[i];
-      }
-      
-      // Use smart domain calculation based on statistical measures
-      const smartDomains = calculateSmartDomainsForChart(
-        scatterData,
-        xAxis,
-        yAxis,
-        undefined,
-        {
-          xOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
-          yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+    const chart = await generateStreamingCorrelationChart(
+      data,
+      targetVariable,
+      corr.variable,
+      (processed, total) => {
+        if (onProgress) {
+          const progressMessage = `Processing ${corr.variable} vs ${targetVariable}: ${processed.toLocaleString()}/${total.toLocaleString()} rows`;
+          onProgress(progressMessage, processed, total);
         }
-      );
-      
-      xDomain = smartDomains.xDomain;
-      yDomain = smartDomains.yDomain;
-      
-      // Fallback to simple min/max if smart domains failed
-      if (!xDomain || !yDomain) {
-        // Add 10% padding to the range (or 1 if range is 0)
-        const xRange = xMax - xMin;
-        const yRange = yMax - yMin;
-        const xPadding = xRange > 0 ? xRange * 0.1 : 1;
-        const yPadding = yRange > 0 ? yRange * 0.1 : 1;
-        
-        // Only set domains if values are finite
-        if (isFinite(xMin) && isFinite(xMax)) {
-          xDomain = [xMin - xPadding, xMax + xPadding];
-        }
-        if (isFinite(yMin) && isFinite(yMax)) {
-          yDomain = [yMin - yPadding, yMax + yPadding];
+        if (idx === 0) { // Only log progress for first chart to avoid spam
+          console.log(`   Progress: ${processed}/${total} rows processed`);
         }
       }
-      
-      // Calculate linear regression for trend line
-      const regression = linearRegression(xValues, yValues);
-      
-      if (regression) {
-        // Calculate trend line endpoints using the calculated domain (or actual min/max if domain not set)
-        const xMinForLine = xDomain ? xDomain[0] : xMin;
-        const xMaxForLine = xDomain ? xDomain[1] : xMax;
-        const yAtMin = regression.slope * xMinForLine + regression.intercept;
-        const yAtMax = regression.slope * xMaxForLine + regression.intercept;
-        
-        trendLine = [
-          { [xAxis]: xMinForLine, [yAxis]: yAtMin },
-          { [xAxis]: xMaxForLine, [yAxis]: yAtMax },
-        ];
-      }
+    );
+    
+    if (onProgress) {
+      onProgress(`Completed correlation chart ${idx + 1}/3`, data.length, data.length);
     }
-    
-    console.log(`Scatter chart ${idx}: ${corr.variable} (X-axis, factor) vs ${targetVariable} (Y-axis, target), data points: ${scatterData.length}${xDomain ? `, xDomain: [${xDomain[0].toFixed(1)}, ${xDomain[1].toFixed(1)}]` : ''}${yDomain ? `, yDomain: [${yDomain[0].toFixed(1)}, ${yDomain[1].toFixed(1)}]` : ''}${trendLine ? ', trend line: yes' : ', trend line: no'}`);
+
+    // Override correlation with the one from topCorrelations (already computed)
+    // This ensures consistency with the correlation ranking
+    const metadata = (chart as any)._correlationMetadata || {};
+    console.log(`Scatter chart ${idx}: ${corr.variable} vs ${targetVariable}, correlation: ${corr.correlation.toFixed(2)}, total pairs: ${corr.nPairs}, visualization points: ${chart.data?.length || 0}`);
     
     return {
-      type: 'scatter',
+      ...chart,
       title: `${corr.variable} vs ${targetVariable} (r=${corr.correlation.toFixed(2)})`,
-      x: xAxis,  // Factor variable (what we can change)
-      y: yAxis,  // Target variable (what we want to improve)
-      xLabel: xAxis,
-      yLabel: yAxis,
-      data: scatterData,
-      ...(xDomain && { xDomain }),
-      ...(yDomain && { yDomain }),
-      ...(trendLine && { trendLine }),
-      // Mark this as a correlation chart for insight generation
-      _isCorrelationChart: true,
-      _targetVariable: targetVariable,
-      _factorVariable: corr.variable,
+      _correlationMetadata: {
+        ...metadata,
+        correlation: corr.correlation, // Use correlation from ranking
+        nPairs: corr.nPairs || metadata.nPairs,
+      },
     };
   });
-
-  // Only add bar chart if we have multiple correlations
-  const charts: ChartSpec[] = [...scatterCharts];
   
-  if (topCorrelations.length > 1) {
+    // Wait for all charts to be generated
+    scatterCharts = await Promise.all(scatterChartsPromises);
+
+    // Only add bar chart if we have multiple correlations
+    charts = [...scatterCharts];
+    
+    if (topCorrelations.length > 1) {
     // IMPORTANT: Do NOT modify correlation signs - show actual positive/negative values
     console.log('=== BAR CHART CORRELATION VALUES DEBUG ===');
     topCorrelations.forEach((corr, idx) => {
@@ -309,10 +246,14 @@ export async function analyzeCorrelations(
     });
     console.log('=== END FINAL BAR CHART DEBUG ===');
     
-    charts.push(correlationBarChart);
-  }
+      charts.push(correlationBarChart);
+    }
 
-  console.log('Total charts generated:', charts.length);
+    console.log('Total charts generated:', charts.length);
+  } else {
+    console.log('Charts generation skipped (user did not explicitly request charts)');
+  }
+  
   console.log('=== END CORRELATION DEBUG ===');
 
   // Enrich each chart with keyInsight and recommendation
@@ -348,10 +289,17 @@ export async function analyzeCorrelations(
   // Pass topCorrelations (same as used in charts) to ensure insights match what's displayed
   const insights = await generateCorrelationInsights(targetVariable, topCorrelations, data, summaryStub, filter);
 
-  return { charts, insights };
+  const result = { charts, insights };
+
+  // Cache the result if sessionId is provided
+  if (sessionId) {
+    await cacheCorrelation(sessionId, targetVariable, numericColumns, result);
+  }
+
+  return result;
 }
 
-function calculateCorrelations(
+export function calculateCorrelations(
   data: Record<string, any>[],
   targetVariable: string,
   numericColumns: string[]

@@ -122,7 +122,7 @@ class UploadQueue {
       const { generateAISuggestions } = await import('../lib/suggestionGenerator.js');
       const { createChatDocument, generateColumnStatistics, getChatBySessionIdEfficient, updateChatDocument, addMessagesBySessionId } = await import('../models/chat.model.js');
       const { saveChartsToBlob } = await import('../lib/blobStorage.js');
-      const { chunkData, clearVectorStore } = await import('../lib/ragService.js');
+      const { chunkData, clearVectorStore, generateChunkEmbeddings } = await import('../lib/ragService.js');
       const queryCache = (await import('../lib/cache.js')).default;
 
       // Check if file should use large file processing
@@ -279,13 +279,20 @@ class UploadQueue {
         };
       });
 
-      // Step 6: Initialize RAG
+      // Step 6: Initialize RAG (with embedding generation)
       job.progress = 75;
       try {
-        clearVectorStore(job.sessionId);
-        chunkData(data, summary, job.sessionId);
+        console.log('📊 Initializing RAG for session:', job.sessionId);
+        await clearVectorStore(job.sessionId);
+        await chunkData(data, summary, job.sessionId);
+        // Generate embeddings in background (don't block upload completion)
+        generateChunkEmbeddings(job.sessionId).catch(err => {
+          console.error('Failed to generate embeddings (non-blocking):', err);
+        });
+        console.log('✅ RAG initialization started');
       } catch (ragError) {
-        // Silently continue without RAG
+        console.error('⚠️ RAG initialization failed (non-blocking):', ragError);
+        // Continue without RAG - this is optional
       }
 
       // Step 7: Generate column statistics

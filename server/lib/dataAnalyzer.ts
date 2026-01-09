@@ -9,6 +9,7 @@ import { parseUserQuery } from './queryParser.js';
 import { applyQueryTransformations } from './dataTransform.js';
 import type { ParsedQuery } from '../shared/queryTypes.js';
 import { calculateSmartDomainsForChart } from './axisScaling.js';
+import { findMatchingColumn } from './agents/utils/columnMatcher.js';
 
 export async function analyzeUpload(
   data: Record<string, any>[],
@@ -1355,6 +1356,16 @@ export async function answerQuestion(
       const wantsAscendingGeneral = /\bascending|lowest\s+to\s+highest|low\s+to\s+high|smallest\s+to\s+largest|smallest\s+to\s+biggest\b/i.test(question);
       const sortOrderGeneral = wantsDescendingGeneral ? 'descending' : wantsAscendingGeneral ? 'ascending' : undefined; // Only set if user explicitly requested
       
+      // Send progress update for correlation computation
+      if (onThinkingStep) {
+        onThinkingStep({
+          step: `Computing correlations for ${targetCol}...`,
+          status: 'active',
+          timestamp: Date.now(),
+          details: `Analyzing ${workingData.length.toLocaleString()} rows`,
+        });
+      }
+
       const { charts, insights } = await analyzeCorrelations(
         workingData,
         targetCol,
@@ -1362,8 +1373,28 @@ export async function answerQuestion(
         correlationFilter,
         sortOrderGeneral,
         chatInsights,
-        undefined // No limit for legacy dataAnalyzer
+        undefined, // No limit for legacy dataAnalyzer
+        (message, processed, total) => {
+          // Send progress updates via thinking steps
+          if (onThinkingStep) {
+            onThinkingStep({
+              step: message,
+              status: processed && total && processed < total ? 'active' : 'completed',
+              timestamp: Date.now(),
+              details: processed && total ? `${processed.toLocaleString()}/${total.toLocaleString()} rows` : undefined,
+            });
+          }
+        },
+        sessionId // Pass sessionId for caching
       );
+
+      if (onThinkingStep) {
+        onThinkingStep({
+          step: `Correlation analysis complete`,
+          status: 'completed',
+          timestamp: Date.now(),
+        });
+      }
 
       // Fallback: if for any reason charts came back without per-chart insights,
       // enrich them here so the UI always gets keyInsight.
@@ -1921,6 +1952,196 @@ Examples:
   }
 }
 
+/**
+ * Handle aggregation queries with category filters directly using regex
+ * This performs the data operation immediately without asking AI
+ */
+async function handleAggregationWithCategoryDirect(
+  question: string,
+  data: Record<string, any>[],
+  summary: DataSummary
+): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[] } | null> {
+  const questionLower = question.toLowerCase();
+  
+  // Detect aggregation with category patterns
+  const isAggregationQuery = /\b(aggregated?\s+(?:column\s+name\s+)?value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s]+/i.test(question) ||
+                             /\b(?:what\s+is\s+)?(?:the\s+)?(?:aggregated?\s+(?:column\s+name\s+)?value|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s]+/i.test(question) ||
+                             /\b(?:aggregated?\s+value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?column\s+category\s+[\w\s]+/i.test(question);
+  
+  if (!isAggregationQuery) {
+    return null;
+  }
+  
+  console.log('📊 Detected aggregation with category query - handling directly with regex');
+  
+  const allColumns = summary.columns.map(c => c.name);
+  const numericColumns = summary.numericColumns || [];
+  
+  // Extract aggregation column name using regex
+  // Patterns: "aggregated column name X", "aggregated value for column X", "total for X"
+  let aggregateColumn: string | null = null;
+  const aggregateColumnPatterns = [
+    /aggregated?\s+column\s+name\s+(\w+)/i,
+    /aggregated?\s+value\s+(?:for|of|in)\s+(?:the\s+)?column\s+(\w+)/i,
+    /(?:total|sum)\s+(?:value\s+)?(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(\w+)/i,
+  ];
+  
+  for (const pattern of aggregateColumnPatterns) {
+    const match = question.match(pattern);
+    if (match && match[1]) {
+      const colName = match[1].trim();
+      const matched = findMatchingColumn(colName, numericColumns);
+      if (matched) {
+        aggregateColumn = matched;
+        console.log(`   ✅ Extracted aggregation column: "${aggregateColumn}"`);
+        break;
+      }
+    }
+  }
+  
+  // If not found, try to find "total" or first numeric column
+  if (!aggregateColumn) {
+    if (numericColumns.includes('total')) {
+      aggregateColumn = 'total';
+    } else if (numericColumns.length > 0) {
+      aggregateColumn = numericColumns[0];
+    }
+    console.log(`   ✅ Using default aggregation column: "${aggregateColumn}"`);
+  }
+  
+  // Extract category value using regex
+  // Patterns: "for the column category X", "for category X", "for X"
+  let categoryValue: string | null = null;
+  const categoryPatterns = [
+    /(?:for|of|in)\s+(?:the\s+)?column\s+category\s+(.+?)(?:\s*$|\s+category|\s+column)/i,
+    /(?:for|of|in)\s+(?:the\s+)?category\s+(.+?)(?:\s*$|\s+category|\s+column|\s+value)/i,
+    /(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?(.+?)$/i,
+  ];
+  
+  for (const pattern of categoryPatterns) {
+    const match = question.match(pattern);
+    if (match && match[1]) {
+      categoryValue = match[1].trim();
+      // Remove trailing words that might be part of the sentence
+      categoryValue = categoryValue.replace(/\s+(category|column|value|for|of|in|\?)$/i, '').trim();
+      // Handle cases like "men's fashion" - preserve apostrophes and spaces
+      if (categoryValue && categoryValue.length > 0) {
+        console.log(`   ✅ Extracted category value: "${categoryValue}"`);
+        break;
+      }
+    }
+  }
+  
+  if (!categoryValue) {
+    console.log('   ❌ Could not extract category value');
+    return null; // Let AI handle it
+  }
+  
+  if (!aggregateColumn) {
+    console.log('   ❌ Could not find aggregation column');
+    return null; // Let AI handle it
+  }
+  
+  // Find category column
+  let categoryColumn: string | null = null;
+  const categoryColumnNames = ['category', 'Category', 'product_category', 'Product Category', 'product_category_name', 'cat'];
+  for (const colName of categoryColumnNames) {
+    const matched = findMatchingColumn(colName, allColumns);
+    if (matched) {
+      categoryColumn = matched;
+      break;
+    }
+  }
+  
+  // If not found, try to find any non-numeric column that contains the category value
+  if (!categoryColumn) {
+    for (const col of allColumns) {
+      if (!numericColumns.includes(col) && !summary.dateColumns.includes(col)) {
+        const sampleValues = data.slice(0, 100).map(row => String(row[col] || '').toLowerCase());
+        if (sampleValues.some(val => val.includes(categoryValue!.toLowerCase()) || categoryValue!.toLowerCase().includes(val))) {
+          categoryColumn = col;
+          break;
+        }
+      }
+    }
+  }
+  
+  if (!categoryColumn) {
+    return {
+      answer: `I couldn't find a category column in your dataset. Available columns: ${allColumns.slice(0, 10).join(', ')}${allColumns.length > 10 ? '...' : ''}`
+    };
+  }
+  
+  console.log(`   📊 Filtering by category: "${categoryColumn}" = "${categoryValue}"`);
+  console.log(`   📊 Aggregating column: "${aggregateColumn}"`);
+  
+  // Filter data by category
+  const filteredData = data.filter(row => {
+    const rowCategory = String(row[categoryColumn!] || '').toLowerCase().trim();
+    const targetCategory = categoryValue!.toLowerCase().trim();
+    return rowCategory === targetCategory || rowCategory.includes(targetCategory) || targetCategory.includes(rowCategory);
+  });
+  
+  if (filteredData.length === 0) {
+    return {
+      answer: `I couldn't find any data for the category "${categoryValue}" in the "${categoryColumn}" column. Please check that the category name is correct.`
+    };
+  }
+  
+  // Calculate aggregation
+  const values = filteredData
+    .map(row => {
+      const val = row[aggregateColumn!];
+      if (val === null || val === undefined || val === '') return null;
+      if (typeof val === 'number') return isNaN(val) ? null : val;
+      const cleaned = String(val).replace(/[%,]/g, '').trim();
+      const parsed = Number(cleaned);
+      return isNaN(parsed) ? null : parsed;
+    })
+    .filter(v => v !== null) as number[];
+  
+  if (values.length === 0) {
+    return {
+      answer: `I found ${filteredData.length} records for category "${categoryValue}", but the ${aggregateColumn} column has no numeric values.`
+    };
+  }
+  
+  const sum = values.reduce((a, b) => a + b, 0);
+  const avg = sum / values.length;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const count = values.length;
+  
+  const answer = `The aggregated value for the category "${categoryValue}" is:\n\n` +
+    `- Total (Sum): ${sum.toFixed(2)}\n` +
+    `- Average: ${avg.toFixed(2)}\n` +
+    `- Minimum: ${min.toFixed(2)}\n` +
+    `- Maximum: ${max.toFixed(2)}\n` +
+    `- Count: ${count} records`;
+  
+  console.log(`   ✅ Calculated aggregation: Sum=${sum.toFixed(2)}, Avg=${avg.toFixed(2)}, Count=${count}`);
+  
+  return {
+    answer,
+  };
+}
+
+/**
+ * Check if user explicitly requested charts/visualizations
+ */
+function isExplicitChartRequest(question: string): boolean {
+  const lower = question.toLowerCase();
+  const chartKeywords = [
+    /\b(show|display|create|generate|make|draw|plot|graph)\s+(me\s+)?(a\s+)?(chart|graph|plot|visualization|visual|diagram|figure)/i,
+    /\b(chart|graph|plot|visualization|visual)\s+(of|for|showing|with)/i,
+    /\b(show|display|create|generate|make|draw)\s+(me\s+)?(a\s+)?(bar|line|scatter|pie|area)\s+(chart|graph|plot)/i,
+    /\b(visualize|visualization|visual)\s+/i,
+    /\b(can you|please)\s+(show|display|create|generate|make|draw)\s+(me\s+)?(a\s+)?(chart|graph|plot)/i,
+  ];
+  
+  return chartKeywords.some(pattern => pattern.test(lower));
+}
+
 export async function generateGeneralAnswer(
   data: Record<string, any>[],
   question: string,
@@ -1932,6 +2153,15 @@ export async function generateGeneralAnswer(
   chatInsights?: Insight[],
   requiredColumns?: string[]
 ): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[] }> {
+  // CRITICAL: Handle aggregation queries with category filters directly using regex
+  // These are data operations that should be performed immediately, not passed to AI
+  const aggregationWithCategoryResult = await handleAggregationWithCategoryDirect(question, data, summary);
+  if (aggregationWithCategoryResult) {
+    return aggregationWithCategoryResult;
+  }
+  
+  // Check if user explicitly requested charts
+  const wantsCharts = isExplicitChartRequest(question);
   // Detect explicit axis hints for any chart request (including secondary Y-axis)
   const parseExplicitAxes = (q: string): { x?: string; y?: string; y2?: string } => {
     const result: { x?: string; y?: string; y2?: string } = {};
@@ -3162,6 +3392,27 @@ Just respond conversationally - no data analysis needed here.`;
   
   const prompt = `You are a friendly, conversational data analyst assistant. You're having a natural, flowing conversation with the user about their data. Be warm, helpful, and engaging - like talking to a colleague over coffee.
 
+CRITICAL DATA OPERATION HANDLING - EXECUTE IMMEDIATELY:
+- If the user asks for "aggregated value for category X", "total for category X", "aggregated column name value for the column category X", "what is the total value for men's fashion category", or similar aggregation queries with category filters:
+  * These are DATA OPERATIONS - execute them directly, DO NOT ask for clarification
+  * Extract the category value (e.g., "men's fashion") from patterns like:
+    - "for the column category X"
+    - "for category X"  
+    - "for X category"
+    - "for X"
+  * Extract the aggregation column name if specified (e.g., "total", "qty_ordered"), otherwise default to "total" or first numeric column
+  * Find the category column automatically (look for "category", "Category", "product_category", etc.)
+  * Filter the data by the category value
+  * Calculate sum, average, min, max, and count for the aggregation column
+  * Return the results directly in a clear format like:
+    "The aggregated value for the category '[category]' is:
+    - Total (Sum): X.XX
+    - Average: X.XX
+    - Minimum: X.XX
+    - Maximum: X.XX
+    - Count: X records"
+  * DO NOT ask "Could you clarify..." or "What kind of statistical analysis..." - just perform the operation
+
 CURRENT QUESTION: ${question}
 
 ${historyContext ? `CONVERSATION HISTORY:\n${historyContext}\n\nIMPORTANT - Use this history to:
@@ -3226,6 +3477,15 @@ Output JSON:
       {
         role: 'system',
         content: `You are a friendly, conversational data analyst assistant. You're having a natural, flowing conversation with the user about their data.
+
+CRITICAL DATA OPERATION RULES:
+- If user asks for "aggregated value for category X", "total for category X", "aggregated column name value for the column category X", or similar:
+  * These are DATA OPERATIONS - execute them directly using regex to extract:
+    - Category value from "for the column category X", "for category X", or "for X"
+    - Aggregation column from "aggregated column name X" or default to "total"
+  * Filter data by category and calculate sum, average, min, max, count
+  * Return results immediately - DO NOT ask for clarification
+  * DO NOT say "Could you clarify..." or "What kind of statistical analysis..."
         
 CRITICAL CONVERSATION RULES:
 - Be NATURALLY conversational - like talking to a friend, not a robot
@@ -3261,7 +3521,8 @@ TECHNICAL RULES:
 
     let processedCharts: ChartSpec[] | undefined;
 
-    if (result.charts && Array.isArray(result.charts)) {
+    // Only include charts if user explicitly requested them
+    if (wantsCharts && result.charts && Array.isArray(result.charts)) {
       // Check if user explicitly wants pie chart across months/dates
       const questionLower = question.toLowerCase();
       const wantsPieAcrossMonths = /\bpie\s+chart.*(?:across|by|for).*(?:month|date|time)\b/i.test(question) ||

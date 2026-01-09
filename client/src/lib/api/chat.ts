@@ -70,7 +70,6 @@ export interface StreamChatCallbacks {
 export async function streamChatRequest(
   sessionId: string,
   message: string,
-  chatHistory: Array<{ role: string; content: string }>,
   callbacks: StreamChatCallbacks,
   signal?: AbortSignal,
   targetTimestamp?: number,
@@ -94,7 +93,6 @@ export async function streamChatRequest(
       body: JSON.stringify({
         sessionId,
         message,
-        chatHistory,
         targetTimestamp,
         ...(mode && { mode }), // Only include mode if provided
       }),
@@ -241,7 +239,6 @@ export interface StreamDataOpsCallbacks {
 export async function streamDataOpsChatRequest(
   sessionId: string,
   message: string,
-  chatHistory: Array<{ role: string; content: string }>,
   callbacks: StreamDataOpsCallbacks,
   signal?: AbortSignal,
   targetTimestamp?: number,
@@ -265,7 +262,6 @@ export async function streamDataOpsChatRequest(
       body: JSON.stringify({
         sessionId,
         message,
-        chatHistory,
         targetTimestamp,
         dataOpsMode,
       }),

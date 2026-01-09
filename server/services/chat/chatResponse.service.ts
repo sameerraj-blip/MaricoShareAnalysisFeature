@@ -20,7 +20,8 @@ export async function enrichCharts(
     return [];
   }
 
-  const MAX_CHART_DATA_POINTS = 50000; // Limit to prevent memory issues
+  const MAX_CHART_DATA_POINTS = 50000; // Default limit to prevent memory issues
+  const MAX_CORRELATION_POINTS = 300000; // Higher limit for correlation scatter charts
 
   try {
     // Process charts sequentially to avoid memory spikes from parallel processing
@@ -31,15 +32,26 @@ export async function enrichCharts(
         let dataForChart = c.data && Array.isArray(c.data)
           ? c.data
           : processChartData(chatDocument.rawData, c);
-        
-        // Limit data size for memory efficiency
-        if (dataForChart.length > MAX_CHART_DATA_POINTS) {
-          console.log(`⚠️ Chart "${c.title}" has ${dataForChart.length} data points, limiting to ${MAX_CHART_DATA_POINTS}`);
-          if (c.type === 'line' || c.type === 'area') {
-            const step = Math.ceil(dataForChart.length / MAX_CHART_DATA_POINTS);
-            dataForChart = dataForChart.filter((_: any, idx: number) => idx % step === 0).slice(0, MAX_CHART_DATA_POINTS);
+
+        // Limit data size for memory efficiency.
+        // For general charts, cap at MAX_CHART_DATA_POINTS.
+        // For correlation scatter charts (marked with _isCorrelationChart),
+        // allow a much higher cap so users can see more points.
+        const isCorrelationChart = Boolean((c as any)._isCollisionChart || (c as any)._isCorrelationChart);
+        const effectiveMax =
+          isCorrelationChart && chatDocument?.dataSummary?.rowCount
+            ? Math.max(MAX_CHART_DATA_POINTS, Math.min(MAX_CORRELATION_POINTS, chatDocument.dataSummary.rowCount))
+            : MAX_CHART_DATA_POINTS;
+
+        if (dataForChart.length > effectiveMax) {
+          console.log(
+            `⚠️ Chart "${c.title}" has ${dataForChart.length} data points, limiting to ${effectiveMax}`
+          );
+          if (c.type === "line" || c.type === "area") {
+            const step = Math.ceil(dataForChart.length / effectiveMax);
+            dataForChart = dataForChart.filter((_: any, idx: number) => idx % step === 0).slice(0, effectiveMax);
           } else {
-            dataForChart = dataForChart.slice(0, MAX_CHART_DATA_POINTS);
+            dataForChart = dataForChart.slice(0, effectiveMax);
           }
         }
         

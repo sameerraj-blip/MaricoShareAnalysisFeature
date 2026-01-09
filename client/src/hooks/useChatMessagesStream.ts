@@ -6,21 +6,19 @@ interface UseChatMessagesStreamProps {
   sessionId: string | null;
   onNewMessages: (messages: Message[]) => void;
   enabled?: boolean;
+  onComplete?: () => void;
 }
 
 export const useChatMessagesStream = ({
   sessionId,
   onNewMessages,
   enabled = true,
+  onComplete,
 }: UseChatMessagesStreamProps) => {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
-  const enabledRef = useRef(enabled);
   const maxReconnectAttempts = 5;
-  
-  // Keep enabled ref in sync
-  enabledRef.current = enabled;
 
   useEffect(() => {
     if (!sessionId || !enabled) {
@@ -56,46 +54,17 @@ export const useChatMessagesStream = ({
       const eventSource = new EventSource(sseUrl);
       eventSourceRef.current = eventSource;
 
-      // Track if connection is closed to prevent processing events after closure
-      let connectionClosed = false;
-
       eventSource.onopen = () => {
         reconnectAttemptsRef.current = 0;
-        connectionClosed = false;
       };
 
-      // Track if we've received init to prevent duplicate processing
-      let initReceived = false;
-      
       eventSource.addEventListener('init', (event) => {
-        // Ignore if connection already closed
-        if (connectionClosed) {
-          return;
-        }
-
         try {
           const data = JSON.parse(event.data);
           // Initial load - send initial messages if available
-          // This helps sync messages when SSE first connects
-          // Only process init once to avoid duplicates
-          if (!initReceived && data.messages && Array.isArray(data.messages)) {
-            initReceived = true;
-            
-            // Process messages if available
-            if (data.messages.length > 0) {
-              onNewMessages(data.messages);
-            }
-            
-            // CRITICAL: Close connection immediately after receiving init event
-            // The backend sends init once for initial analysis and then closes the connection
-            // We must close on client side immediately to prevent receiving duplicate events
-            // This breaks the SSE connection as soon as we get the initial response
-            console.log('✅ Initial response received via init event - closing SSE connection immediately');
-            connectionClosed = true;
-            if (eventSourceRef.current) {
-              eventSourceRef.current.close();
-              eventSourceRef.current = null;
-            }
+          if (data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
+            console.log(`📥 SSE init: Received ${data.messages.length} initial messages`);
+            onNewMessages(data.messages);
           }
         } catch (err) {
           console.error('Failed to parse SSE init data:', err);
@@ -103,14 +72,10 @@ export const useChatMessagesStream = ({
       });
 
       eventSource.addEventListener('messages', (event) => {
-        // Ignore if connection already closed
-        if (connectionClosed) {
-          return;
-        }
-
         try {
           const data = JSON.parse(event.data);
           if (data.messages && Array.isArray(data.messages)) {
+            console.log(`📥 SSE messages: Received ${data.messages.length} new messages`);
             onNewMessages(data.messages);
           }
           reconnectAttemptsRef.current = 0;
@@ -119,18 +84,25 @@ export const useChatMessagesStream = ({
         }
       });
 
-      // Handle 'complete' event - connection should already be closed, but close it if not
-      eventSource.addEventListener('complete', () => {
-        // Ignore if connection already closed
-        if (connectionClosed) {
-          return;
-        }
-
-        console.log('✅ Initial analysis complete event received - closing SSE connection');
-        connectionClosed = true;
+      // Handle 'done' event - close connection after receiving one response
+      eventSource.addEventListener('done', () => {
+        console.log('✅ Chat response complete - closing SSE connection');
         if (eventSourceRef.current) {
           eventSourceRef.current.close();
           eventSourceRef.current = null;
+        }
+      });
+
+      // Handle 'complete' event - close connection after initial analysis
+      eventSource.addEventListener('complete', () => {
+        console.log('✅ Initial analysis complete - closing SSE connection');
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+        // Call onComplete callback if provided
+        if (onComplete) {
+          onComplete();
         }
       });
 
@@ -139,27 +111,31 @@ export const useChatMessagesStream = ({
       });
 
       eventSource.onerror = (error) => {
-        // Don't reconnect if the connection is disabled
-        if (!enabledRef.current) {
-          eventSource.close();
+        // Check if connection was closed normally (readyState 2 = CLOSED)
+        if (eventSource.readyState === EventSource.CLOSED) {
+          console.log('✅ SSE connection closed normally');
           eventSourceRef.current = null;
           return;
         }
         
+        console.warn('⚠️ SSE connection error, readyState:', eventSource.readyState);
         eventSource.close();
         eventSourceRef.current = null;
 
-        // Attempt to reconnect with exponential backoff (only if still enabled)
-        if (enabledRef.current && reconnectAttemptsRef.current < maxReconnectAttempts) {
+        // Only attempt to reconnect if enabled and we haven't exceeded max attempts
+        // Don't reconnect if connection was closed normally (after initial analysis)
+        if (enabled && reconnectAttemptsRef.current < maxReconnectAttempts) {
           const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
           reconnectAttemptsRef.current++;
+          console.log(`🔄 SSE: Attempting reconnect ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${delay}ms`);
           
           reconnectTimeoutRef.current = setTimeout(() => {
-            // Check again if still enabled before reconnecting
-            if (enabledRef.current) {
+            if (enabled) { // Check again before reconnecting
               connectSSE();
             }
           }, delay);
+        } else {
+          console.log('🚫 SSE: Not reconnecting (disabled or max attempts reached)');
         }
       };
     };
@@ -178,6 +154,6 @@ export const useChatMessagesStream = ({
         eventSourceRef.current = null;
       }
     };
-  }, [sessionId, enabled, onNewMessages]);
+  }, [sessionId, enabled, onNewMessages, onComplete]);
 };
 

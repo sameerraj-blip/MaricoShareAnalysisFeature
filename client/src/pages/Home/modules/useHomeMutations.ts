@@ -22,6 +22,7 @@ interface UseHomeMutationsProps {
   setTotalColumns: (columns: number) => void;
   setMessages: (messages: Message[] | ((prev: Message[]) => Message[])) => void;
   setSuggestions?: (suggestions: string[]) => void;
+  setIsLargeFileLoading?: (isLoading: boolean) => void;
 }
 
 export const useHomeMutations = ({
@@ -40,6 +41,7 @@ export const useHomeMutations = ({
   setTotalColumns,
   setMessages,
   setSuggestions,
+  setIsLargeFileLoading,
 }: UseHomeMutationsProps) => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -59,20 +61,23 @@ export const useHomeMutations = ({
   // This preserves formatting like **bold** for headings
 
   const uploadMutation = useMutation({
-    mutationFn: async (file: File) => {
+    mutationFn: async ({ file, fileSize }: { file: File; fileSize: number }) => {
+      // Store fileSize in a way we can access it in onSuccess
+      (file as any)._fileSize = fileSize;
       return await uploadFile<any>('/api/upload', file);
     },
-    onSuccess: async (data) => {
+    onSuccess: async (data, variables) => {
       console.log("upload response from the backend", data);
       
       // Handle new async format (202 response with jobId and sessionId)
       if (data.jobId && data.sessionId && data.status === 'processing') {
         setSessionId(data.sessionId);
         
-        // Don't show any message here - we'll show a loading state instead
-        // The initial analysis message will come from SSE when processing completes
-        // Clear any existing messages to show clean loading state
-        setMessages([]);
+        // Show loading state for ALL files until initial analysis is received
+        if (setIsLargeFileLoading) {
+          setIsLargeFileLoading(true);
+        }
+        setMessages([]); // Clear messages to show loading state
         
         // Fetch session details from placeholder (now it exists!)
         // We only fetch to set metadata, NOT to show the initial message
@@ -101,11 +106,14 @@ export const useHomeMutations = ({
           }
         } catch (sessionError) {
           console.error('Failed to fetch session details:', sessionError);
+          // Processing message is already shown above, so user still sees feedback
           // The SSE stream will pick up the final message when processing completes
         }
         
-        // Don't show toast - we'll show a loading state in the UI instead
-        // The initial analysis will come from SSE when processing completes
+        toast({
+          title: 'Upload Accepted',
+          description: 'Your file is being processed. Analysis will be available shortly.',
+        });
       } 
       // Handle old synchronous format (backward compatibility)
       else if (data.sessionId && data.summary) {
@@ -149,6 +157,10 @@ export const useHomeMutations = ({
       }
     },
     onError: (error) => {
+      // Clear large file loading state on error
+      if (setIsLargeFileLoading) {
+        setIsLargeFileLoading(false);
+      }
       toast({
         title: 'Upload Failed',
         description: error instanceof Error ? error.message : 'Failed to upload file',
@@ -223,19 +235,10 @@ export const useHomeMutations = ({
         setThinkingTargetTimestamp(null);
       }
       
-      // Send full chat history for context (last 15 messages to maintain conversation flow)
-      // Truncate long messages to reduce token usage
-      const chatHistory = currentMessages.slice(-15).map(msg => ({
-        role: msg.role,
-        content: msg.content.length > 500 
-          ? msg.content.substring(0, 500) + '...' 
-          : msg.content,
-      }));
-      
+      // Backend will fetch last 15 messages from Cosmos DB
       console.log('📤 Request payload:', {
         sessionId,
         message,
-        chatHistoryLength: chatHistory.length,
       });
       
       // Route to Data Ops, Modeling, or regular chat based on mode
@@ -246,7 +249,6 @@ export const useHomeMutations = ({
           streamDataOpsChatRequest(
             sessionId,
             message,
-            chatHistory,
             {
               onThinkingStep: (step: ThinkingStep) => {
                 console.log('🧠 Data Ops thinking step received:', step);
@@ -322,7 +324,6 @@ export const useHomeMutations = ({
         streamChatRequest(
           sessionId,
           message,
-          chatHistory,
           {
             onThinkingStep: (step: ThinkingStep) => {
               console.log('🧠 Thinking step received:', step);
@@ -409,7 +410,15 @@ export const useHomeMutations = ({
       };
       
       console.log('💬 Adding assistant message to chat:', assistantMessage.content.substring(0, 50));
+      console.log('📊 Message includes:', {
+        hasCharts: !!assistantMessage.charts?.length,
+        hasInsights: !!assistantMessage.insights?.length,
+        contentLength: assistantMessage.content?.length || 0
+      });
+      
       setMessages((prev) => {
+        // Simply append the message - no deduplication, no cleaning
+        // Messages are already saved to CosmosDB by the backend during processing
         const updated = [...prev, assistantMessage];
         console.log('📋 Total messages now:', updated.length);
         return updated;

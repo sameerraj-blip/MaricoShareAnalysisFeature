@@ -124,6 +124,9 @@ Examples with context:
 - Previous: "What's the correlation?" → Current: "show me a chart" → Route to "analysis"
 - Previous: "Add a column X" → Current: "ok do it" → Route to "dataOps"
 - Previous: "Which model is best?" → Current: "try the random forest" → Route to "modeling"
+- Previous Assistant: "Would you like me to create a chart to visualize these relationships?" → Current: "yes" → Route to "analysis" (user confirming chart suggestion, NOT modeling)
+- Previous Assistant: "I can create a chart to visualize..." → Current: "yes" → Route to "analysis" (chart suggestion confirmation)
+- Previous: "Does discount_amount impact total?" → Assistant: "Would you like me to create a chart?" → Current: "yes" → Route to "analysis" (confirming chart, NOT modeling)
 
 OUTPUT FORMAT (JSON only, no markdown):
 {

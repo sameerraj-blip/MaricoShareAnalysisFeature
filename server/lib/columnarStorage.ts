@@ -395,6 +395,96 @@ export class ColumnarStorageService {
   }
 
   /**
+   * Get all rows from table (no limit)
+   * Use with caution for very large datasets - consider using streamQuery instead
+   */
+  async getAllRows(
+    tableName: string = 'data',
+    columns?: string[]
+  ): Promise<Record<string, any>[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized. Call initialize() first.');
+    }
+
+    const columnsStr = columns && columns.length > 0
+      ? columns.map(col => `"${col.replace(/"/g, '""')}"`).join(', ')
+      : '*';
+
+    return new Promise((resolve, reject) => {
+      const conn = this.db!.connect();
+      
+      conn.all(
+        `SELECT ${columnsStr} FROM ${tableName}`,
+        (err: Error | null, rows: any[]) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows as Record<string, any>[]);
+          }
+        }
+      );
+    });
+  }
+
+  /**
+   * Get row count for a table
+   */
+  async getRowCount(tableName: string = 'data'): Promise<number> {
+    if (!this.db) {
+      throw new Error('Database not initialized. Call initialize() first.');
+    }
+
+    return new Promise((resolve, reject) => {
+      const conn = this.db!.connect();
+      
+      conn.all(
+        `SELECT COUNT(*) as count FROM ${tableName}`,
+        (err: Error | null, rows: any[]) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows[0]?.count || 0);
+          }
+        }
+      );
+    });
+  }
+
+  /**
+   * Stream query results in chunks for memory-efficient processing
+   * Useful for very large datasets (300k+ rows)
+   */
+  async *streamQuery<T = any>(
+    query: string,
+    chunkSize: number = 50000,
+    tableName: string = 'data'
+  ): AsyncGenerator<T[], void, unknown> {
+    if (!this.db) {
+      throw new Error('Database not initialized. Call initialize() first.');
+    }
+
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      // Add LIMIT and OFFSET to the query
+      const paginatedQuery = query.includes('LIMIT') 
+        ? query.replace(/LIMIT\s+\d+/i, `LIMIT ${chunkSize}`)
+        : `${query} LIMIT ${chunkSize} OFFSET ${offset}`;
+      
+      const chunk = await this.executeQuery<T>(paginatedQuery);
+      
+      if (chunk.length === 0) {
+        hasMore = false;
+      } else {
+        yield chunk;
+        offset += chunkSize;
+        hasMore = chunk.length === chunkSize;
+      }
+    }
+  }
+
+  /**
    * Execute aggregation query
    */
   async executeQuery<T = any>(query: string): Promise<T[]> {

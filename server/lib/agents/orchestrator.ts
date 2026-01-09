@@ -211,26 +211,34 @@ export class AgentOrchestrator {
       // Step 1: Resolve context references ("that", "it", etc.)
       this.emitThinkingStep(onThinkingStep, "Understanding your question", "completed");
       this.emitThinkingStep(onThinkingStep, "Checking what you meant earlier", "active");
+      console.log(`🔍 Resolving context for question: "${question}"`);
       const enrichedQuestion = resolveContextReferences(question, chatHistory);
       if (enrichedQuestion !== question) {
-        console.log(`📝 Enriched question: "${enrichedQuestion}"`);
+        console.log(`✅ Context resolved: "${question}" → "${enrichedQuestion}"`);
         this.emitThinkingStep(onThinkingStep, "Checking what you meant earlier", "completed", "Linked back to previous messages");
       } else {
+        console.log(`ℹ️ No context resolution needed for: "${question}"`);
         this.emitThinkingStep(onThinkingStep, "Checking what you meant earlier", "completed");
       }
+      
+      // Use enriched question for all subsequent processing
+      const finalQuestion = enrichedQuestion;
 
       // Step 2: Classify intent (only for analysis mode)
+      // Use the enriched/final question for intent classification
       this.emitThinkingStep(onThinkingStep, "Figuring out the best way to answer", "active");
-      const intent = await classifyIntent(enrichedQuestion, chatHistory, summary);
+      console.log(`🎯 Classifying intent for: "${finalQuestion}"`);
+      const intent = await classifyIntent(finalQuestion, chatHistory, summary);
       console.log(`🎯 Intent: ${intent.type} (confidence: ${intent.confidence.toFixed(2)})`);
       this.emitThinkingStep(onThinkingStep, "Figuring out the best way to answer", "completed");
 
       // Step 2.5: Extract required columns for optimized data loading
       // Parse query to get columns from filters, aggregations, etc.
+      // Use the final question (enriched) for parsing
       let parsedQuery: any = null;
       try {
         const { parseUserQuery } = await import('../queryParser.js');
-        parsedQuery = await parseUserQuery(enrichedQuestion, summary, chatHistory);
+        parsedQuery = await parseUserQuery(finalQuestion, summary, chatHistory);
       } catch (error) {
         console.warn('⚠️ Query parsing failed, continuing without structured filters:', error);
       }
@@ -239,8 +247,9 @@ export class AgentOrchestrator {
       const historyColumns = extractColumnsFromHistory(chatHistory, summary);
       
       // Extract required columns
+      // Use finalQuestion (enriched) for column extraction
       const requiredColumns = extractRequiredColumns(
-        enrichedQuestion,
+        finalQuestion,
         intent,
         parsedQuery,
         null, // Chart specs will be extracted from history if needed
@@ -252,7 +261,12 @@ export class AgentOrchestrator {
       console.log(`📊 Extracted ${allRequiredColumns.length} required columns: ${allRequiredColumns.slice(0, 5).join(', ')}${allRequiredColumns.length > 5 ? '...' : ''}`);
       
       // Step 2.6: Check cache before processing
-      if (mode !== 'dataOps') {
+      // BUT: Skip cache for aggregation queries with category filters (data operations)
+      const isAggregationWithCategory = /\b(aggregated?\s+(?:column\s+name\s+)?value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s]+/i.test(finalQuestion) ||
+                                         /\b(?:what\s+is\s+)?(?:the\s+)?(?:aggregated?\s+(?:column\s+name\s+)?value|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?(?:column\s+)?(?:category\s+)?[\w\s]+/i.test(finalQuestion) ||
+                                         /\b(?:aggregated?\s+value|aggregate|total|sum)\s+(?:for|of|in)\s+(?:the\s+)?column\s+category\s+[\w\s]+/i.test(finalQuestion);
+
+      if (mode !== 'dataOps' && !isAggregationWithCategory) {
         const cachedResult = queryCache.get<{ answer: string; charts?: ChartSpec[]; insights?: Insight[]; table?: any; operationResult?: any }>(
           sessionId,
           enrichedQuestion,
@@ -262,6 +276,8 @@ export class AgentOrchestrator {
           console.log(`✅ Returning cached result for query`);
           return cachedResult;
         }
+      } else if (isAggregationWithCategory) {
+        console.log(`🔄 Skipping cache for aggregation query (data operation)`);
       }
 
       // Step 3: Check if clarification needed
@@ -318,20 +334,62 @@ export class AgentOrchestrator {
         return askClarifyingQuestion(intent, summary);
       }
 
-      // Step 4: Retrieve context (RAG) - only for analysis mode
+      // Step 4: Filter data to only required columns if specified (for efficiency)
+      // This ensures we only work with the columns needed for the query
+      let filteredData = data;
+      if (allRequiredColumns.length > 0 && data.length > 0) {
+        const availableColumns = Object.keys(data[0]);
+        const columnsToKeep = allRequiredColumns.filter(col => 
+          availableColumns.some(availCol => 
+            availCol.toLowerCase().trim() === col.toLowerCase().trim()
+          )
+        );
+        
+        if (columnsToKeep.length > 0 && columnsToKeep.length < availableColumns.length) {
+          console.log(`📊 Filtering data to ${columnsToKeep.length} required columns: ${columnsToKeep.slice(0, 5).join(', ')}${columnsToKeep.length > 5 ? '...' : ''}`);
+          filteredData = data.map(row => {
+            const filteredRow: Record<string, any> = {};
+            columnsToKeep.forEach(col => {
+              const matchedCol = availableColumns.find(availCol => 
+                availCol.toLowerCase().trim() === col.toLowerCase().trim()
+              );
+              if (matchedCol && row[matchedCol] !== undefined) {
+                filteredRow[matchedCol] = row[matchedCol];
+              }
+            });
+            return filteredRow;
+          });
+          console.log(`✅ Filtered data: ${data.length} rows × ${availableColumns.length} cols → ${filteredData.length} rows × ${columnsToKeep.length} cols`);
+        }
+      }
+
+      // Step 5: Retrieve context (RAG) - only for analysis mode
+      // Use the final question (enriched) for RAG retrieval
+      // RAG is skipped for specific questions about particular columns/rows
       this.emitThinkingStep(onThinkingStep, "Looking through your data", "active");
       const context = await retrieveContext(
-        enrichedQuestion,
-        data,
+        finalQuestion,
+        filteredData,
         summary,
         chatHistory,
         sessionId
       );
-      this.emitThinkingStep(onThinkingStep, "Looking through your data", "completed", context.dataChunks.length > 0 ? `Found ${context.dataChunks.length} useful pieces` : 'No extra data needed');
+      
+      // Determine completion message based on whether RAG was used
+      let completionMessage: string;
+      if (context.dataChunks.length === 0 && context.pastQueries.length === 0) {
+        completionMessage = 'Direct analysis - no additional context needed';
+      } else if (context.dataChunks.length > 0) {
+        completionMessage = `Found ${context.dataChunks.length} useful pieces`;
+      } else {
+        completionMessage = 'No extra data needed';
+      }
+      
+      this.emitThinkingStep(onThinkingStep, "Looking through your data", "completed", completionMessage);
 
-      // Step 5: Build handler context
+      // Step 6: Build handler context
       const handlerContext: HandlerContext = {
-        data,
+        data: filteredData, // Use filtered data
         summary,
         context,
         chatHistory,
@@ -339,7 +397,7 @@ export class AgentOrchestrator {
         chatInsights,
       };
 
-      // Step 6: Route to appropriate handler
+      // Step 7: Route to appropriate handler
       this.emitThinkingStep(onThinkingStep, "Choosing the right analysis path", "active");
       const handler = this.findHandler(intent);
       
@@ -353,10 +411,13 @@ export class AgentOrchestrator {
       const handlerName = this.getFriendlyHandlerName(handler.constructor.name);
       this.emitThinkingStep(onThinkingStep, "Choosing the right analysis path", "completed", `Going with ${handlerName}`);
 
-      // Step 7: Execute handler
+      // Step 8: Execute handler
+      // Use the final question (enriched) for handler execution
       const handlerTask = this.getHandlerTaskDescription(intent.type);
       try {
-        const intentWithQuestion = { ...intent, originalQuestion: enrichedQuestion };
+        const intentWithQuestion = { ...intent, originalQuestion: finalQuestion };
+        console.log(`📤 Passing to handler: "${finalQuestion}"`);
+        console.log(`📊 Handler will use ${filteredData.length} rows with ${Object.keys(filteredData[0] || {}).length} columns`);
         
         this.emitThinkingStep(onThinkingStep, handlerTask, "active");
         

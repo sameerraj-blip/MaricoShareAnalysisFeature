@@ -4,6 +4,22 @@ import { analyzeCorrelations } from '../../correlationAnalyzer.js';
 import { findMatchingColumn } from '../utils/columnMatcher.js';
 
 /**
+ * Check if user explicitly requested charts/visualizations
+ */
+function isExplicitChartRequest(question: string): boolean {
+  const lower = question.toLowerCase();
+  const chartKeywords = [
+    /\b(show|display|create|generate|make|draw|plot|graph)\s+(me\s+)?(a\s+)?(chart|graph|plot|visualization|visual|diagram|figure)/i,
+    /\b(chart|graph|plot|visualization|visual)\s+(of|for|showing|with)/i,
+    /\b(show|display|create|generate|make|draw)\s+(me\s+)?(a\s+)?(bar|line|scatter|pie|area)\s+(chart|graph|plot)/i,
+    /\b(visualize|visualization|visual)\s+/i,
+    /\b(can you|please)\s+(show|display|create|generate|make|draw)\s+(me\s+)?(a\s+)?(chart|graph|plot)/i,
+  ];
+  
+  return chartKeywords.some(pattern => pattern.test(lower));
+}
+
+/**
  * Correlation Handler
  * Handles correlation analysis queries like "what affects X?"
  */
@@ -296,7 +312,10 @@ export class CorrelationHandler extends BaseHandler {
         /\bshould\s+i\s+analy[sz]e\b/i.test(originalQuestion) ||
         /\bshould\s+we\s+look\s+at\s+the\s+correlation\b/i.test(originalQuestion);
 
-      // Call correlation analyzer
+      // Check if user explicitly requested charts
+      const wantsCharts = isExplicitChartRequest(originalQuestion);
+      
+      // Call correlation analyzer (always calculate correlations, but conditionally generate charts)
       let { charts, insights } = await analyzeCorrelations(
         context.data,
         targetCol,
@@ -304,7 +323,10 @@ export class CorrelationHandler extends BaseHandler {
           filter,
           sortOrder,
           context.chatInsights,
-          maxResults
+          maxResults,
+          undefined, // onProgress
+          context.sessionId, // sessionId for caching
+          wantsCharts // Pass flag to control chart generation
       );
 
       // Post-process: Apply general constraint system (works for ANY relationship type, not just "sister brands")
@@ -362,77 +384,109 @@ export class CorrelationHandler extends BaseHandler {
         });
       }
 
-      // Build answer
+      // Get correlations data for conversational answer (even if charts weren't generated)
+      // We need to calculate correlations separately if charts weren't generated
+      let correlations: Array<{ variable: string; correlation: number; nPairs: number }> = [];
+      if (!wantsCharts || charts.length === 0) {
+        // Calculate correlations for the answer even if charts weren't generated
+        const correlationAnalyzer = await import('../../correlationAnalyzer.js');
+        correlations = correlationAnalyzer.calculateCorrelations(context.data, targetCol, filteredComparisonColumns);
+        // Apply filters and sorting
+        let filtered = correlations;
+        if (filter === 'positive') {
+          filtered = filtered.filter(c => c.correlation > 0);
+        } else if (filter === 'negative') {
+          filtered = filtered.filter(c => c.correlation < 0);
+        }
+        if (sortOrder === 'descending') {
+          filtered = filtered.sort((a, b) => b.correlation - a.correlation);
+        } else if (sortOrder === 'ascending') {
+          filtered = filtered.sort((a, b) => a.correlation - b.correlation);
+        } else {
+          filtered = filtered.sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
+        }
+        if (maxResults) {
+          filtered = filtered.slice(0, maxResults);
+        }
+        correlations = filtered;
+      } else {
+        // Extract correlations from charts if they were generated
+        const barChart = charts.find(c => c.type === 'bar');
+        if (barChart && barChart.data) {
+          correlations = (barChart.data as any[]).map((item: any) => ({
+            variable: item.variable || item[barChart.x || 'variable'],
+            correlation: item.correlation || item[barChart.y || 'correlation'],
+            nPairs: 0
+          }));
+        }
+      }
+      
+      // Calculate correlation summary for conversational answer
+      const topCorrelation = correlations.length > 0 ? correlations[0] : null;
+      const topPositive = correlations.filter(c => c.correlation > 0).sort((a, b) => b.correlation - a.correlation)[0];
+      const topNegative = correlations.filter(c => c.correlation < 0).sort((a, b) => a.correlation - b.correlation)[0];
+
+      // Build answer - conversational style for general questions
       let answer: string;
 
       if (isYesNoCorrelationQuestion && filteredComparisonColumns.length === 1) {
         const comparedVar = filteredComparisonColumns[0];
-
-        // Try to extract the correlation coefficient r from the scatter chart title, if available
-        let rValueText: string | null = null;
-        let strengthText: string | null = null;
-
-        const scatterChart = charts.find(
-          (c) => c.type === 'scatter' && typeof c.title === 'string' && c.title.includes('r=')
-        );
-
-        if (scatterChart && scatterChart.title) {
-          const match = scatterChart.title.match(/r\s*=\s*([-+]?\d*\.?\d+)/i);
-          if (match) {
-            const rVal = parseFloat(match[1]);
-            if (!Number.isNaN(rVal)) {
-              const absR = Math.abs(rVal);
-              rValueText = rVal.toFixed(2);
-              if (absR < 0.2) {
-                strengthText = 'very weak';
-              } else if (absR < 0.4) {
-                strengthText = 'weak';
-              } else if (absR < 0.6) {
-                strengthText = 'moderate';
-              } else {
-                strengthText = 'strong';
-              }
-            }
+        const correlation = correlations.find(c => c.variable === comparedVar);
+        
+        if (correlation) {
+          const absR = Math.abs(correlation.correlation);
+          let strengthText = 'very weak';
+          if (absR >= 0.6) strengthText = 'strong';
+          else if (absR >= 0.4) strengthText = 'moderate';
+          else if (absR >= 0.2) strengthText = 'weak';
+          
+          const direction = correlation.correlation > 0 ? 'positive' : 'negative';
+          answer = `Yes, ${comparedVar} does ${direction === 'positive' ? 'positively' : 'negatively'} impact ${targetCol}. The correlation is r ≈ ${correlation.correlation.toFixed(2)}, which indicates a ${strengthText} ${direction} relationship.`;
+          
+          if (wantsCharts) {
+            answer += ` I've included visualizations to show this relationship.`;
           }
-        }
-
-        if (rValueText && strengthText) {
-          answer = `Yes – based on your data, the correlation between ${comparedVar} and ${targetCol} is r ≈ ${rValueText}, which is a ${strengthText} relationship. `;
         } else {
-          answer = `Yes – we can analyze the correlation between ${comparedVar} and ${targetCol} using your dataset. `;
-        }
-
-        if (charts.length > 0) {
-          answer += `I've included ${charts.length} visualization${charts.length > 1 ? 's' : ''} to show this relationship. `;
-        }
-        if (insights.length > 0) {
-          answer += `Here are the key insights:`;
+          answer = `Yes, we can analyze the correlation between ${comparedVar} and ${targetCol}.`;
         }
       } else {
-        // Default explanatory style for general correlation questions
-        answer = `I've analyzed what affects ${targetCol}. `;
-      
-      if (maxResults) {
-        answer += `I've limited the analysis to the top ${maxResults} variables as requested. `;
-      }
-      
-      if (filter === 'positive') {
-        answer += `I've filtered to show only positive correlations as requested. `;
-      } else if (filter === 'negative') {
-        answer += `I've filtered to show only negative correlations as requested. `;
-      }
-      
-      if (mentionsNegativeImpact && variablesToFilterNegative.length > 0) {
-        answer += `As requested, I've excluded negative correlations for the specified variables (${variablesToFilterNegative.join(', ')}). `;
-      }
-
-      if (charts.length > 0) {
-        answer += `I've created ${charts.length} visualization${charts.length > 1 ? 's' : ''} showing the key relationships. `;
-      }
-
-      if (insights.length > 0) {
-        answer += `Here are the key insights:`;
+        // Conversational answer for general correlation questions
+        if (topCorrelation) {
+          const absR = Math.abs(topCorrelation.correlation);
+          let strengthText = 'very weak';
+          if (absR >= 0.6) strengthText = 'strong';
+          else if (absR >= 0.4) strengthText = 'moderate';
+          else if (absR >= 0.2) strengthText = 'weak';
+          
+          const direction = topCorrelation.correlation > 0 ? 'positive' : 'negative';
+          answer = `Based on the analysis, ${topCorrelation.variable} has the ${absR >= 0.6 ? 'strongest' : absR >= 0.4 ? 'stronger' : 'strongest'} ${direction} correlation with ${targetCol} (r ≈ ${topCorrelation.correlation.toFixed(2)}), which is a ${strengthText} relationship.`;
+          
+          if (topPositive && topPositive !== topCorrelation) {
+            answer += ` The strongest positive correlation is with ${topPositive.variable} (r ≈ ${topPositive.correlation.toFixed(2)}).`;
+          }
+          if (topNegative && topNegative !== topCorrelation) {
+            answer += ` The strongest negative correlation is with ${topNegative.variable} (r ≈ ${topNegative.correlation.toFixed(2)}).`;
+          }
+          
+          if (maxResults && correlations.length > maxResults) {
+            answer += ` I've analyzed the top ${maxResults} relationships.`;
+          } else if (correlations.length > 1) {
+            answer += ` I found ${correlations.length} variables with measurable correlations.`;
+          }
+          
+          if (wantsCharts) {
+            answer += ` I've created visualizations showing these relationships.`;
+          } else {
+            answer += ` Would you like me to create a chart to visualize these relationships?`;
+          }
+        } else {
+          answer = `I couldn't find significant correlations between ${targetCol} and other variables in your dataset.`;
         }
+      }
+
+      // Only include insights if charts were generated or user explicitly asked
+      if (!wantsCharts) {
+        insights = []; // Don't show insights if no charts
       }
 
       return {
