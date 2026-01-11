@@ -1,6 +1,7 @@
 import { ParsedQuery, TimeFilter, ValueFilter, ExclusionFilter, AggregationRequest, SortRequest, TopBottomRequest, AggregationOperation } from '../shared/queryTypes.js';
 import { DataSummary } from '../shared/schema.js';
 import { normalizeDateToPeriod, DatePeriod, parseFlexibleDate } from './dateUtils.js';
+import { isIdColumn, getCountNameForIdColumn } from './dataOps/dataOpsOrchestrator.js';
 
 interface TransformationResult {
   data: Record<string, any>[];
@@ -433,57 +434,80 @@ function applyAggregations(
           // Skip percent_change for now, will calculate after sorting
           continue;
         }
-        const values = rows.map((r: Record<string, any>) => toNumber(r[agg.column])).filter((v: number) => !isNaN(v));
-        let resultValue: number | null = null;
-        // TypeScript: percent_change is already filtered out above, so we can safely narrow the type
-        const op = agg.operation as Exclude<AggregationOperation, 'percent_change'>;
-        switch (op) {
-          case 'sum':
-            resultValue = values.reduce((sum, val) => sum + val, 0);
-            break;
-          case 'mean':
-          case 'avg':
-            resultValue = values.reduce((sum, val) => sum + val, 0) / (values.length || 1);
-            break;
-          case 'count':
-            resultValue = values.length;
-            break;
-          case 'min':
-            // Use loop to avoid stack overflow on large arrays
-            if (values.length === 0) {
-              resultValue = null;
-            } else {
-              let min = values[0];
-              for (let i = 1; i < values.length; i++) {
-                if (values[i] < min) min = values[i];
-              }
-              resultValue = min;
-            }
-            break;
-          case 'max':
-            // Use loop to avoid stack overflow on large arrays
-            if (values.length === 0) {
-              resultValue = null;
-            } else {
-              let max = values[0];
-              for (let i = 1; i < values.length; i++) {
-                if (values[i] > max) max = values[i];
-              }
-              resultValue = max;
-            }
-            break;
-          case 'median':
-            if (values.length) {
-              const sortedVals = [...values].sort((a, b) => a - b);
-              const mid = Math.floor(sortedVals.length / 2);
-              resultValue =
-                sortedVals.length % 2 === 0
-                  ? (sortedVals[mid - 1] + sortedVals[mid]) / 2
-                  : sortedVals[mid];
-            }
-            break;
+        
+        // Handle ID columns specially - always use COUNT(DISTINCT)
+        const isIdCol = isIdColumn(agg.column);
+        if (isIdCol && ['sum', 'avg', 'mean', 'min', 'max'].includes(agg.operation)) {
+          console.warn(`⚠️ ID column "${agg.column}" cannot use ${agg.operation}. Automatically switching to COUNT(DISTINCT).`);
+          // Switch to count for ID columns
+          agg.operation = 'count';
         }
-        const targetName = agg.alias || `${agg.column}_${agg.operation}`;
+        
+        let resultValue: number | null = null;
+        
+        if (isIdCol) {
+          // COUNT(DISTINCT) for ID columns
+          const distinctValues = new Set<string | number>();
+          for (const row of rows) {
+            const val = row[agg.column];
+            if (val !== null && val !== undefined && val !== '') {
+              distinctValues.add(val);
+            }
+          }
+          resultValue = distinctValues.size;
+        } else {
+          const values = rows.map((r: Record<string, any>) => toNumber(r[agg.column])).filter((v: number) => !isNaN(v));
+          // TypeScript: percent_change is already filtered out above, so we can safely narrow the type
+          const op = agg.operation as Exclude<AggregationOperation, 'percent_change'>;
+          switch (op) {
+            case 'sum':
+              resultValue = values.reduce((sum, val) => sum + val, 0);
+              break;
+            case 'mean':
+            case 'avg':
+              resultValue = values.reduce((sum, val) => sum + val, 0) / (values.length || 1);
+              break;
+            case 'count':
+              resultValue = values.length;
+              break;
+            case 'min':
+              // Use loop to avoid stack overflow on large arrays
+              if (values.length === 0) {
+                resultValue = null;
+              } else {
+                let min = values[0];
+                for (let i = 1; i < values.length; i++) {
+                  if (values[i] < min) min = values[i];
+                }
+                resultValue = min;
+              }
+              break;
+            case 'max':
+              // Use loop to avoid stack overflow on large arrays
+              if (values.length === 0) {
+                resultValue = null;
+              } else {
+                let max = values[0];
+                for (let i = 1; i < values.length; i++) {
+                  if (values[i] > max) max = values[i];
+                }
+                resultValue = max;
+              }
+              break;
+            case 'median':
+              if (values.length) {
+                const sortedVals = [...values].sort((a, b) => a - b);
+                const mid = Math.floor(sortedVals.length / 2);
+                resultValue =
+                  sortedVals.length % 2 === 0
+                    ? (sortedVals[mid - 1] + sortedVals[mid]) / 2
+                    : sortedVals[mid];
+              }
+              break;
+          }
+        }
+        // Use meaningful count name for ID columns
+        const targetName = agg.alias || (isIdCol ? getCountNameForIdColumn(agg.column) : `${agg.column}_${agg.operation}`);
         base[targetName] = resultValue;
       }
 
@@ -596,57 +620,79 @@ function applyAggregations(
       });
 
       for (const agg of aggregations) {
-        const values = rows.map((r: Record<string, any>) => toNumber(r[agg.column])).filter((v: number) => !isNaN(v));
-        let resultValue: number | null = null;
-        // TypeScript: percent_change is handled separately, so we can safely narrow the type
-        const op = agg.operation as Exclude<AggregationOperation, 'percent_change'>;
-        switch (op) {
-          case 'sum':
-            resultValue = values.reduce((sum: number, val: number) => sum + val, 0);
-            break;
-          case 'mean':
-          case 'avg':
-            resultValue = values.reduce((sum: number, val: number) => sum + val, 0) / (values.length || 1);
-            break;
-          case 'count':
-            resultValue = values.length;
-            break;
-          case 'min':
-            // Use loop to avoid stack overflow on large arrays
-            if (values.length === 0) {
-              resultValue = null;
-            } else {
-              let min = values[0];
-              for (let i = 1; i < values.length; i++) {
-                if (values[i] < min) min = values[i];
-              }
-              resultValue = min;
-            }
-            break;
-          case 'max':
-            // Use loop to avoid stack overflow on large arrays
-            if (values.length === 0) {
-              resultValue = null;
-            } else {
-              let max = values[0];
-              for (let i = 1; i < values.length; i++) {
-                if (values[i] > max) max = values[i];
-              }
-              resultValue = max;
-            }
-            break;
-          case 'median':
-            if (values.length) {
-              const sortedVals = [...values].sort((a, b) => a - b);
-              const mid = Math.floor(sortedVals.length / 2);
-              resultValue =
-                sortedVals.length % 2 === 0
-                  ? (sortedVals[mid - 1] + sortedVals[mid]) / 2
-                  : sortedVals[mid];
-            }
-            break;
+        // Handle ID columns specially - always use COUNT(DISTINCT)
+        const isIdCol = isIdColumn(agg.column);
+        if (isIdCol && ['sum', 'avg', 'mean', 'min', 'max'].includes(agg.operation)) {
+          console.warn(`⚠️ ID column "${agg.column}" cannot use ${agg.operation}. Automatically switching to COUNT(DISTINCT).`);
+          // Switch to count for ID columns
+          agg.operation = 'count';
         }
-        const targetName = agg.alias || `${agg.column}_${agg.operation}`;
+        
+        let resultValue: number | null = null;
+        
+        if (isIdCol) {
+          // COUNT(DISTINCT) for ID columns
+          const distinctValues = new Set<string | number>();
+          for (const row of rows) {
+            const val = row[agg.column];
+            if (val !== null && val !== undefined && val !== '') {
+              distinctValues.add(val);
+            }
+          }
+          resultValue = distinctValues.size;
+        } else {
+          const values = rows.map((r: Record<string, any>) => toNumber(r[agg.column])).filter((v: number) => !isNaN(v));
+          // TypeScript: percent_change is handled separately, so we can safely narrow the type
+          const op = agg.operation as Exclude<AggregationOperation, 'percent_change'>;
+          switch (op) {
+            case 'sum':
+              resultValue = values.reduce((sum: number, val: number) => sum + val, 0);
+              break;
+            case 'mean':
+            case 'avg':
+              resultValue = values.reduce((sum: number, val: number) => sum + val, 0) / (values.length || 1);
+              break;
+            case 'count':
+              resultValue = values.length;
+              break;
+            case 'min':
+              // Use loop to avoid stack overflow on large arrays
+              if (values.length === 0) {
+                resultValue = null;
+              } else {
+                let min = values[0];
+                for (let i = 1; i < values.length; i++) {
+                  if (values[i] < min) min = values[i];
+                }
+                resultValue = min;
+              }
+              break;
+            case 'max':
+              // Use loop to avoid stack overflow on large arrays
+              if (values.length === 0) {
+                resultValue = null;
+              } else {
+                let max = values[0];
+                for (let i = 1; i < values.length; i++) {
+                  if (values[i] > max) max = values[i];
+                }
+                resultValue = max;
+              }
+              break;
+            case 'median':
+              if (values.length) {
+                const sortedVals = [...values].sort((a, b) => a - b);
+                const mid = Math.floor(sortedVals.length / 2);
+                resultValue =
+                  sortedVals.length % 2 === 0
+                    ? (sortedVals[mid - 1] + sortedVals[mid]) / 2
+                    : sortedVals[mid];
+              }
+              break;
+          }
+        }
+        // Use meaningful count name for ID columns
+        const targetName = agg.alias || (isIdCol ? getCountNameForIdColumn(agg.column) : `${agg.column}_${agg.operation}`);
         base[targetName] = resultValue;
       }
 

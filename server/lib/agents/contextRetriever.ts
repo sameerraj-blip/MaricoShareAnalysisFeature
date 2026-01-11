@@ -1,11 +1,9 @@
-import { retrieveRelevantContext, retrieveSimilarPastQA } from '../ragService.js';
 import { DataSummary, Message } from '../../shared/schema.js';
 import { RetrievedContext } from './handlers/baseHandler.js';
 
 /**
- * Retrieve context for a query using RAG
- * Falls back to data summary if RAG fails
- * Skips RAG for specific questions about particular columns/rows
+ * Retrieve context for a query
+ * RAG removed - returns basic context from data summary
  */
 export async function retrieveContext(
   question: string,
@@ -14,64 +12,18 @@ export async function retrieveContext(
   chatHistory: Message[],
   sessionId: string
 ): Promise<RetrievedContext> {
-  // Check if this is a specific question - if so, skip RAG
-  const isSpecific = isSpecificQuestion(question, summary);
+  // RAG removed - return basic context
+  const mentionedColumns = extractMentionedColumns(question, summary);
   
-  if (isSpecific) {
-    console.log(`📌 Specific question detected - skipping RAG retrieval`);
-    const mentionedColumns = extractMentionedColumns(question, summary);
-    return {
-      dataChunks: [], // No RAG chunks needed for specific questions
-      pastQueries: [], // No past queries needed
-      mentionedColumns, // Just return mentioned columns
-    };
-  }
-  
-  console.log(`🔍 General/exploratory question - using RAG retrieval`);
-  
-  try {
-    // Retrieve relevant data chunks
-    const relevantChunks = await retrieveRelevantContext(
-      question,
-      data,
-      summary,
-      chatHistory,
-      sessionId,
-      5 // Top 5 most relevant chunks
-    );
-
-    // Retrieve similar past queries
-    const similarQA = await retrieveSimilarPastQA(question, chatHistory, 2, sessionId);
-
-    // Extract mentioned columns from question
-    const mentionedColumns = extractMentionedColumns(question, summary);
-
-    // Build context string
-    const dataChunks = relevantChunks.map(chunk => chunk.content);
-    // DataChunk content should contain Q&A info, or we extract from chatHistory
-    const pastQueries = similarQA.map(chunk => chunk.content).filter(Boolean);
-
-    return {
-      dataChunks,
-      pastQueries,
-      mentionedColumns,
-    };
-  } catch (error) {
-    // Sanitize error to remove any large arrays/embeddings
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('RAG retrieval error, using fallback:', errorMessage);
-    
-    // Fallback to basic context from data summary
-    return {
-      dataChunks: [
-        `Dataset has ${summary.rowCount} rows and ${summary.columnCount} columns`,
-        `Numeric columns: ${summary.numericColumns.join(', ')}`,
-        `Date columns: ${summary.dateColumns.join(', ') || 'none'}`,
-      ],
-      pastQueries: [],
-      mentionedColumns: extractMentionedColumns(question, summary),
-    };
-  }
+  return {
+    dataChunks: [
+      `Dataset has ${summary.rowCount} rows and ${summary.columnCount} columns`,
+      `Numeric columns: ${summary.numericColumns.join(', ')}`,
+      `Date columns: ${summary.dateColumns.join(', ') || 'none'}`,
+    ],
+    pastQueries: [],
+    mentionedColumns,
+  };
 }
 
 /**
@@ -95,7 +47,6 @@ function extractMentionedColumns(question: string, summary: DataSummary): string
 /**
  * Check if question is specific about particular columns/rows
  * Specific questions mention exact column names and ask about direct relationships
- * These don't need RAG - they can be answered directly from the data
  */
 export function isSpecificQuestion(question: string, summary: DataSummary): boolean {
   const questionLower = question.toLowerCase();
@@ -139,21 +90,8 @@ export function isSpecificQuestion(question: string, summary: DataSummary): bool
     return true;
   }
   
-  // General/exploratory questions need RAG
-  console.log(`   🔍 General/exploratory: Will use RAG for context`);
+  // General/exploratory questions
+  console.log(`   🔍 General/exploratory question`);
   return false;
-}
-
-/**
- * Hybrid search combining semantic and keyword matching
- * (Enhanced version - can be added later)
- */
-export async function hybridSearch(
-  query: string,
-  sessionId: string
-): Promise<string[]> {
-  // For now, use existing RAG service
-  // Can be enhanced with keyword matching later
-  return [];
 }
 

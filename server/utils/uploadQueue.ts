@@ -122,14 +122,13 @@ class UploadQueue {
       const { generateAISuggestions } = await import('../lib/suggestionGenerator.js');
       const { createChatDocument, generateColumnStatistics, getChatBySessionIdEfficient, updateChatDocument, addMessagesBySessionId } = await import('../models/chat.model.js');
       const { saveChartsToBlob } = await import('../lib/blobStorage.js');
-      const { chunkData, clearVectorStore, generateChunkEmbeddings } = await import('../lib/ragService.js');
       const queryCache = (await import('../lib/cache.js')).default;
 
       // Check if file should use large file processing
       const useLargeFileProcessing = shouldUseLargeFileProcessing(job.fileBuffer.length);
       
       let data: Record<string, any>[];
-      let summary: DataSummary;
+      let summary: ReturnType<typeof createDataSummary>;
       let storagePath: string | undefined;
 
       if (useLargeFileProcessing) {
@@ -279,25 +278,66 @@ class UploadQueue {
         };
       });
 
-      // Step 6: Initialize RAG (with embedding generation)
-      job.progress = 75;
-      try {
-        console.log('📊 Initializing RAG for session:', job.sessionId);
-        await clearVectorStore(job.sessionId);
-        await chunkData(data, summary, job.sessionId);
-        // Generate embeddings in background (don't block upload completion)
-        generateChunkEmbeddings(job.sessionId).catch(err => {
-          console.error('Failed to generate embeddings (non-blocking):', err);
-        });
-        console.log('✅ RAG initialization started');
-      } catch (ragError) {
-        console.error('⚠️ RAG initialization failed (non-blocking):', ragError);
-        // Continue without RAG - this is optional
-      }
+      // RAG initialization removed
 
       // Step 7: Generate column statistics
       job.progress = 80;
       const columnStatistics = generateColumnStatistics(data, summary.numericColumns);
+      
+      // Step 7.5: Compute detailed data summary statistics (for Data Summary modal)
+      let dataSummaryStatistics: any = undefined;
+      try {
+        const { getDataSummary } = await import('../lib/dataOps/pythonService.js');
+        
+        // Sample data if too large (same logic as in endpoint)
+        let dataForSummary = data;
+        const MAX_ROWS_FOR_SUMMARY = 50000;
+        if (data.length > MAX_ROWS_FOR_SUMMARY) {
+          console.log(`📊 Computing data summary: sampling ${MAX_ROWS_FOR_SUMMARY} rows from ${data.length} total rows`);
+          const step = Math.floor(data.length / MAX_ROWS_FOR_SUMMARY);
+          const sampledData: Record<string, any>[] = [];
+          for (let i = 0; i < data.length && sampledData.length < MAX_ROWS_FOR_SUMMARY; i += step) {
+            sampledData.push(data[i]);
+          }
+          dataForSummary = sampledData;
+        }
+        
+        console.log(`📊 Computing detailed data summary statistics...`);
+        const summaryResponse = await getDataSummary(dataForSummary);
+        
+        // Calculate quality score
+        const fullDataRowCount = summary.rowCount;
+        const totalCells = summaryResponse.summary.reduce((sum, col) => sum + fullDataRowCount, 0);
+        const totalNulls = summaryResponse.summary.reduce((sum, col) => {
+          const nullPercentage = col.total_values > 0 ? col.null_values / col.total_values : 0;
+          return sum + Math.round(nullPercentage * fullDataRowCount);
+        }, 0);
+        const nullPercentage = totalCells > 0 ? (totalNulls / totalCells) * 100 : 0;
+        const qualityScore = Math.max(0, Math.round(100 - nullPercentage));
+        
+        // Scale summary statistics to full dataset size
+        const scaledSummary = summaryResponse.summary.map(col => {
+          const nullPercentage = col.total_values > 0 ? col.null_values / col.total_values : 0;
+          const scaledNulls = Math.round(nullPercentage * fullDataRowCount);
+          return {
+            ...col,
+            total_values: fullDataRowCount,
+            null_values: scaledNulls,
+            non_null_values: fullDataRowCount - scaledNulls,
+          };
+        });
+        
+        dataSummaryStatistics = {
+          summary: scaledSummary,
+          qualityScore,
+          computedAt: Date.now(),
+        };
+        
+        console.log(`✅ Data summary statistics computed successfully (quality score: ${qualityScore})`);
+      } catch (summaryError) {
+        console.error('⚠️ Failed to compute data summary statistics during upload:', summaryError);
+        // Don't fail the upload - this is optional
+      }
       
       // Step 8: Prepare sample rows
       // For large files, sampleRows are already provided from columnar storage
@@ -385,6 +425,7 @@ class UploadQueue {
             // Store columnar storage path for large files
             columnarStoragePath: useLargeFileProcessing ? storagePath : undefined,
             columnStatistics,
+            dataSummaryStatistics, // Store pre-computed data summary statistics
             insights,
             analysisMetadata: {
               totalProcessingTime: processingTime,
@@ -439,7 +480,8 @@ class UploadQueue {
               fileSize: job.fileBuffer.length,
               analysisVersion: '1.0.0'
             },
-            insights
+            insights,
+            dataSummaryStatistics // Pass pre-computed data summary statistics
           );
         }
       } catch (cosmosError) {

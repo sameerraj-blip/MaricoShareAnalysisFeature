@@ -3,7 +3,6 @@ import { calculateSmartDomainsForChart } from './axisScaling.js';
 import { openai, MODEL } from './openai.js';
 import { generateChartInsights } from './insightGenerator.js';
 import { generateStreamingCorrelationChart } from './streamingCorrelationAnalyzer.js';
-import { getCachedCorrelation, cacheCorrelation } from './redisCache.js';
 
 // Helper to clean numeric values (strip %, commas, etc.)
 function toNumber(value: any): number {
@@ -60,29 +59,7 @@ export async function analyzeCorrelations(
   console.log('Numeric columns to analyze:', numericColumns);
   console.log('Data rows:', data.length);
   
-  // Check Redis cache first if sessionId is provided
-  if (sessionId) {
-    const cached = await getCachedCorrelation<{ charts: ChartSpec[]; insights: Insight[] }>(
-      sessionId,
-      targetVariable,
-      numericColumns
-    );
-    if (cached) {
-      console.log('✅ Using cached correlation results');
-      // Apply filter to cached results if needed
-      if (filter !== 'all' && cached.charts) {
-        // Filter charts based on correlation sign
-        const filteredCharts = cached.charts.filter((chart: any) => {
-          const correlation = chart.metadata?.correlation;
-          if (filter === 'positive') return correlation > 0;
-          if (filter === 'negative') return correlation < 0;
-          return true;
-        });
-        return { charts: filteredCharts, insights: cached.insights };
-      }
-      return cached;
-    }
-  }
+  // Redis cache removed - proceed with calculation
   
   // Calculate correlations
   const correlations = calculateCorrelations(data, targetVariable, numericColumns);
@@ -291,10 +268,7 @@ export async function analyzeCorrelations(
 
   const result = { charts, insights };
 
-  // Cache the result if sessionId is provided
-  if (sessionId) {
-    await cacheCorrelation(sessionId, targetVariable, numericColumns, result);
-  }
+  // Redis cache removed
 
   return result;
 }

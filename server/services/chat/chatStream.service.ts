@@ -280,14 +280,14 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
     // Transform data operations response format for frontend compatibility
     // Frontend expects 'preview' and 'summary', but orchestrator returns 'table' and 'operationResult'
     const transformedResponse: any = { ...validated };
-    if (result.table && Array.isArray(result.table)) {
-      transformedResponse.preview = result.table;
-      console.log(`📊 Transformed table to preview: ${result.table.length} rows`);
+    if ((result as any).table && Array.isArray((result as any).table)) {
+      transformedResponse.preview = (result as any).table;
+      console.log(`📊 Transformed table to preview: ${(result as any).table.length} rows`);
     }
-    if (result.operationResult) {
-      if (result.operationResult.summary && Array.isArray(result.operationResult.summary)) {
-        transformedResponse.summary = result.operationResult.summary;
-        console.log(`📋 Transformed operationResult.summary to summary: ${result.operationResult.summary.length} items`);
+    if ((result as any).operationResult) {
+      if ((result as any).operationResult.summary && Array.isArray((result as any).operationResult.summary)) {
+        transformedResponse.summary = (result as any).operationResult.summary;
+        console.log(`📋 Transformed operationResult.summary to summary: ${(result as any).operationResult.summary.length} items`);
       }
     }
 
@@ -371,19 +371,12 @@ export async function processStreamChat(params: ProcessStreamChatParams): Promis
           content: transformedResponse.answer,
           charts: transformedResponse.charts || [], // Pass FULL charts with data
           insights: transformedResponse.insights,
+          preview: transformedResponse.preview || undefined, // Save preview data for data operations
+          summary: transformedResponse.summary || undefined, // Save summary data for data operations
           timestamp: assistantMessageTimestamp,
         },
       ]);
       console.log(`✅ Messages saved to chat: ${chatDocument.id}`);
-      
-      // Store conversation context in RAG (non-blocking)
-      try {
-        const { storeConversationContext } = await import('../../lib/ragService.js');
-        await storeConversationContext(message, transformedResponse.answer, sessionId);
-      } catch (ragError) {
-        console.error('⚠️ Failed to store conversation context (non-blocking):', ragError);
-        // Don't fail the request - RAG is optional
-      }
     } catch (cosmosError) {
       console.error("⚠️ Failed to save messages to CosmosDB:", cosmosError);
     }

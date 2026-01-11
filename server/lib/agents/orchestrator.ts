@@ -87,7 +87,8 @@ export class AgentOrchestrator {
     sessionId: string,
     chatInsights?: Insight[],
     onThinkingStep?: ThinkingStepCallback,
-    mode?: string
+    mode?: string,
+    permanentContext?: string
   ): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[]; table?: any; operationResult?: any }> {
     try {
       console.log(`\n🔍 Processing query: "${question}" (mode: ${mode || 'analysis'})`);
@@ -147,6 +148,7 @@ export class AgentOrchestrator {
           chatHistory,
           sessionId,
           chatInsights,
+          permanentContext,
         };
         
         // Step 5: Execute DataOpsHandler directly
@@ -363,10 +365,8 @@ export class AgentOrchestrator {
         }
       }
 
-      // Step 5: Retrieve context (RAG) - only for analysis mode
-      // Use the final question (enriched) for RAG retrieval
-      // RAG is skipped for specific questions about particular columns/rows
-      this.emitThinkingStep(onThinkingStep, "Looking through your data", "active");
+      // Step 5: Retrieve context - RAG removed
+      this.emitThinkingStep(onThinkingStep, "Analyzing your data", "active");
       const context = await retrieveContext(
         finalQuestion,
         filteredData,
@@ -375,12 +375,12 @@ export class AgentOrchestrator {
         sessionId
       );
       
-      // Determine completion message based on whether RAG was used
+      // Determine completion message
       let completionMessage: string;
       if (context.dataChunks.length === 0 && context.pastQueries.length === 0) {
         completionMessage = 'Direct analysis - no additional context needed';
       } else if (context.dataChunks.length > 0) {
-        completionMessage = `Found ${context.dataChunks.length} useful pieces`;
+        completionMessage = `Using data context`;
       } else {
         completionMessage = 'No extra data needed';
       }
@@ -395,6 +395,7 @@ export class AgentOrchestrator {
         chatHistory,
         sessionId,
         chatInsights,
+        permanentContext,
       };
 
       // Step 7: Route to appropriate handler

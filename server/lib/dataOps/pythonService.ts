@@ -90,6 +90,35 @@ interface ConvertTypeResponse {
   };
 }
 
+interface AggregateRequest {
+  data: Record<string, any>[];
+  group_by_column: string;
+  agg_columns?: string[];
+  agg_funcs?: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count' | 'median' | 'std' | 'var' | 'p90' | 'p95' | 'p99' | 'any' | 'all'>;
+  order_by_column?: string;
+  order_by_direction?: 'asc' | 'desc';
+  user_intent?: string;  // User's original message for semantic intent detection
+}
+
+interface AggregateResponse {
+  data: Record<string, any>[];
+  rows_before: number;
+  rows_after: number;
+}
+
+interface PivotRequest {
+  data: Record<string, any>[];
+  index_column: string;
+  value_columns?: string[];
+  pivot_funcs?: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'>;
+}
+
+interface PivotResponse {
+  data: Record<string, any>[];
+  rows_before: number;
+  rows_after: number;
+}
+
 interface TrainModelRequest {
   data: Record<string, any>[];
   model_type: 
@@ -193,8 +222,23 @@ export async function removeNulls(
   customValue?: any
 ): Promise<RemoveNullsResponse> {
   try {
+    // Preprocess data: convert string "null" values to actual null
+    // This handles cases where data has string "null" instead of actual null/NaN
+    const preprocessedData = data.map(row => {
+      const processedRow: Record<string, any> = {};
+      for (const [key, value] of Object.entries(row)) {
+        // Convert string "null" (case-insensitive) to actual null
+        if (typeof value === 'string' && value.toLowerCase().trim() === 'null') {
+          processedRow[key] = null;
+        } else {
+          processedRow[key] = value;
+        }
+      }
+      return processedRow;
+    });
+    
     const request: RemoveNullsRequest = {
-      data,
+      data: preprocessedData,
       method,
     };
     
@@ -370,6 +414,94 @@ export async function convertDataType(
     return await response.json() as ConvertTypeResponse;
   } catch (error) {
     console.error('Error calling Python service convert-type:', error);
+    throw error;
+  }
+}
+
+/**
+ * Aggregate data by grouping on a column
+ */
+export async function aggregateData(
+  data: Record<string, any>[],
+  groupByColumn: string,
+  aggColumns?: string[],
+  aggFuncs?: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count' | 'median' | 'std' | 'var' | 'p90' | 'p95' | 'p99' | 'any' | 'all'>,
+  orderByColumn?: string,
+  orderByDirection?: 'asc' | 'desc',
+  userIntent?: string  // User's original message for semantic intent detection
+): Promise<AggregateResponse> {
+  try {
+    const request: AggregateRequest = {
+      data,
+      group_by_column: groupByColumn,
+      agg_columns: aggColumns,
+      agg_funcs: aggFuncs,
+      order_by_column: orderByColumn,
+      order_by_direction: orderByDirection || 'asc',
+      user_intent: userIntent,
+    };
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetchFn(`${PYTHON_SERVICE_URL}/aggregate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    return await response.json() as AggregateResponse;
+  } catch (error) {
+    console.error('Error calling Python service aggregate:', error);
+    throw error;
+  }
+}
+
+/**
+ * Create a pivot table
+ */
+export async function createPivotTable(
+  data: Record<string, any>[],
+  indexColumn: string,
+  valueColumns?: string[],
+  pivotFuncs?: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'>
+): Promise<PivotResponse> {
+  try {
+    const request: PivotRequest = {
+      data,
+      index_column: indexColumn,
+      value_columns: valueColumns,
+      pivot_funcs: pivotFuncs,
+    };
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetchFn(`${PYTHON_SERVICE_URL}/pivot`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    return await response.json() as PivotResponse;
+  } catch (error) {
+    console.error('Error calling Python service pivot:', error);
     throw error;
   }
 }
@@ -664,6 +796,178 @@ export async function trainMLModel(
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined
     });
+    throw error;
+  }
+}
+
+/**
+ * Identify outliers in data
+ */
+interface IdentifyOutliersRequest {
+  data: Record<string, any>[];
+  column?: string;
+  method: 'iqr' | 'zscore' | 'isolation_forest' | 'local_outlier_factor';
+  threshold?: number;
+}
+
+interface IdentifyOutliersResponse {
+  outliers: Array<{
+    row_index: number;
+    column: string;
+    value: number;
+    z_score?: number;
+    iqr_lower?: number;
+    iqr_upper?: number;
+    method: string;
+  }>;
+  summary: {
+    total_outliers: number;
+    columns_analyzed: string[];
+    outliers_by_column: Record<string, number>;
+  };
+  statistics?: Record<string, {
+    mean: number;
+    median: number;
+    std_dev: number;
+    q1: number;
+    q3: number;
+    iqr: number;
+    lower_bound: number;
+    upper_bound: number;
+  }>;
+}
+
+export async function identifyOutliers(
+  data: Record<string, any>[],
+  column?: string,
+  method: 'iqr' | 'zscore' | 'isolation_forest' | 'local_outlier_factor' = 'iqr',
+  threshold?: number
+): Promise<IdentifyOutliersResponse> {
+  try {
+    const request: IdentifyOutliersRequest = {
+      data,
+      method,
+    };
+    
+    if (column) {
+      request.column = column;
+    }
+    
+    if (threshold !== undefined) {
+      request.threshold = threshold;
+    }
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetchFn(`${PYTHON_SERVICE_URL}/identify-outliers`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      let errorDetail = 'Unknown error';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorDetail = errorJson.detail || errorJson.message || errorText;
+      } catch {
+        errorDetail = errorText || `HTTP ${response.status}: ${response.statusText}`;
+      }
+      console.error(`❌ Python service error (${response.status}):`, errorDetail);
+      throw new Error(errorDetail);
+    }
+    
+    return await response.json() as IdentifyOutliersResponse;
+  } catch (error) {
+    console.error('Error calling Python service identify-outliers:', error);
+    throw error;
+  }
+}
+
+/**
+ * Treat outliers in data
+ */
+interface TreatOutliersRequest {
+  data: Record<string, any>[];
+  column?: string;
+  method: 'iqr' | 'zscore' | 'isolation_forest' | 'local_outlier_factor';
+  threshold?: number;
+  treatment: 'remove' | 'cap' | 'winsorize' | 'transform' | 'impute';
+  treatment_value?: 'mean' | 'median' | 'mode' | 'min' | 'max' | number;
+}
+
+interface TreatOutliersResponse {
+  data: Record<string, any>[];
+  rows_before: number;
+  rows_after: number;
+  outliers_treated: number;
+  treatment_applied: string;
+  summary: {
+    columns_treated: string[];
+    outliers_by_column: Record<string, number>;
+  };
+}
+
+export async function treatOutliers(
+  data: Record<string, any>[],
+  column?: string,
+  method: 'iqr' | 'zscore' | 'isolation_forest' | 'local_outlier_factor' = 'iqr',
+  threshold?: number,
+  treatment: 'remove' | 'cap' | 'winsorize' | 'transform' | 'impute' = 'remove',
+  treatmentValue?: 'mean' | 'median' | 'mode' | 'min' | 'max' | number
+): Promise<TreatOutliersResponse> {
+  try {
+    const request: TreatOutliersRequest = {
+      data,
+      method,
+      treatment,
+    };
+    
+    if (column) {
+      request.column = column;
+    }
+    
+    if (threshold !== undefined) {
+      request.threshold = threshold;
+    }
+    
+    if (treatmentValue !== undefined) {
+      request.treatment_value = treatmentValue;
+    }
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetchFn(`${PYTHON_SERVICE_URL}/treat-outliers`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      let errorDetail = 'Unknown error';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorDetail = errorJson.detail || errorJson.message || errorText;
+      } catch {
+        errorDetail = errorText || `HTTP ${response.status}: ${response.statusText}`;
+      }
+      console.error(`❌ Python service error (${response.status}):`, errorDetail);
+      throw new Error(errorDetail);
+    }
+    
+    return await response.json() as TreatOutliersResponse;
+  } catch (error) {
+    console.error('Error calling Python service treat-outliers:', error);
     throw error;
   }
 }

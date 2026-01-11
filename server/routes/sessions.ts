@@ -7,7 +7,9 @@ import {
   getSessionDetailsEndpoint,
   getSessionsByUserEndpoint,
   updateSessionNameEndpoint,
-  deleteSessionEndpoint
+  updateSessionContextEndpoint,
+  deleteSessionEndpoint,
+  getDataSummaryEndpoint
 } from "../controllers/sessionController.js";
 
 const router = Router();
@@ -30,8 +32,14 @@ router.get('/sessions/details/:sessionId', getSessionDetailsEndpoint);
 // Get sessions by user
 router.get('/sessions/user/:username', getSessionsByUserEndpoint);
 
+// Get data summary for a session (must come before /sessions/:sessionId routes)
+router.get('/sessions/:sessionId/data-summary', getDataSummaryEndpoint);
+
 // Update session name by session ID
 router.patch('/sessions/:sessionId', updateSessionNameEndpoint);
+
+// Update session permanent context by session ID
+router.patch('/sessions/:sessionId/context', updateSessionContextEndpoint);
 
 // Delete session by session ID
 router.delete('/sessions/:sessionId', deleteSessionEndpoint);

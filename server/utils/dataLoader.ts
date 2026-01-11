@@ -7,7 +7,6 @@ import { ChatDocument } from "../models/chat.model.js";
 import { getFileFromBlob } from "../lib/blobStorage.js";
 import { parseFile, createDataSummary, convertDashToZeroForNumericColumns } from "../lib/fileParser.js";
 import { getDataForAnalysis } from "../lib/largeFileProcessor.js";
-import { getCachedQueryResult, cacheQueryResult } from "../lib/redisCache.js";
 
 /**
  * Normalize data by converting string numbers to actual numbers
@@ -148,17 +147,7 @@ export async function loadLatestData(
     try {
       console.log(`📊 Loading from columnar storage for large file...`);
       
-      // Check Redis cache first
-      if (requiredColumns && requiredColumns.length > 0) {
-        const cached = await getCachedQueryResult<Record<string, any>[]>(
-          chatDocument.sessionId,
-          requiredColumns
-        );
-        if (cached) {
-          console.log(`✅ Loaded ${cached.length} rows from cache`);
-          return cached;
-        }
-      }
+      // Redis cache removed
       
       // Load all rows - no downsampling limit
       // If requiredColumns specified, only load those columns for efficiency
@@ -168,11 +157,6 @@ export async function loadLatestData(
       fullData = normalizeNumericColumns(fullData);
       const numericColumns = chatDocument.dataSummary?.numericColumns || [];
       fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
-      
-      // Cache the result if we have required columns
-      if (requiredColumns && requiredColumns.length > 0) {
-        await cacheQueryResult(chatDocument.sessionId, requiredColumns, fullData);
-      }
       
       console.log(`✅ Loaded ${fullData.length} rows from columnar storage`);
       return fullData;

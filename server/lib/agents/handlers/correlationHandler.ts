@@ -208,10 +208,62 @@ export class CorrelationHandler extends BaseHandler {
       return {
         answer: `I need at least one other numeric column to compare with "${targetCol}". Your dataset only has one numeric column.`,
       };
+      }
+
+    // Extract context-based variable lists (e.g., "sisters brands") from permanent context
+    const question = intent.originalQuestion || intent.customRequest || '';
+    const questionLower = question.toLowerCase();
+    const permanentContext = context.permanentContext || '';
+    
+    // Check if user mentions "sisters brands" or similar terms
+    const mentionsSistersBrands = /\b(sisters?\s+brands?|sister\s+brands?)\b/i.test(question);
+    
+    // Extract variable lists from permanent context
+    let contextVariableList: string[] = [];
+    if (permanentContext && mentionsSistersBrands) {
+      // Try to extract list after "sisters brands" or similar patterns
+      // Pattern: "sisters brand-> X, Y, Z" or "sisters brands: X, Y, Z" or "sisters brands are X, Y, Z"
+      const sistersBrandsMatch = permanentContext.match(/sisters?\s+brands?[:\->]?\s*([^\n]+)/i);
+      if (sistersBrandsMatch && sistersBrandsMatch[1]) {
+        // Split by comma and clean up
+        contextVariableList = sistersBrandsMatch[1]
+          .split(',')
+          .map(v => v.trim())
+          .filter(v => v.length > 0);
+        console.log(`📋 Extracted ${contextVariableList.length} variables from permanent context:`, contextVariableList);
+      } else {
+        // Try alternative pattern: look for comma-separated list after "sisters brands"
+        const altMatch = permanentContext.match(/sisters?\s+brands?[^\n]*?([A-Z][^,\n]+(?:,\s*[A-Z][^,\n]+)+)/i);
+        if (altMatch && altMatch[1]) {
+          contextVariableList = altMatch[1]
+            .split(',')
+            .map(v => v.trim())
+            .filter(v => v.length > 0);
+          console.log(`📋 Extracted ${contextVariableList.length} variables from permanent context (alt pattern):`, contextVariableList);
+        }
+      }
     }
 
     // Apply variable filters if specified
     let filteredComparisonColumns = comparisonColumns;
+    
+    // If user mentioned "sisters brands" and we found a list in context, filter to only those
+    if (mentionsSistersBrands && contextVariableList.length > 0) {
+      const allColumns = context.summary.columns.map(c => c.name);
+      // Match context variables to actual column names
+      const matchedContextVariables = contextVariableList
+        .map(contextVar => findMatchingColumn(contextVar.trim(), allColumns))
+        .filter((v): v is string => v !== null && v !== targetCol);
+      
+      if (matchedContextVariables.length > 0) {
+        filteredComparisonColumns = filteredComparisonColumns.filter(
+          col => matchedContextVariables.includes(col) || matchedContextVariables.includes(col.trim())
+        );
+        console.log(`✅ Filtered to ${filteredComparisonColumns.length} context-specified variables:`, filteredComparisonColumns);
+      } else {
+        console.warn(`⚠️ Could not match any context variables to actual columns. Context vars:`, contextVariableList);
+      }
+    }
     
     // Handle excludeVariables - these are variables to completely exclude
     if (intent.filters?.excludeVariables && intent.filters.excludeVariables.length > 0) {
@@ -312,6 +364,15 @@ export class CorrelationHandler extends BaseHandler {
         /\bshould\s+i\s+analy[sz]e\b/i.test(originalQuestion) ||
         /\bshould\s+we\s+look\s+at\s+the\s+correlation\b/i.test(originalQuestion);
 
+      // Detect if user asked for "all variables" - they want a complete list
+      // Patterns: "correlation of X with all variables", "impact of X with all variables", 
+      // "what impacts X" (when comparing with all), "all variables", etc.
+      const wantsAllVariables = 
+        /\b(all|every)\s+(the\s+other\s+)?variables?\b/i.test(originalQuestion) ||
+        /\bcorrelation\s+(of|with)\s+.+?\s+with\s+all/i.test(originalQuestion) ||
+        /\bimpact\s+of\s+.+?\s+with\s+all/i.test(originalQuestion) ||
+        /\bwhat\s+(impacts?|affects?|influences?)\s+.+?\?/i.test(originalQuestion) && filteredComparisonColumns.length > 5; // If asking "what impacts X" and there are many comparison columns, likely wants all
+
       // Check if user explicitly requested charts
       const wantsCharts = isExplicitChartRequest(originalQuestion);
       
@@ -390,7 +451,14 @@ export class CorrelationHandler extends BaseHandler {
       if (!wantsCharts || charts.length === 0) {
         // Calculate correlations for the answer even if charts weren't generated
         const correlationAnalyzer = await import('../../correlationAnalyzer.js');
-        correlations = correlationAnalyzer.calculateCorrelations(context.data, targetCol, filteredComparisonColumns);
+        const rawCorrelations = correlationAnalyzer.calculateCorrelations(context.data, targetCol, filteredComparisonColumns);
+        // Map to ensure nPairs is always a number
+        const mappedCorrelations: Array<{ variable: string; correlation: number; nPairs: number }> = rawCorrelations.map(c => ({
+          variable: c.variable,
+          correlation: c.correlation,
+          nPairs: c.nPairs ?? 0
+        }));
+        correlations = mappedCorrelations;
         // Apply filters and sorting
         let filtered = correlations;
         if (filter === 'positive') {
@@ -421,13 +489,62 @@ export class CorrelationHandler extends BaseHandler {
         }
       }
       
+      // If user asked for "sisters brands" and we have context variables, ensure ALL are included
+      // Even if some have weak or zero correlations
+      if (mentionsSistersBrands && contextVariableList.length > 0) {
+        const allColumns = context.summary.columns.map(c => c.name);
+        const matchedContextVariables = contextVariableList
+          .map(contextVar => findMatchingColumn(contextVar.trim(), allColumns))
+          .filter((v): v is string => v !== null && v !== targetCol);
+        
+        // Add any context variables that weren't found in correlations (they might have zero/very weak correlations)
+        const correlationAnalyzer = await import('../../correlationAnalyzer.js');
+        for (const contextVar of matchedContextVariables) {
+          const exists = correlations.some(c => c.variable === contextVar || c.variable === contextVar.trim());
+          if (!exists) {
+            // Calculate correlation for this variable if it wasn't included
+            try {
+              const singleCorr = correlationAnalyzer.calculateCorrelations(context.data, targetCol, [contextVar]);
+              if (singleCorr.length > 0) {
+                correlations.push({
+                  variable: contextVar,
+                  correlation: singleCorr[0].correlation,
+                  nPairs: singleCorr[0].nPairs ?? 0
+                });
+              } else {
+                // If no correlation found, add with zero correlation
+                correlations.push({
+                  variable: contextVar,
+                  correlation: 0,
+                  nPairs: 0
+                });
+              }
+            } catch (e) {
+              // If calculation fails, add with zero correlation
+              correlations.push({
+                variable: contextVar,
+                correlation: 0,
+                nPairs: 0
+              });
+            }
+          }
+        }
+        
+        // Filter correlations to only include context variables (in case some non-context variables were included)
+        correlations = correlations.filter(c => {
+          return matchedContextVariables.some(mv => mv === c.variable || mv === c.variable.trim());
+        });
+        
+        console.log(`✅ Ensured all ${matchedContextVariables.length} context variables are included in results`);
+      }
+      
       // Calculate correlation summary for conversational answer
       const topCorrelation = correlations.length > 0 ? correlations[0] : null;
       const topPositive = correlations.filter(c => c.correlation > 0).sort((a, b) => b.correlation - a.correlation)[0];
       const topNegative = correlations.filter(c => c.correlation < 0).sort((a, b) => a.correlation - b.correlation)[0];
 
       // Build answer - conversational style for general questions
-      let answer: string;
+      let answer: string = '';
 
       if (isYesNoCorrelationQuestion && filteredComparisonColumns.length === 1) {
         const comparedVar = filteredComparisonColumns[0];
@@ -451,7 +568,39 @@ export class CorrelationHandler extends BaseHandler {
         }
       } else {
         // Conversational answer for general correlation questions
-        if (topCorrelation) {
+        // If user asked for "sisters brands" or "all variables", list them all
+        if ((wantsAllVariables || mentionsSistersBrands) && correlations.length > 0) {
+          // Sort by absolute correlation value (strongest first)
+          const sortedCorrelations = [...correlations].sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
+          
+          const label = mentionsSistersBrands ? 'sisters brands' : 'variables';
+          answer = `I found ${correlations.length} ${label} with correlations with ${targetCol}:\n\n`;
+          
+          // List all variables with their correlations
+          sortedCorrelations.forEach((corr, index) => {
+            const absR = Math.abs(corr.correlation);
+            let strengthText = 'very weak';
+            if (absR >= 0.6) strengthText = 'strong';
+            else if (absR >= 0.4) strengthText = 'moderate';
+            else if (absR >= 0.2) strengthText = 'weak';
+            
+            const direction = corr.correlation > 0 ? 'positive' : (corr.correlation < 0 ? 'negative' : 'no');
+            const sign = corr.correlation > 0 ? '+' : '';
+            
+            if (absR < 0.001) {
+              answer += `${index + 1}. **${corr.variable}**: ~0.000 (no correlation)\n`;
+            } else {
+              answer += `${index + 1}. **${corr.variable}**: ${sign}${corr.correlation.toFixed(3)} (${strengthText} ${direction})\n`;
+            }
+          });
+          
+          if (wantsCharts) {
+            answer += `\nI've created visualizations showing these relationships.`;
+          } else {
+            answer += `\nWould you like me to create a chart to visualize these relationships?`;
+          }
+        } else if (topCorrelation) {
+          // Default behavior: summarize top correlations
           const absR = Math.abs(topCorrelation.correlation);
           let strengthText = 'very weak';
           if (absR >= 0.6) strengthText = 'strong';

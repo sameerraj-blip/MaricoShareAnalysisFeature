@@ -3,12 +3,37 @@
  * Handles intent parsing, clarification flow, and coordinates data operations
  */
 import { Message, DataSummary } from '../../shared/schema.js';
-import { removeNulls, getDataPreview, getDataSummary, convertDataType, createDerivedColumn, trainMLModel } from './pythonService.js';
+import { removeNulls, getDataPreview, getDataSummary, convertDataType, createDerivedColumn, trainMLModel, aggregateData, createPivotTable, identifyOutliers, treatOutliers } from './pythonService.js';
 import { saveModifiedData } from './dataPersistence.js';
 import { getChatBySessionIdEfficient, updateChatDocument, ChatDocument } from '../../models/chat.model.js';
 import { openai } from '../openai.js';
 import { getFileFromBlob } from '../blobStorage.js';
 import { parseFile, convertDashToZeroForNumericColumns } from '../fileParser.js';
+
+/**
+ * Identify if a column is an ID column (identifier field)
+ * ID columns match patterns like: *_id, order_id, item_id, customer_id, etc.
+ */
+export function isIdColumn(columnName: string): boolean {
+  const lower = columnName.toLowerCase();
+  // Match patterns: *_id, *_ID, or explicit patterns like order_id, item_id
+  return /_id$|^id$|_id_/i.test(columnName) || 
+         ['order_id', 'item_id', 'customer_id', 'user_id', 'product_id', 'transaction_id'].includes(lower);
+}
+
+/**
+ * Generate a meaningful count name for an ID column
+ * e.g., "order_id" -> "order_count", "item_id" -> "item_count"
+ */
+export function getCountNameForIdColumn(columnName: string): string {
+  const lower = columnName.toLowerCase();
+  // Remove _id suffix and add _count
+  if (lower.endsWith('_id')) {
+    return lower.replace(/_id$/, '_count');
+  }
+  // For "id" or other patterns, use generic count name
+  return `${lower}_count`;
+}
 
 // Streaming configuration for large datasets
 const LARGE_DATASET_THRESHOLD = 50000; // 50k rows
@@ -117,6 +142,8 @@ export interface DataOpsIntent {
     | 'pivot'
     | 'train_model'
     | 'replace_value'
+    | 'identify_outliers'
+    | 'treat_outliers'
     | 'revert'
     | 'unknown';
   column?: string;
@@ -155,6 +182,11 @@ export interface DataOpsIntent {
   modelType?: 'linear' | 'log_log' | 'logistic' | 'ridge' | 'lasso' | 'random_forest' | 'decision_tree' | 'gradient_boosting' | 'elasticnet' | 'svm' | 'knn' | 'polynomial' | 'bayesian' | 'quantile' | 'poisson' | 'gamma' | 'tweedie' | 'extra_trees' | 'xgboost' | 'lightgbm' | 'catboost' | 'gaussian_process' | 'mlp' | 'multinomial_logistic' | 'naive_bayes_gaussian' | 'naive_bayes_multinomial' | 'naive_bayes_bernoulli' | 'lda' | 'qda';
   targetVariable?: string;
   features?: string[];
+  // Outlier detection/treatment fields
+  outlierMethod?: 'iqr' | 'zscore' | 'isolation_forest' | 'local_outlier_factor';
+  outlierThreshold?: number; // For zscore (default: 3), for IQR multiplier (default: 1.5)
+  treatmentMethod?: 'remove' | 'cap' | 'winsorize' | 'transform' | 'impute';
+  treatmentValue?: 'mean' | 'median' | 'mode' | 'min' | 'max' | number; // For impute or cap methods
 }
 
 export interface DataOpsContext {
@@ -197,24 +229,80 @@ export async function parseDataOpsIntent(
 
   // Try AI detection first for ALL operations (using resolved message)
   try {
+    console.log(`🤖 Calling AI to detect intent for: "${resolvedMessage}"`);
     const aiIntent = await detectDataOpsIntentWithAI(resolvedMessage, availableColumns, chatHistory, sessionDoc);
-    if (aiIntent && aiIntent.operation !== 'unknown') {
-      console.log(`✅ AI detected intent: ${aiIntent.operation}`);
+    if (aiIntent) {
+      console.log(`🤖 AI returned intent:`, {
+        operation: aiIntent.operation,
+        groupByColumn: aiIntent.groupByColumn,
+        aggColumns: aiIntent.aggColumns,
+        aggFunc: aiIntent.aggFunc,
+        requiresClarification: aiIntent.requiresClarification,
+        clarificationMessage: aiIntent.clarificationMessage,
+      });
       
-      // If rename_column and no column specified, try to find from context
-      if (aiIntent.operation === 'rename_column' && !aiIntent.column && !aiIntent.oldColumnName) {
-        const lastColumn = findLastCreatedColumn(chatHistory || []);
-        if (lastColumn) {
-          aiIntent.oldColumnName = lastColumn;
-          aiIntent.column = lastColumn;
-          console.log(`📋 Using context column for rename: "${lastColumn}"`);
+      if (aiIntent.operation !== 'unknown') {
+        console.log(`✅ AI detected intent: ${aiIntent.operation}`);
+        
+        // If rename_column and no column specified, try to find from context
+        if (aiIntent.operation === 'rename_column' && !aiIntent.column && !aiIntent.oldColumnName) {
+          const lastColumn = findLastCreatedColumn(chatHistory || []);
+          if (lastColumn) {
+            aiIntent.oldColumnName = lastColumn;
+            aiIntent.column = lastColumn;
+            console.log(`📋 Using context column for rename: "${lastColumn}"`);
+          }
         }
+        
+        // Fallback pattern matching for outlier treatment - fix common AI parsing issues
+        if (aiIntent.operation === 'treat_outliers') {
+          const lowerResolved = resolvedMessage.toLowerCase();
+          
+          // Pattern: "impute outliers with mean" or "impute with mean"
+          if ((lowerResolved.includes('impute') && lowerResolved.includes('mean')) ||
+              (lowerResolved.includes('replace') && lowerResolved.includes('outlier') && lowerResolved.includes('mean'))) {
+            if (!aiIntent.treatmentMethod || aiIntent.treatmentMethod === 'remove') {
+              console.log(`🔧 Fixing treatment method: detected "impute with mean" but AI returned "${aiIntent.treatmentMethod}", correcting to "impute"`);
+              aiIntent.treatmentMethod = 'impute';
+              aiIntent.treatmentValue = 'mean';
+            }
+          }
+          // Pattern: "impute outliers with median"
+          else if ((lowerResolved.includes('impute') && lowerResolved.includes('median')) ||
+                   (lowerResolved.includes('replace') && lowerResolved.includes('outlier') && lowerResolved.includes('median'))) {
+            if (!aiIntent.treatmentMethod || aiIntent.treatmentMethod === 'remove') {
+              console.log(`🔧 Fixing treatment method: detected "impute with median" but AI returned "${aiIntent.treatmentMethod}", correcting to "impute"`);
+              aiIntent.treatmentMethod = 'impute';
+              aiIntent.treatmentValue = 'median';
+            }
+          }
+          // Pattern: "impute outliers with mode"
+          else if ((lowerResolved.includes('impute') && lowerResolved.includes('mode')) ||
+                   (lowerResolved.includes('replace') && lowerResolved.includes('outlier') && lowerResolved.includes('mode'))) {
+            if (!aiIntent.treatmentMethod || aiIntent.treatmentMethod === 'remove') {
+              console.log(`🔧 Fixing treatment method: detected "impute with mode" but AI returned "${aiIntent.treatmentMethod}", correcting to "impute"`);
+              aiIntent.treatmentMethod = 'impute';
+              aiIntent.treatmentValue = 'mode';
+            }
+          }
+          
+          console.log(`📊 Final outlier treatment config:`, {
+            treatmentMethod: aiIntent.treatmentMethod,
+            treatmentValue: aiIntent.treatmentValue,
+            outlierMethod: aiIntent.outlierMethod
+          });
+        }
+        
+        return aiIntent;
+      } else {
+        console.log(`⚠️ AI returned 'unknown' operation, will fall back to regex`);
       }
-      
-      return aiIntent;
+    } else {
+      console.log(`⚠️ AI returned null, will fall back to regex`);
     }
   } catch (error) {
     console.error('⚠️ AI intent detection failed, falling back to regex patterns:', error);
+    console.error('⚠️ Error details:', error instanceof Error ? error.stack : String(error));
   }
   
   // Fallback to regex patterns if AI didn't detect STEP 0 operations
@@ -471,6 +559,127 @@ export async function parseDataOpsIntent(
     }
   }
 
+  // Pattern: "aggregate all the other columns by X" or "aggregate all columns by X"
+  // Use a more flexible pattern that captures everything between "by" and "using" (or end of string)
+  const aggregateAllColumnsPattern = /\baggregate\s+(?:all\s+(?:the\s+other\s+)?columns?|all\s+other\s+columns?)\s+by\s+(.+?)(?:\s+using\s+(sum|avg|mean|min|max|count))?$/i;
+  const aggregateAllColumnsMatch = aggregateAllColumnsPattern.exec(message);
+  if (aggregateAllColumnsMatch) {
+    const rawGroupBy = aggregateAllColumnsMatch[1].trim();
+    const aggFunc = (aggregateAllColumnsMatch[2] || 'sum').toLowerCase() as 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count';
+    
+    // Try to find the column in available columns first
+    let groupByColumn = findMentionedColumn(rawGroupBy, availableColumns);
+    
+    // If not found and rawGroupBy is suspiciously short, search in message context
+    if (!groupByColumn && rawGroupBy.length < 3) {
+      const messageLower = message.toLowerCase();
+      const byIndex = messageLower.indexOf(' by ');
+      const usingIndex = messageLower.indexOf(' using ');
+      const endIndex = usingIndex !== -1 ? usingIndex : message.length;
+      
+      if (byIndex !== -1) {
+        const betweenByAndUsing = message.substring(byIndex + 4, endIndex).trim();
+        console.log(`🔍 Searching for column in context: "${betweenByAndUsing}"`);
+        
+        // Try to find a column that matches this text
+        for (const col of availableColumns) {
+          const colLower = col.toLowerCase();
+          if (betweenByAndUsing.toLowerCase().includes(colLower) || colLower.includes(betweenByAndUsing.toLowerCase())) {
+            groupByColumn = col;
+            console.log(`✅ Found column "${col}" in message context`);
+            break;
+          }
+        }
+      }
+    }
+    
+    groupByColumn = groupByColumn || rawGroupBy;
+
+    console.log(`✅ Regex matched aggregate all columns pattern: aggregate all columns by ${groupByColumn} using ${aggFunc}`);
+    console.log(`📋 Extracted rawGroupBy: "${rawGroupBy}", matched to: "${groupByColumn}"`);
+    return {
+      operation: 'aggregate',
+      groupByColumn,
+      aggColumns: undefined, // undefined means auto-detect all numeric columns
+      aggFunc: aggFunc,
+      requiresClarification: false,
+    };
+  }
+
+  // Pattern: "aggregate over X" or "aggregate the whole data over X" or "aggregate all data over X"
+  const aggregateOverRegex = /\baggregate\s+(?:the\s+whole\s+data|all\s+data|whole\s+data)?\s+over\s+([a-zA-Z0-9_ ]+?)(?:\s+column)?(?:\?|$)/i;
+  const aggregateOverMatch = aggregateOverRegex.exec(message);
+  if (aggregateOverMatch) {
+    const rawGroupBy = aggregateOverMatch[1].trim();
+    const groupByColumn =
+      findMentionedColumn(rawGroupBy, availableColumns) || rawGroupBy;
+
+    console.log(`✅ Regex matched aggregate over pattern: aggregate over ${groupByColumn}`);
+    return {
+      operation: 'aggregate',
+      groupByColumn,
+      aggColumns: undefined, // undefined means auto-detect all numeric columns
+      requiresClarification: false,
+    };
+  }
+
+  // Pattern: "aggregate X by Y using sum" - explicit column and function
+  // Use a more precise pattern that captures full words/column names
+  const aggregateByUsingPattern = /\baggregate\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)\s+by\s+([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)\s+using\s+(sum|avg|mean|min|max|count)/i;
+  const aggregateByUsingMatch = aggregateByUsingPattern.exec(message);
+  if (aggregateByUsingMatch) {
+    const rawAggColumn = aggregateByUsingMatch[1].trim();
+    const rawGroupByColumn = aggregateByUsingMatch[2].trim();
+    const aggFunc = (aggregateByUsingMatch[3] || 'sum').toLowerCase() as 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count';
+    
+    // Try to match columns from available columns list
+    let matchedAggCol = findMentionedColumn(rawAggColumn, availableColumns);
+    let matchedGroupBy = findMentionedColumn(rawGroupByColumn, availableColumns);
+    
+    // If groupBy wasn't found, try searching in the original message context
+    if (!matchedGroupBy) {
+      const messageLower = message.toLowerCase();
+      const byIndex = messageLower.indexOf(' by ');
+      const usingIndex = messageLower.indexOf(' using ');
+      const endIndex = usingIndex !== -1 ? usingIndex : message.length;
+      
+      if (byIndex !== -1) {
+        const betweenByAndUsing = message.substring(byIndex + 4, endIndex).trim();
+        console.log(`🔍 Column not found via findMentionedColumn, searching in context: "${betweenByAndUsing}"`);
+        
+        // Try to find a column that matches this text (case-insensitive, word boundary aware)
+        for (const col of availableColumns) {
+          const colLower = col.toLowerCase();
+          const contextLower = betweenByAndUsing.toLowerCase();
+          
+          // Check if column name appears in context or vice versa
+          if (contextLower.includes(colLower) || colLower.includes(contextLower)) {
+            // Prefer exact match or longer column name
+            if (contextLower === colLower || colLower.length >= contextLower.length) {
+              matchedGroupBy = col;
+              console.log(`✅ Found column "${col}" in message context`);
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // Fallback: use extracted values if no match found
+    matchedAggCol = matchedAggCol || rawAggColumn;
+    matchedGroupBy = matchedGroupBy || rawGroupByColumn;
+    
+    console.log(`✅ Regex matched aggregate pattern: aggregate ${matchedAggCol} by ${matchedGroupBy} using ${aggFunc}`);
+    console.log(`📋 Extracted: rawAggColumn="${rawAggColumn}", rawGroupByColumn="${rawGroupByColumn}" -> matched: "${matchedGroupBy}"`);
+    return {
+      operation: 'aggregate',
+      groupByColumn: matchedGroupBy,
+      aggColumns: [matchedAggCol],
+      aggFunc: aggFunc,
+      requiresClarification: false,
+    };
+  }
+
   // Pattern: "aggregate by X column" or "aggregate by X"
   const aggregateByRegex = /\baggregate\s+by\s+([a-zA-Z0-9_ ]+?)(?:\s+column|\?|$)/i;
   const aggregateMatch = aggregateByRegex.exec(message);
@@ -507,6 +716,52 @@ export async function parseDataOpsIntent(
       operation: 'pivot',
       pivotIndex,
       pivotValues,
+      requiresClarification: false,
+    };
+  }
+
+  // Pattern: "pivot table for X" or "pivot for X" or "pivot on X" or "pivot by X"
+  // Also handles "pivot table for X over rest of the columns" or "over remaining columns"
+  // This handles simpler requests where user just specifies the index column
+  const simplePivotRegex = /\b(?:create\s+)?(?:a\s+)?pivot\s+(?:table\s+)?(?:for|on|by)\s+([a-zA-Z0-9_ ]+?)(?:\s+(?:showing\s+([a-zA-Z0-9_,&\s]+?)|over\s+(?:rest|remaining|all)\s+(?:of\s+)?(?:the\s+)?(?:columns?|fields?)))?\s*(?:fields?|columns?)?(?:\?|$)/i;
+  const simplePivotMatch = simplePivotRegex.exec(message);
+  if (simplePivotMatch) {
+    const rawIndex = simplePivotMatch[1].trim();
+    const rawValues = simplePivotMatch[2] ? simplePivotMatch[2].trim() : '';
+
+    const pivotIndex =
+      findMentionedColumn(rawIndex, availableColumns) || rawIndex;
+
+    let pivotValues: string[] = [];
+    if (rawValues) {
+      pivotValues = rawValues
+        .split(/[,&]/)
+        .map(v => v.trim())
+        .filter(v => v.length > 0)
+        .map(v => findMentionedColumn(v, availableColumns) || v);
+    }
+    // If no value columns specified (or "over rest of columns" mentioned), will be handled in executeDataOperation to use all columns
+
+    return {
+      operation: 'pivot',
+      pivotIndex,
+      pivotValues,
+      requiresClarification: false,
+    };
+  }
+  
+  // Additional pattern: "pivot table for X over rest of the columns" (more explicit)
+  const pivotOverRestRegex = /\b(?:create\s+)?(?:a\s+)?pivot\s+(?:table\s+)?(?:for|on|by)\s+([a-zA-Z0-9_ ]+?)\s+over\s+(?:rest|remaining|all)\s+(?:of\s+)?(?:the\s+)?(?:columns?|fields?)/i;
+  const pivotOverRestMatch = pivotOverRestRegex.exec(message);
+  if (pivotOverRestMatch) {
+    const rawIndex = pivotOverRestMatch[1].trim();
+    const pivotIndex =
+      findMentionedColumn(rawIndex, availableColumns) || rawIndex;
+
+    return {
+      operation: 'pivot',
+      pivotIndex,
+      pivotValues: [], // Empty means use all other columns
       requiresClarification: false,
     };
   }
@@ -1425,28 +1680,64 @@ async function detectDataOpsIntentWithAI(
   sessionDoc?: ChatDocument
 ): Promise<DataOpsIntent | null> {
   try {
-    const columnsList = availableColumns.slice(0, 20).join(', '); // Limit to avoid token issues
+    // Include all columns for better matching (up to 50 to avoid token issues)
+    const columnsList = availableColumns.slice(0, 50).join(', ');
+    const columnsListForMatching = availableColumns.map((col, idx) => `${idx + 1}. "${col}"`).join('\n');
 
-    // Build chat history context
+    // Build chat history context with more detail
     const historyText = chatHistory && chatHistory.length
       ? chatHistory
-          .slice(-10) // Keep last ~10 messages for context
-          .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+          .slice(-15) // Keep last ~15 messages for better context
+          .map((m, idx) => {
+            const role = m.role.toUpperCase();
+            const content = m.content;
+            const timestamp = m.timestamp ? new Date(m.timestamp).toISOString() : '';
+            return `[${idx + 1}] ${role}${timestamp ? ` (${timestamp})` : ''}: ${content}`;
+          })
           .join('\n')
       : 'No previous messages.';
     
-    const prompt = `You are a data operations assistant. Your job is to infer what data operation the USER wants to perform on their dataset.
+    const prompt = `You are an expert data operations assistant. Your job is to accurately infer what data operation the USER wants to perform on their dataset.
 
-Here is the recent conversation between USER and ASSISTANT (most recent messages are last):
+CRITICAL: You must match column names EXACTLY as they appear in the available columns list below. Column names are case-sensitive and may contain spaces, underscores, or special characters.
+
+=== CHAT HISTORY (most recent messages are last) ===
 ${historyText}
 
-The last message from the USER is:
+=== USER'S CURRENT MESSAGE ===
 "${message}"
 
-The dataset has the following columns: ${columnsList}
+=== AVAILABLE COLUMNS IN THE DATASET ===
+${columnsListForMatching}
+
+=== COLUMN NAME MATCHING RULES ===
+1. ALWAYS match column names EXACTLY as they appear in the list above (case-sensitive)
+2. If the user mentions a partial column name (e.g., "status" when the column is "order_status"), find the BEST MATCH from the available columns
+3. For aggregation operations, if user says "all the other columns" or "all columns", set aggColumns to null (not an empty array)
+4. Column names may contain:
+   - Spaces: "First Name", "Customer Since"
+   - Underscores: "order_id", "qty_ordered"
+   - Special characters: "E Mail", "Discount_Percent"
+   - Mixed case: "Name Prefix", "SSN"
+5. When extracting column names from the user's message:
+   - Look for exact matches first
+   - Then look for partial matches (e.g., "status" matches "order_status" or "status")
+   - Consider word boundaries (e.g., "id" should match "order_id" or "item_id", not "valid")
+   - For multi-word columns, match all words (e.g., "first name" matches "First Name")
+
+=== CONTEXT UNDERSTANDING ===
+1. Pay close attention to the chat history - the user may be referring to previous operations
+2. If the user says "yes", "ok", "do it", etc., look at the most recent ASSISTANT message to understand what they're confirming
+3. If the user says "that column", "the above column", "it", etc., find the column from recent context
+4. For follow-up questions, use the full conversation context to understand intent
 
 When deciding the operation:
 - Always interpret the USER's last message in the context of the conversation above.
+- CRITICAL DEFAULT BEHAVIOR FOR OUTLIER OPERATIONS:
+  • When user says "find outliers", "identify outliers", "detect outliers", "show outliers", or "what are the outliers" WITHOUT mentioning a specific column, set operation: "identify_outliers", column: null, requiresClarification: false
+  • When user says "remove outliers", "treat outliers", "handle outliers", or "fix outliers" WITHOUT mentioning a specific column, set operation: "treat_outliers", column: null, requiresClarification: false
+  • DO NOT ask for clarification - the system will automatically process ALL numeric columns by default
+  • Only set requiresClarification: true if the user's intent is truly unclear or ambiguous
 - The USER may reply with short confirmations like "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "sounds good", "do it", "go ahead", "please do", etc.
   • In that case, look at the most recent ASSISTANT message(s).
   • If the ASSISTANT just suggested a specific data operation (for example: "Should I rename column 'XYZ' to 'tuko' now?" or "Do you want me to create a new column Total = Price + Tax?" or "Just to clarify, are you asking to rename the column 'XYZ' to 'tuko'?"),
@@ -1459,7 +1750,7 @@ When deciding the operation:
 
 Determine the intent and return JSON with this structure:
 {
-  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "revert" | "unknown",
+  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "identify_outliers" | "treat_outliers" | "revert" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
   "oldColumnName": "OldColumnName" (if rename_column operation, the column to rename, null otherwise),
   "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
@@ -1488,6 +1779,10 @@ Determine the intent and return JSON with this structure:
   "pivotIndex": "column_name" (if pivot operation, index column, null otherwise),
   "pivotValues": ["col1", "col2"] (if pivot operation, value columns, null otherwise),
   "pivotFuncs": {"col1": "sum", "col2": "avg"} (if pivot operation, per-column aggregation functions, null otherwise),
+  "outlierMethod": "iqr" | "zscore" | "isolation_forest" | "local_outlier_factor" (if identify_outliers or treat_outliers operation, the detection method, default: "iqr"),
+  "outlierThreshold": number (if identify_outliers or treat_outliers operation, threshold for detection - for zscore default: 3, for IQR default: 1.5, null otherwise),
+  "treatmentMethod": "remove" | "cap" | "winsorize" | "transform" | "impute" (if treat_outliers operation, how to treat outliers, default: "remove"),
+  "treatmentValue": "mean" | "median" | "mode" | "min" | "max" | number (if treatmentMethod is "impute" or "cap", the value to use, null otherwise),
   "requiresClarification": false,
   "clarificationMessage": null
 }
@@ -1532,7 +1827,11 @@ Operations:
     - User says "yes" after assistant asks "are you asking to rename the column 'XYZ' to 'tuko'?" → oldColumnName: "XYZ", newColumnName: "tuko"
 - "add_row": User wants to add/append a row (e.g., "add a new row", "append row at bottom")
 - "count_nulls": User wants to count/null values (e.g., "how many nulls", "count missing values")
-- "replace_value": User wants to replace a specific value with another. Handle various phrasings:
+- "replace_value": User wants to replace a specific NON-NULL value with another. CRITICAL: 
+  * DO NOT use this for null imputation - use "remove_nulls" instead
+  * Only use for replacing specific values like "replace 0 with 1", "replace 'N/A' with 'Unknown'", etc.
+  * If user mentions "null" in the context of filling/imputing, use "remove_nulls" NOT "replace_value"
+  * Handle various phrasings:
   * "replace - with 0" or "replace '-' with 0"
   * "remove - and put 134.2 instead" or "remove - and replace with 134.2"
   * "change - to 0" or "convert - to 0"
@@ -1550,29 +1849,88 @@ Operations:
   * IMPORTANT: When user says "show me row from range 3 to 10 rows", this means rows 3 through 10 (inclusive), so previewMode: "range", previewStartRow: 3, previewEndRow: 10
   * If no specific mode is mentioned, default to "first" mode with limit: 50
 - "summary": User wants statistics summary
-- "remove_nulls": User wants to remove/handle nulls. IMPORTANT: If user says "fill null with mean/median/mode" or "impute null", set method to "mean"/"median"/"mode" and requiresClarification to false. If user says "remove null" or "delete null" without specifying fill/impute, default to asking for clarification.
+- "remove_nulls": User wants to remove/handle nulls. CRITICAL: This is the CORRECT operation for ANY request involving null values, including:
+  * "fill null values with mean/median/mode" → operation: "remove_nulls", method: "mean"/"median"/"mode", requiresClarification: false
+  * "fill all null values with the mean of their respective columns" → operation: "remove_nulls", method: "mean", column: null (all columns), requiresClarification: false
+  * "impute null values" → operation: "remove_nulls", method: "mean" (default), requiresClarification: false
+  * "replace null with mean" → operation: "remove_nulls", method: "mean", requiresClarification: false
+  * DO NOT use "replace_value" for null imputation - ALWAYS use "remove_nulls" with method
+  * If user says "remove null" or "delete null" without specifying fill/impute, default to asking for clarification.
 - "convert_type": User wants to convert column type
 - "aggregate": User wants to group data by a column and summarize other columns
-  * Patterns: "aggregate by X", "aggregate X on Y", "aggregate X, group by Y, order by Z DESC", "aggregate by Month column", "aggregate by Brand"
-  * Extract groupByColumn: the column to group by (e.g., "Month", "Brand", "DEPOT", "SKU Desc")
-  * Extract aggColumns: optional list of columns to aggregate (if not specified, use all numeric columns)
-    * For "aggregate X on Y" pattern, X is the column to aggregate and Y is the group by column
-    * For "aggregate X, group by Y" pattern, X is the column(s) to aggregate and Y is the group by column
-  * Extract orderByColumn: optional column to sort results by (e.g., "risk value", "Sales")
-  * Extract orderByDirection: "asc" or "desc" (default: "asc")
+  * CRITICAL: Match column names EXACTLY from the available columns list above
+  * Patterns: "aggregate by X", "aggregate X by Y using sum", "aggregate X on Y", "aggregate X, group by Y, order by Z DESC", "aggregate by Month column", "aggregate by Brand", "aggregate over X", "aggregate the whole data over X", "aggregate all data over X", "aggregate all the other columns by X", "aggregate all columns by X"
+  * Extract groupByColumn: the column to group by - MUST match exactly from available columns (e.g., if available columns have "status", use "status", not "s" or "Status")
+  * Extract aggColumns: 
+    * If user specifies specific columns: array of column names (e.g., ["qty_ordered", "price"])
+    * If user says "all the other columns", "all columns", "all data", "whole data": set to null (not empty array [])
+    * If not specified: set to null (will auto-detect all numeric columns)
   * Extract aggFunc: default aggregation function ("sum", "avg", "mean", "min", "max", "count") - default is "sum"
   * Extract aggFuncs: per-column aggregation functions if user specifies different functions for different columns
-  * Examples: 
-    - "aggregate by Month" → groupByColumn: "Month"
-    - "aggregate RISK_VOLUME on DEPOT" → groupByColumn: "DEPOT", aggColumns: ["RISK_VOLUME"]
-    - "aggregate risk value, group by SKU Desc, order by risk value DESC" → groupByColumn: "SKU Desc", aggColumns: ["risk value"], orderByColumn: "risk value", orderByDirection: "desc"
-    - "aggregate by Brand showing Total Sales (sum) and Avg Spend (avg)" → groupByColumn: "Brand", aggColumns: ["Sales", "Spend"], aggFuncs: {"Sales": "sum", "Spend": "avg"}
-- "pivot": User wants to create a pivot table (e.g., "create a pivot on Brand showing Sales, Spend, ROI")
-  * Extract pivotIndex: the column to use as pivot index/rows (e.g., "Brand", "Month")
-  * Extract pivotValues: array of columns to show as metrics (e.g., ["Sales", "Spend", "ROI"])
+  * Extract orderByColumn: optional column to sort results by (must match exactly from available columns)
+  * Extract orderByDirection: "asc" or "desc" (default: "asc")
+  * Examples with EXACT column matching:
+    - User: "aggregate by Month" → groupByColumn: "Month" (if "Month" exists in columns), aggColumns: null
+    - User: "aggregate qty_ordered by status using sum" → groupByColumn: "status", aggColumns: ["qty_ordered"], aggFunc: "sum"
+      * MUST match "status" exactly (not "s", "Status", "STATUS")
+      * MUST match "qty_ordered" exactly (not "qty", "quantity", "Qty Ordered")
+    - User: "aggregate all the other columns by status using sum" → groupByColumn: "status", aggColumns: null, aggFunc: "sum"
+      * "status" must match exactly from available columns
+      * aggColumns: null (not [] or undefined) triggers auto-detection
+    - User: "aggregate RISK_VOLUME on DEPOT" → groupByColumn: "DEPOT", aggColumns: ["RISK_VOLUME"]
+    - User: "aggregate risk value, group by SKU Desc, order by risk value DESC" → groupByColumn: "SKU Desc", aggColumns: ["risk value"], orderByColumn: "risk value", orderByDirection: "desc"
+    - User: "aggregate by Brand showing Total Sales (sum) and Avg Spend (avg)" → groupByColumn: "Brand", aggColumns: ["Sales", "Spend"], aggFuncs: {"Sales": "sum", "Spend": "avg"}
+    - User: "aggregate the whole data over status" → groupByColumn: "status", aggColumns: null
+    - User: "aggregate over status column" → groupByColumn: "status", aggColumns: null
+    - User: "aggregate all data over status" → groupByColumn: "status", aggColumns: null
+  * COMMON MISTAKES TO AVOID:
+    - DO NOT extract partial column names (e.g., "s" instead of "status")
+    - DO NOT use case variations (e.g., "Status" when column is "status")
+    - DO NOT use empty array [] when user says "all columns" - use null instead
+    - DO match column names EXACTLY as they appear in the available columns list
+- "pivot": User wants to create a pivot table
+  * Extract pivotIndex: the column to use as pivot index/rows (e.g., "Brand", "Month", "status")
+  * Extract pivotValues: array of columns to show as metrics (e.g., ["Sales", "Spend", "ROI"]). If not specified or user says "over rest of the columns"/"over remaining columns", will default to all columns except the index column
   * Extract pivotFuncs: per-column aggregation functions if user specifies (e.g., {"Sales": "sum", "Spend": "sum", "ROI": "avg"})
   * Default aggregation function is "sum" if not specified
-  * Examples: "create a pivot on Brand showing Sales, Spend, ROI", "pivot on Month showing Total Sales (sum) and Avg Spend (avg)"
+  * IMPORTANT: If user mentions "pivot" or "pivot table", this is ALWAYS a pivot operation, NOT a "create_column" operation, even if the message contains "create"
+  * Examples: 
+    - "create a pivot on Brand showing Sales, Spend, ROI"
+    - "pivot on Month showing Total Sales (sum) and Avg Spend (avg)"
+    - "pivot table for status" (extract pivotIndex: "status", pivotValues: [] - will use all columns)
+    - "pivot for status" (extract pivotIndex: "status", pivotValues: [])
+    - "create pivot table for status" (extract pivotIndex: "status", pivotValues: [])
+    - "pivot by status" (extract pivotIndex: "status", pivotValues: [])
+    - "create a pivot table for status over rest of the columns" (extract pivotIndex: "status", pivotValues: [] - use all other columns)
+    - "pivot table for status over remaining columns" (extract pivotIndex: "status", pivotValues: [])
+- "identify_outliers": User wants to find/identify/detect outliers in the data
+  * CRITICAL: When user says "find outliers", "identify outliers", "detect outliers", "show outliers", or "what are the outliers" WITHOUT specifying a column, proceed immediately with analyzing ALL numeric columns (set column: null, requiresClarification: false)
+  * DO NOT ask for clarification - the system will automatically analyze all numeric columns by default
+  * Examples: "find outliers", "identify outliers", "detect outliers", "show outliers", "what are the outliers", "find outliers in column X", "detect outliers using IQR", "identify outliers with z-score"
+  * Extract column: if a specific column is mentioned (null for all numeric columns - this is the DEFAULT and should be used when no column is specified)
+  * Extract outlierMethod: "iqr" (default), "zscore", "isolation_forest", or "local_outlier_factor" based on user's preference
+  * Extract outlierThreshold: if user specifies (e.g., "z-score > 2.5" -> threshold: 2.5, default: 3 for zscore, 1.5 for IQR)
+  * IMPORTANT: Set requiresClarification: false for simple outlier identification requests like "find outliers" - proceed immediately
+  * This operation only identifies and reports outliers, does not modify data
+- "treat_outliers": User wants to remove/handle/fix/treat outliers in the data
+  * CRITICAL: When user says "remove outliers", "treat outliers", "handle outliers", or "fix outliers" WITHOUT specifying a column, proceed immediately with treating outliers in ALL numeric columns (set column: null, requiresClarification: false)
+  * DO NOT ask for clarification - the system will automatically treat outliers in all numeric columns by default
+  * Examples: "remove outliers", "treat outliers", "handle outliers", "fix outliers", "remove outliers from column X", "cap outliers", "winsorize outliers", "replace outliers with mean"
+  * Extract column: if a specific column is mentioned (null for all numeric columns - this is the DEFAULT and should be used when no column is specified)
+  * Extract outlierMethod: "iqr" (default), "zscore", "isolation_forest", or "local_outlier_factor" based on user's preference
+  * Extract outlierThreshold: if user specifies (default: 3 for zscore, 1.5 for IQR)
+  * Extract treatmentMethod: "remove" (default), "cap", "winsorize", "transform", or "impute" based on user's request
+  * Extract treatmentValue: if treatmentMethod is "impute" or "cap", extract "mean", "median", "mode", "min", "max", or a specific number
+  * IMPORTANT: Set requiresClarification: false for simple outlier treatment requests like "remove outliers" - proceed immediately
+  * Examples:
+    - "remove outliers" -> treatmentMethod: "remove", outlierMethod: "iqr", column: null, requiresClarification: false
+    - "cap outliers at 95th percentile" -> treatmentMethod: "cap", treatmentValue: 95 (or calculate percentile)
+    - "replace outliers with median" -> treatmentMethod: "impute", treatmentValue: "median"
+    - "impute outliers with mean" -> treatmentMethod: "impute", treatmentValue: "mean", outlierMethod: "iqr", column: null, requiresClarification: false
+    - "impute outliers with median" -> treatmentMethod: "impute", treatmentValue: "median", outlierMethod: "iqr", column: null, requiresClarification: false
+    - "impute outliers with mode" -> treatmentMethod: "impute", treatmentValue: "mode", outlierMethod: "iqr", column: null, requiresClarification: false
+    - "winsorize outliers" -> treatmentMethod: "winsorize"
+    - "remove outliers using z-score > 3" -> treatmentMethod: "remove", outlierMethod: "zscore", outlierThreshold: 3
 - "revert": User wants to restore the data to its original form (e.g., "revert to original", "restore original data", "revert table", "go back to original")
   * This will load the original uploaded file and restore it, undoing all data operations
   * Examples: "revert to original", "restore original data", "revert table", "go back to original", "revert to original form"
@@ -1580,35 +1938,116 @@ Operations:
 
 Return ONLY valid JSON, no other text.`;
 
+    console.log(`🤖 Sending AI prompt for intent detection. Message: "${message}"`);
+    console.log(`📋 Available columns (${availableColumns.length}): ${availableColumns.slice(0, 10).join(', ')}${availableColumns.length > 10 ? '...' : ''}`);
+    
     const response = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: 'You are a data operations assistant. Return only valid JSON.' },
+        { 
+          role: 'system', 
+          content: 'You are an expert data operations assistant. You must return ONLY valid JSON. Match column names EXACTLY as they appear in the available columns list. Never truncate your response - always return complete JSON.' 
+        },
         { role: 'user', content: prompt }
       ],
-      temperature: 0.3,
-      max_tokens: 200,
+      temperature: 0.2, // Lower temperature for more consistent, accurate responses
+      max_tokens: 600, // Increased from 200 to prevent truncation
+      response_format: { type: 'json_object' }, // Force JSON output format
     });
+    
+    console.log(`🤖 AI response received, parsing...`);
 
     const content = response.choices[0]?.message?.content?.trim();
-    if (!content) return null;
-
-    // Extract JSON from response (handle markdown code blocks)
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-
-    const parsed = JSON.parse(jsonMatch[0]);
+    const finishReason = response.choices[0]?.finish_reason;
     
-    // Map column name if provided
+    console.log(`🤖 AI raw response (first 300 chars):`, content?.substring(0, 300));
+    console.log(`🤖 Finish reason: ${finishReason}`);
+    
+    if (!content) {
+      console.log(`⚠️ AI returned empty content`);
+      return null;
+    }
+
+    // Check if response was truncated
+    if (finishReason === 'length') {
+      console.warn(`⚠️ AI response was truncated (finish_reason: length). Response length: ${content.length}`);
+      // Try to extract JSON anyway, but log warning
+    }
+
+    // Extract JSON from response (handle markdown code blocks and plain JSON)
+    let jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      // Try to find JSON object even if wrapped in text
+      jsonMatch = content.match(/\{[\s\S]*?\}/);
+    }
+    
+    if (!jsonMatch) {
+      console.log(`⚠️ No JSON found in AI response. Full response:`, content);
+      return null;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+      console.log(`✅ Successfully parsed AI intent JSON`);
+    } catch (parseError) {
+      console.error(`❌ Failed to parse AI JSON response:`, parseError);
+      console.error(`❌ JSON string:`, jsonMatch[0].substring(0, 500));
+      return null;
+    }
+    
+    console.log(`🤖 Parsed AI intent:`, {
+      operation: parsed.operation,
+      groupByColumn: parsed.groupByColumn,
+      aggColumns: parsed.aggColumns,
+      aggFunc: parsed.aggFunc,
+      column: parsed.column,
+      oldColumnName: parsed.oldColumnName,
+    });
+    
+    // Enhanced column name matching with better logging
     if (parsed.column) {
+      const originalColumn = parsed.column;
       const matchedColumn = findMatchingColumn(parsed.column, availableColumns);
+      if (matchedColumn && matchedColumn !== originalColumn) {
+        console.log(`🔍 Column matched: "${originalColumn}" → "${matchedColumn}"`);
+      } else if (!matchedColumn) {
+        console.warn(`⚠️ Column "${originalColumn}" not found in available columns`);
+      }
       parsed.column = matchedColumn || parsed.column;
     }
     
     // Map oldColumnName for rename operations
     if (parsed.oldColumnName) {
+      const originalColumn = parsed.oldColumnName;
       const matchedColumn = findMatchingColumn(parsed.oldColumnName, availableColumns);
+      if (matchedColumn && matchedColumn !== originalColumn) {
+        console.log(`🔍 OldColumnName matched: "${originalColumn}" → "${matchedColumn}"`);
+      }
       parsed.oldColumnName = matchedColumn || parsed.oldColumnName;
+    }
+    
+    // Map groupByColumn for aggregation operations
+    if (parsed.groupByColumn) {
+      const originalColumn = parsed.groupByColumn;
+      const matchedColumn = findMatchingColumn(parsed.groupByColumn, availableColumns);
+      if (matchedColumn && matchedColumn !== originalColumn) {
+        console.log(`🔍 groupByColumn matched: "${originalColumn}" → "${matchedColumn}"`);
+      } else if (!matchedColumn) {
+        console.warn(`⚠️ groupByColumn "${originalColumn}" not found in available columns. Available: ${availableColumns.slice(0, 5).join(', ')}...`);
+      }
+      parsed.groupByColumn = matchedColumn || parsed.groupByColumn;
+    }
+    
+    // Map aggColumns array for aggregation operations
+    if (parsed.aggColumns && Array.isArray(parsed.aggColumns)) {
+      parsed.aggColumns = parsed.aggColumns.map((col: string) => {
+        const matched = findMatchingColumn(col, availableColumns);
+        if (matched && matched !== col) {
+          console.log(`🔍 aggColumn matched: "${col}" → "${matched}"`);
+        }
+        return matched || col;
+      });
     }
 
     // Extract method for remove_nulls operation if not explicitly provided
@@ -1642,7 +2081,8 @@ Return ONLY valid JSON, no other text.`;
       }
     }
 
-    return {
+    // Build the intent object with all mapped columns
+    const intent: DataOpsIntent = {
       operation: parsed.operation || 'unknown',
       column: parsed.column,
       method: method || parsed.method,
@@ -1669,7 +2109,52 @@ Return ONLY valid JSON, no other text.`;
       requiresClarification: method ? false : (parsed.requiresClarification || false),
       clarificationType: parsed.clarificationType,
       clarificationMessage: parsed.clarificationMessage,
-    } as DataOpsIntent;
+    };
+    
+    // Add aggregation-specific fields with mapped columns
+    if (parsed.groupByColumn) {
+      intent.groupByColumn = parsed.groupByColumn;
+    }
+    if (parsed.aggColumns !== undefined) {
+      intent.aggColumns = parsed.aggColumns; // Already mapped above
+    }
+    if (parsed.aggFunc) {
+      intent.aggFunc = parsed.aggFunc;
+    }
+    if (parsed.aggFuncs) {
+      intent.aggFuncs = parsed.aggFuncs;
+    }
+    if (parsed.orderByColumn) {
+      const matchedOrderBy = findMatchingColumn(parsed.orderByColumn, availableColumns);
+      intent.orderByColumn = matchedOrderBy || parsed.orderByColumn;
+    }
+    if (parsed.orderByDirection) {
+      intent.orderByDirection = parsed.orderByDirection;
+    }
+    
+    // Add pivot-specific fields
+    if (parsed.pivotIndex) {
+      const matchedPivotIndex = findMatchingColumn(parsed.pivotIndex, availableColumns);
+      intent.pivotIndex = matchedPivotIndex || parsed.pivotIndex;
+    }
+    if (parsed.pivotValues) {
+      intent.pivotValues = parsed.pivotValues.map((col: string) => {
+        const matched = findMatchingColumn(col, availableColumns);
+        return matched || col;
+      });
+    }
+    if (parsed.pivotFuncs) {
+      intent.pivotFuncs = parsed.pivotFuncs;
+    }
+    
+    console.log(`✅ Final mapped intent:`, {
+      operation: intent.operation,
+      groupByColumn: intent.groupByColumn,
+      aggColumns: intent.aggColumns,
+      column: intent.column,
+    });
+    
+    return intent;
   } catch (error) {
     console.error('Error in AI intent detection:', error);
     return null;
@@ -2597,6 +3082,7 @@ function isDataModificationOperation(operation: DataOpsIntent['operation']): boo
     'convert_type',
     'aggregate',
     'pivot',
+    'treat_outliers',
     'revert',
   ];
   
@@ -2622,6 +3108,15 @@ export async function executeDataOperation(
   // For operations like aggregate/pivot that only return a table,
   // the table will be included in "data" and "saved" will be false.
 }> {
+  console.log(`🔍 executeDataOperation called with intent:`, {
+    operation: intent.operation,
+    groupByColumn: intent.groupByColumn,
+    aggColumns: intent.aggColumns,
+    aggFunc: intent.aggFunc,
+    requiresClarification: intent.requiresClarification,
+    clarificationMessage: intent.clarificationMessage,
+  });
+  
   // Check if user explicitly requested preview OR if this is a data modification operation
   // Data modification operations (add/remove columns/rows, etc.) should always show preview
   const shouldShowPreview = 
@@ -2636,6 +3131,7 @@ export async function executeDataOperation(
   }
   
   if (intent.requiresClarification) {
+    console.log(`⚠️ Intent requires clarification: ${intent.clarificationMessage}`);
     // Save pending operation to context
     if (sessionDoc) {
       const context: DataOpsContext = {
@@ -2656,6 +3152,8 @@ export async function executeDataOperation(
       answer: intent.clarificationMessage || 'Please provide more information.'
     };
   }
+  
+  console.log(`✅ Executing operation: ${intent.operation}`);
   
   switch (intent.operation) {
     case 'remove_nulls': {
@@ -3193,7 +3691,7 @@ export async function executeDataOperation(
     }
 
     case 'aggregate': {
-      // Group by a column and aggregate numeric columns with support for multiple aggregation functions
+      // Use Python service for aggregation
       const groupBy =
         intent.groupByColumn ||
         intent.column ||
@@ -3214,239 +3712,81 @@ export async function executeDataOperation(
         };
       }
 
-      // Determine which columns to aggregate: use explicit list or all numeric columns except groupBy
-      const numericCols = new Set<string>();
-      for (const row of data) {
-        for (const [key, value] of Object.entries(row)) {
-          if (key === groupBy) continue;
-          if (typeof value === 'number') {
-            numericCols.add(key);
-          }
+      try {
+        // If aggColumns is empty array or undefined, pass undefined to Python service for auto-detection
+        const aggColumnsForPython = (intent.aggColumns && intent.aggColumns.length > 0) ? intent.aggColumns : undefined;
+        
+        console.log(`📊 Aggregating by "${groupBy}". aggColumns: ${aggColumnsForPython ? JSON.stringify(aggColumnsForPython) : 'undefined (auto-detect all numeric columns)'}`);
+        
+        // Call Python service for aggregation
+        // Pass original message for semantic intent detection (average, median, highest, etc.)
+        const result = await aggregateData(
+          data,
+          groupBy,
+          aggColumnsForPython,
+          intent.aggFuncs,
+          intent.orderByColumn,
+          intent.orderByDirection,
+          originalMessage  // Pass user's original message for semantic analysis
+        );
+
+        const aggregatedData = result.data;
+        const rowsBefore = result.rows_before;
+        const rowsAfter = result.rows_after;
+
+        // Build description
+        const allAggColumns = intent.aggColumns || [];
+        const funcDesc = intent.aggFunc || 'sum';
+        const aggColCount = aggregatedData.length > 0 ? Object.keys(aggregatedData[0]).filter(k => k !== groupBy && !k.includes('(Sum)') && !k.includes('(Avg)') && !k.includes('(Min)') && !k.includes('(Max)') && !k.includes('(Count)') && !k.endsWith('_count')).length : 0;
+        const numericColCount = Object.keys(aggregatedData[0] || {}).filter(k => k.includes('(Sum)') || k.includes('(Avg)') || k.includes('(Min)') || k.includes('(Max)') || k.includes('(Count)')).length;
+        let description = `Aggregated data by "${groupBy}" using ${funcDesc} for ${numericColCount} numeric column${numericColCount === 1 ? '' : 's'} (excluding ID and string columns)`;
+
+        // Save aggregated data to session (this changes the data structure permanently)
+        // This saves the transformed data to blob storage in JSON format and updates the session document
+        // All subsequent operations will use this aggregated data instead of the original data
+        const saveResult = await saveModifiedData(
+          sessionId,
+          aggregatedData,
+          'aggregate',
+          description,
+          sessionDoc
+        );
+
+        let answer = `✅ I've created a new aggregated table grouped by "${groupBy}".`;
+        answer += ` Aggregated ${numericColCount} numeric column${numericColCount === 1 ? '' : 's'} (excluding ID columns and string columns).`;
+        answer += ` The new table has ${rowsAfter} row${rowsAfter === 1 ? '' : 's'} (down from ${rowsBefore}) and has been saved to blob storage.`;
+        if (intent.orderByColumn) {
+          answer += ` Results are sorted by ${intent.orderByColumn} ${intent.orderByDirection === 'desc' ? 'descending' : 'ascending'}.`;
         }
-      }
 
-      const aggColumns =
-        intent.aggColumns && intent.aggColumns.length > 0
-          ? intent.aggColumns
-          : Array.from(numericCols);
+        // For aggregation, always show the aggregated data (first 50 rows)
+        // Don't try to get from CosmosDB rawData as it might be empty for large datasets
+        const previewData = aggregatedData.length > 0 ? aggregatedData.slice(0, 50) : [];
+        
+        console.log(`✅ Aggregation complete: ${rowsAfter} rows, showing preview of ${previewData.length} rows`);
+        if (previewData.length > 0) {
+          console.log(`📊 Preview columns: ${Object.keys(previewData[0]).join(', ')}`);
+          console.log(`📊 Sample row:`, JSON.stringify(previewData[0], null, 2));
+        } else {
+          console.warn(`⚠️ No preview data available - aggregatedData is empty`);
+        }
 
-      if (aggColumns.length === 0) {
         return {
-          answer: `I couldn't find any numeric columns to aggregate (other than "${groupBy}").`,
+          answer,
+          data: aggregatedData, // Full aggregated dataset
+          preview: previewData,  // Preview for display (first 50 rows)
+          saved: true,
+        };
+      } catch (error) {
+        console.error('Error calling Python service for aggregation:', error);
+        return {
+          answer: `Error during aggregation: ${error instanceof Error ? error.message : String(error)}. Please try again.`,
         };
       }
-
-      // Parse aggregation functions from user message or use defaults
-      const message = (originalMessage || '').toLowerCase();
-      const aggFuncs: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'> = intent.aggFuncs || {};
-      
-      // Try to infer aggregation functions from column names or message
-      for (const col of aggColumns) {
-        if (!aggFuncs[col]) {
-          const colLower = col.toLowerCase();
-          // Check if column name or message mentions specific aggregation
-          // Patterns: "Total Sales" -> sum, "Avg Spend" -> avg, "Sales (Sum)" -> sum, etc.
-          if (message.includes(`total ${colLower}`) || message.includes(`${colLower} (sum`) || 
-              message.includes(`sum ${colLower}`) || message.includes(`sum of ${colLower}`)) {
-            aggFuncs[col] = 'sum';
-          } else if (message.includes(`avg ${colLower}`) || message.includes(`average ${colLower}`) ||
-              message.includes(`${colLower} (avg`) || message.includes(`${colLower} (mean`) || 
-              message.includes(`mean ${colLower}`) || message.includes(`avg of ${colLower}`)) {
-            aggFuncs[col] = 'avg';
-          } else if (message.includes(`min ${colLower}`) || message.includes(`minimum ${colLower}`) ||
-              message.includes(`${colLower} (min`)) {
-            aggFuncs[col] = 'min';
-          } else if (message.includes(`max ${colLower}`) || message.includes(`maximum ${colLower}`) ||
-              message.includes(`${colLower} (max`)) {
-            aggFuncs[col] = 'max';
-          } else if (message.includes(`count ${colLower}`) || message.includes(`count of ${colLower}`) ||
-              message.includes(`${colLower} (count`)) {
-            aggFuncs[col] = 'count';
-          } else {
-            // Default to sum
-            aggFuncs[col] = intent.aggFunc || 'sum';
-          }
-        }
-      }
-
-      // Track aggregation data: for sum/avg we need sum and count, for min/max we track min/max values
-      type AggBucket = {
-        sum?: number;
-        count: number;
-        min?: number;
-        max?: number;
-        values: number[];
-      };
-
-      const aggMap = new Map<string, Record<string, AggBucket>>();
-
-      for (const row of data) {
-        const key = String(row[groupBy]);
-        if (!aggMap.has(key)) {
-          aggMap.set(key, {});
-        }
-        const bucket = aggMap.get(key)!;
-
-        for (const col of aggColumns) {
-          if (!bucket[col]) {
-            bucket[col] = { count: 0, values: [] };
-          }
-
-          const rawVal = row[col];
-          const numVal =
-            typeof rawVal === 'number'
-              ? rawVal
-              : typeof rawVal === 'string' && rawVal.trim() !== ''
-              ? Number(rawVal)
-              : NaN;
-
-          if (!Number.isNaN(numVal)) {
-            const func = aggFuncs[col];
-            const b = bucket[col];
-            b.count++;
-            b.values.push(numVal);
-
-            if (func === 'sum' || func === 'avg' || func === 'mean') {
-              b.sum = (b.sum || 0) + numVal;
-            }
-            if (func === 'min') {
-              b.min = b.min === undefined ? numVal : Math.min(b.min, numVal);
-            }
-            if (func === 'max') {
-              b.max = b.max === undefined ? numVal : Math.max(b.max, numVal);
-            }
-          }
-        }
-      }
-
-      // Build aggregated data with proper column names showing aggregation function
-      const aggregatedData: Record<string, any>[] = [];
-      const columnNames: string[] = [groupBy];
-
-      for (const [key, bucket] of aggMap.entries()) {
-        const row: Record<string, any> = { [groupBy]: key };
-        
-        for (const col of aggColumns) {
-          const b = bucket[col];
-          if (!b || b.count === 0) continue;
-
-          const func = aggFuncs[col];
-          let value: number;
-          let displayName: string;
-
-          switch (func) {
-            case 'avg':
-            case 'mean':
-              value = b.sum! / b.count;
-              displayName = `${col} (Avg)`;
-              break;
-            case 'min':
-              value = b.min!;
-              displayName = `${col} (Min)`;
-              break;
-            case 'max':
-              value = b.max!;
-              displayName = `${col} (Max)`;
-              break;
-            case 'count':
-              value = b.count;
-              displayName = `${col} (Count)`;
-              break;
-            case 'sum':
-            default:
-              value = b.sum || 0;
-              displayName = `${col} (Sum)`;
-              break;
-          }
-
-          row[displayName] = Math.round(value * 100) / 100;
-          if (!columnNames.includes(displayName)) {
-            columnNames.push(displayName);
-          }
-        }
-        aggregatedData.push(row);
-      }
-
-      // Apply sorting if orderByColumn is specified
-      if (intent.orderByColumn) {
-        // Find the display name for the order by column (it might be aggregated)
-        let sortColumn = intent.orderByColumn;
-        
-        // Check if it's an aggregated column (has a display name)
-        const matchingDisplayName = columnNames.find(name => 
-          name.toLowerCase().includes(intent.orderByColumn!.toLowerCase())
-        );
-        if (matchingDisplayName) {
-          sortColumn = matchingDisplayName;
-        } else {
-          // Fallback: try to find by exact match or partial match
-          const exactMatch = columnNames.find(name => 
-            name.toLowerCase() === intent.orderByColumn!.toLowerCase()
-          );
-          if (exactMatch) {
-            sortColumn = exactMatch;
-          }
-        }
-
-        const direction = intent.orderByDirection || 'asc';
-        aggregatedData.sort((a, b) => {
-          const aVal = a[sortColumn];
-          const bVal = b[sortColumn];
-          
-          // Handle null/undefined
-          if (aVal == null && bVal == null) return 0;
-          if (aVal == null) return direction === 'asc' ? -1 : 1;
-          if (bVal == null) return direction === 'asc' ? 1 : -1;
-          
-          // Numeric comparison
-          if (typeof aVal === 'number' && typeof bVal === 'number') {
-            return direction === 'asc' ? aVal - bVal : bVal - aVal;
-          }
-          
-          // String comparison
-          const aStr = String(aVal);
-          const bStr = String(bVal);
-          const comparison = aStr.localeCompare(bStr);
-          return direction === 'asc' ? comparison : -comparison;
-        });
-      }
-
-      const funcSummary = Object.values(aggFuncs).reduce((acc, f) => {
-        acc[f] = (acc[f] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
-      const funcDesc = Object.entries(funcSummary)
-        .map(([f, c]) => `${c} ${f}`)
-        .join(', ');
-
-      // Save aggregated data to session (this changes the data structure permanently)
-      const saveResult = await saveModifiedData(
-        sessionId,
-        aggregatedData,
-        'aggregate',
-        `Aggregated data by "${groupBy}" using ${funcDesc} for ${aggColumns.length} column${aggColumns.length === 1 ? '' : 's'}`,
-        sessionDoc
-      );
-
-      let answer = `✅ I've aggregated the data by "${groupBy}" using ${funcDesc} for ${aggColumns.length} column${aggColumns.length === 1 ? '' : 's'}.`;
-      if (intent.orderByColumn) {
-        answer += ` Results are sorted by ${intent.orderByColumn} ${intent.orderByDirection === 'desc' ? 'descending' : 'ascending'}.`;
-      }
-      answer += ` The data structure has been updated - you now have ${aggregatedData.length} row${aggregatedData.length === 1 ? '' : 's'} grouped by "${groupBy}".`;
-
-      // Get preview from saved data
-      const previewData = await getPreviewFromSavedData(sessionId, aggregatedData);
-
-      return {
-        answer,
-        data: aggregatedData,
-        preview: previewData,
-        saved: true,
-      };
     }
 
     case 'pivot': {
-      // Pivot is a specialized aggregate: group by index and aggregate selected value columns
+      // Use Python service for pivot table creation
       const indexCol =
         intent.pivotIndex ||
         intent.groupByColumn ||
@@ -3469,7 +3809,7 @@ export async function executeDataOperation(
       }
 
       const allColumns = Object.keys(data[0] || {});
-      let valueColumns =
+      const valueColumns =
         intent.pivotValues && intent.pivotValues.length > 0
           ? intent.pivotValues
           : allColumns.filter(c => c !== indexCol);
@@ -3480,168 +3820,94 @@ export async function executeDataOperation(
         };
       }
 
-      // Parse aggregation functions from user message or use defaults
-      const message = (originalMessage || '').toLowerCase();
-      const pivotFuncs: Record<string, 'sum' | 'avg' | 'mean' | 'min' | 'max' | 'count'> = intent.pivotFuncs || {};
-      
-      // Try to infer aggregation functions from column names or message
-      for (const col of valueColumns) {
-        if (!pivotFuncs[col]) {
-          const colLower = col.toLowerCase();
-          // Check if column name or message mentions specific aggregation
-          // Patterns: "Total Sales" -> sum, "Avg Spend" -> avg, "Sales (Sum)" -> sum, etc.
-          if (message.includes(`total ${colLower}`) || message.includes(`${colLower} (sum`) || 
-              message.includes(`sum ${colLower}`) || message.includes(`sum of ${colLower}`)) {
-            pivotFuncs[col] = 'sum';
-          } else if (message.includes(`avg ${colLower}`) || message.includes(`average ${colLower}`) ||
-              message.includes(`${colLower} (avg`) || message.includes(`${colLower} (mean`) || 
-              message.includes(`mean ${colLower}`) || message.includes(`avg of ${colLower}`)) {
-            pivotFuncs[col] = 'avg';
-          } else if (message.includes(`min ${colLower}`) || message.includes(`minimum ${colLower}`) ||
-              message.includes(`${colLower} (min`)) {
-            pivotFuncs[col] = 'min';
-          } else if (message.includes(`max ${colLower}`) || message.includes(`maximum ${colLower}`) ||
-              message.includes(`${colLower} (max`)) {
-            pivotFuncs[col] = 'max';
-          } else if (message.includes(`count ${colLower}`) || message.includes(`count of ${colLower}`) ||
-              message.includes(`${colLower} (count`)) {
-            pivotFuncs[col] = 'count';
-          } else {
-            // Default to sum for pivot
-            pivotFuncs[col] = 'sum';
-          }
+      try {
+        console.log(`🔄 Starting pivot operation: indexCol="${indexCol}", valueColumns=[${valueColumns.join(', ')}]`);
+        console.log(`📊 Input data: ${data.length} rows`);
+        if (data.length > 0) {
+          console.log(`📊 Input columns: ${Object.keys(data[0]).join(', ')}`);
+          console.log(`📊 Sample input row:`, JSON.stringify(data[0], null, 2));
         }
-      }
-
-      // Track aggregation data: for sum/avg we need sum and count, for min/max we track min/max values
-      type AggBucket = {
-        sum?: number;
-        count: number;
-        min?: number;
-        max?: number;
-        values: number[];
-      };
-
-      const aggMap = new Map<string, Record<string, AggBucket>>();
-
-      for (const row of data) {
-        const key = String(row[indexCol]);
-        if (!aggMap.has(key)) {
-          aggMap.set(key, {});
-        }
-        const bucket = aggMap.get(key)!;
-
-        for (const col of valueColumns) {
-          if (!bucket[col]) {
-            bucket[col] = { count: 0, values: [] };
-          }
-
-          const rawVal = row[col];
-          const numVal =
-            typeof rawVal === 'number'
-              ? rawVal
-              : typeof rawVal === 'string' && rawVal.trim() !== ''
-              ? Number(rawVal)
-              : NaN;
-
-          if (!Number.isNaN(numVal)) {
-            const func = pivotFuncs[col];
-            const b = bucket[col];
-            b.count++;
-            b.values.push(numVal);
-
-            if (func === 'sum' || func === 'avg' || func === 'mean') {
-              b.sum = (b.sum || 0) + numVal;
-            }
-            if (func === 'min') {
-              b.min = b.min === undefined ? numVal : Math.min(b.min, numVal);
-            }
-            if (func === 'max') {
-              b.max = b.max === undefined ? numVal : Math.max(b.max, numVal);
-            }
-          }
-        }
-      }
-
-      // Build pivot data with proper column names showing aggregation function
-      const pivotData: Record<string, any>[] = [];
-      const columnNames: string[] = [indexCol];
-
-      for (const [key, bucket] of aggMap.entries()) {
-        const row: Record<string, any> = { [indexCol]: key };
         
-        for (const col of valueColumns) {
-          const b = bucket[col];
-          if (!b || b.count === 0) continue;
+        // Call Python service for pivot table
+        const result = await createPivotTable(
+          data,
+          indexCol,
+          valueColumns,
+          intent.pivotFuncs
+        );
 
-          const func = pivotFuncs[col];
-          let value: number;
-          let displayName: string;
+        console.log(`✅ Python service returned pivot result:`);
+        console.log(`   - rows_before: ${result.rows_before}`);
+        console.log(`   - rows_after: ${result.rows_after}`);
+        console.log(`   - data length: ${result.data?.length || 0}`);
 
-          switch (func) {
-            case 'avg':
-            case 'mean':
-              value = b.sum! / b.count;
-              displayName = `${col} (Avg)`;
-              break;
-            case 'min':
-              value = b.min!;
-              displayName = `${col} (Min)`;
-              break;
-            case 'max':
-              value = b.max!;
-              displayName = `${col} (Max)`;
-              break;
-            case 'count':
-              value = b.count;
-              displayName = `${col} (Count)`;
-              break;
-            case 'sum':
-            default:
-              value = b.sum || 0;
-              displayName = `${col} (Sum)`;
-              break;
-          }
+        const pivotData = result.data;
+        const rowsBefore = result.rows_before;
+        const rowsAfter = result.rows_after;
 
-          row[displayName] = Math.round(value * 100) / 100;
-          if (!columnNames.includes(displayName)) {
-            columnNames.push(displayName);
+        if (!pivotData || pivotData.length === 0) {
+          console.error(`❌ Pivot returned empty data!`);
+          return {
+            answer: `Error: Pivot operation returned no data. Please check your data and try again.`,
+          };
+        }
+
+        console.log(`📊 Pivot data details:`);
+        console.log(`   - Total rows: ${pivotData.length}`);
+        console.log(`   - Columns: ${Object.keys(pivotData[0] || {}).join(', ')}`);
+        if (pivotData.length > 0) {
+          console.log(`   - Sample pivot row:`, JSON.stringify(pivotData[0], null, 2));
+          if (pivotData.length > 1) {
+            console.log(`   - Second pivot row:`, JSON.stringify(pivotData[1], null, 2));
           }
         }
-        pivotData.push(row);
+
+        // Build description
+        let description = `Created pivot on "${indexCol}" showing ${valueColumns.length} column${valueColumns.length === 1 ? '' : 's'}`;
+
+        // Save pivot data to session (this changes the data structure permanently)
+        // This saves the transformed data to blob storage in JSON format and updates the session document
+        // All subsequent operations will use this pivoted data instead of the original data
+        console.log(`💾 Saving pivot data to blob storage...`);
+        const saveResult = await saveModifiedData(
+          sessionId,
+          pivotData,
+          'pivot',
+          description,
+          sessionDoc
+        );
+        console.log(`✅ Saved pivot data: version ${saveResult.version}, blob: ${saveResult.blobName}`);
+
+        let answer = `✅ I've created a pivot on "${indexCol}" showing ${valueColumns.length} column${valueColumns.length === 1 ? '' : 's'}.`;
+        answer += ` The data structure has been updated - you now have ${rowsAfter} row${rowsAfter === 1 ? '' : 's'} (down from ${rowsBefore}) grouped by "${indexCol}".`;
+
+        // For pivot, always show the pivoted data (first 50 rows)
+        // Don't try to get from CosmosDB rawData as it might be empty for large datasets
+        const previewData = pivotData.length > 0 ? pivotData.slice(0, 50) : [];
+        
+        console.log(`✅ Pivot complete: ${rowsAfter} rows, showing preview of ${previewData.length} rows`);
+        if (previewData.length > 0) {
+          console.log(`📊 Preview columns: ${Object.keys(previewData[0]).join(', ')}`);
+          console.log(`📊 Preview sample row:`, JSON.stringify(previewData[0], null, 2));
+        } else {
+          console.warn(`⚠️ No preview data available - pivotData is empty`);
+        }
+
+        console.log(`📤 Returning pivot result: answer length=${answer.length}, preview rows=${previewData.length}, saved=${true}`);
+
+        return {
+          answer,
+          data: pivotData, // Full pivoted dataset
+          preview: previewData,  // Preview for display (first 50 rows)
+          saved: true,
+        };
+      } catch (error) {
+        console.error('❌ Error calling Python service for pivot:', error);
+        console.error('❌ Error stack:', error instanceof Error ? error.stack : 'No stack trace');
+        return {
+          answer: `Error during pivot creation: ${error instanceof Error ? error.message : String(error)}. Please try again.`,
+        };
       }
-
-      const funcSummary = Object.values(pivotFuncs).reduce((acc, f) => {
-        acc[f] = (acc[f] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
-      const funcDesc = Object.entries(funcSummary)
-        .map(([f, c]) => `${c} ${f}`)
-        .join(', ');
-
-      // Save pivot data to session (this changes the data structure permanently)
-      const saveResult = await saveModifiedData(
-        sessionId,
-        pivotData,
-        'pivot',
-        `Created pivot on "${indexCol}" showing ${valueColumns.join(', ')} (aggregated using ${funcDesc})`,
-        sessionDoc
-      );
-
-      let answer = `✅ I've created a pivot on "${indexCol}" showing ${valueColumns.join(
-        ', ',
-      )} (aggregated using ${funcDesc}).`;
-      answer += ` The data structure has been updated - you now have ${pivotData.length} row${pivotData.length === 1 ? '' : 's'} grouped by "${indexCol}".`;
-
-      // Get preview from saved data
-      const previewData = await getPreviewFromSavedData(sessionId, pivotData);
-
-      return {
-        answer,
-        data: pivotData,
-        preview: previewData,
-        saved: true,
-      };
     }
 
     case 'remove_rows': {
@@ -4229,6 +4495,147 @@ export async function executeDataOperation(
       }
     }
     
+    case 'identify_outliers': {
+      // Validate input data
+      if (!data || data.length === 0) {
+        return {
+          answer: '❌ No data available to process. Please ensure your dataset has been loaded correctly.',
+        };
+      }
+
+      try {
+        const method = intent.outlierMethod || 'iqr';
+        const threshold = intent.outlierThreshold || (method === 'zscore' ? 3 : 1.5);
+        
+        const result = await identifyOutliers(
+          data,
+          intent.column,
+          method,
+          threshold
+        );
+
+        // Format response
+        let answer = `📊 Outlier Analysis Results:\n\n`;
+        answer += `**Method Used:** ${method.toUpperCase()}\n`;
+        answer += `**Threshold:** ${threshold}\n`;
+        answer += `**Total Outliers Found:** ${result.summary.total_outliers}\n\n`;
+
+        if (result.summary.outliers_by_column && Object.keys(result.summary.outliers_by_column).length > 0) {
+          answer += `**Outliers by Column:**\n`;
+          Object.entries(result.summary.outliers_by_column).forEach(([col, count]) => {
+            answer += `- ${col}: ${count} outlier(s)\n`;
+          });
+          answer += `\n`;
+        }
+
+        if (result.outliers.length > 0) {
+          answer += `**Outlier Details (showing first 20):**\n`;
+          result.outliers.slice(0, 20).forEach((outlier, idx) => {
+            answer += `${idx + 1}. Row ${outlier.row_index + 1}, Column "${outlier.column}": ${outlier.value}`;
+            if (outlier.z_score !== undefined) {
+              answer += ` (z-score: ${outlier.z_score.toFixed(2)})`;
+            }
+            if (outlier.iqr_lower !== undefined && outlier.iqr_upper !== undefined) {
+              answer += ` (bounds: ${outlier.iqr_lower.toFixed(2)} - ${outlier.iqr_upper.toFixed(2)})`;
+            }
+            answer += `\n`;
+          });
+          
+          if (result.outliers.length > 20) {
+            answer += `\n... and ${result.outliers.length - 20} more outliers.\n`;
+          }
+          
+          answer += `\n💡 Would you like me to treat these outliers? I can remove them, cap them, or replace them with mean/median values.`;
+        } else {
+          answer += `✅ No outliers detected using the ${method} method with threshold ${threshold}.`;
+        }
+
+        return {
+          answer,
+          saved: false, // Identification doesn't modify data
+        };
+      } catch (error) {
+        console.error('Outlier identification error:', error);
+        return {
+          answer: `Failed to identify outliers: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
+        };
+      }
+    }
+
+    case 'treat_outliers': {
+      // Validate input data
+      if (!data || data.length === 0) {
+        return {
+          answer: '❌ No data available to process. Please ensure your dataset has been loaded correctly.',
+        };
+      }
+
+      try {
+        const method = intent.outlierMethod || 'iqr';
+        const threshold = intent.outlierThreshold || (method === 'zscore' ? 3 : 1.5);
+        const treatment = intent.treatmentMethod || 'remove';
+        const treatmentValue = intent.treatmentValue;
+
+        console.log(`🔍 Outlier treatment parameters:`, {
+          method,
+          threshold,
+          treatment,
+          treatmentValue,
+          column: intent.column
+        });
+
+        const result = await treatOutliers(
+          data,
+          intent.column,
+          method,
+          threshold,
+          treatment,
+          treatmentValue
+        );
+
+        // Save modified data
+        const saveResult = await saveModifiedData(
+          sessionId,
+          result.data,
+          'treat_outliers',
+          `Treated ${result.outliers_treated} outliers using ${method} method with ${treatment} treatment`,
+          sessionDoc
+        );
+
+        // Format response
+        let answer = `✅ Successfully treated outliers:\n\n`;
+        answer += `**Method:** ${method.toUpperCase()}\n`;
+        answer += `**Treatment:** ${treatment}\n`;
+        if (treatmentValue) {
+          answer += `**Treatment Value:** ${treatmentValue}\n`;
+        }
+        answer += `**Outliers Treated:** ${result.outliers_treated}\n`;
+        answer += `**Rows:** ${result.rows_before} → ${result.rows_after}\n`;
+
+        if (result.summary.outliers_by_column && Object.keys(result.summary.outliers_by_column).length > 0) {
+          answer += `\n**Treated by Column:**\n`;
+          Object.entries(result.summary.outliers_by_column).forEach(([col, count]) => {
+            answer += `- ${col}: ${count} outlier(s)\n`;
+          });
+        }
+
+        // Get preview from saved data
+        const previewData = await getPreviewFromSavedData(sessionId, result.data);
+
+        return {
+          answer,
+          data: result.data,
+          preview: previewData,
+          saved: true,
+        };
+      } catch (error) {
+        console.error('Outlier treatment error:', error);
+        return {
+          answer: `Failed to treat outliers: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
+        };
+      }
+    }
+
     case 'revert': {
       // Load original data from blob
       if (!sessionDoc) {
@@ -4288,6 +4695,13 @@ export async function executeDataOperation(
     
     default:
       // For unknown operations, try to provide a helpful response
+      console.error(`❌ Unknown operation: "${intent.operation}". Intent details:`, {
+        operation: intent.operation,
+        groupByColumn: intent.groupByColumn,
+        aggColumns: intent.aggColumns,
+        requiresClarification: intent.requiresClarification,
+        clarificationMessage: intent.clarificationMessage,
+      });
       return {
         answer: 'I can help you with data operations like:\n\n' +
           '• **Revert data**: "Revert to original" or "Restore original data"\n' +

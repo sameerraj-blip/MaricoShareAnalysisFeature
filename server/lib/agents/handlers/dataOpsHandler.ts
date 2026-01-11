@@ -50,16 +50,26 @@ export class DataOpsHandler extends BaseHandler {
         limit: intent.limit,
         requiresClarification: false,
       };
+      console.log(`📋 Using operation from intent: ${dataOpsIntent.operation}`);
     } else {
+      console.log(`🔍 Parsing data ops intent for: "${requestText}"`);
       dataOpsIntent = await parseDataOpsIntent(
         requestText,
         context.chatHistory,
         context.summary,
         sessionDoc
       );
+      console.log(`📋 Parsed intent:`, {
+        operation: dataOpsIntent.operation,
+        groupByColumn: dataOpsIntent.groupByColumn,
+        aggColumns: dataOpsIntent.aggColumns,
+        requiresClarification: dataOpsIntent.requiresClarification,
+        clarificationMessage: dataOpsIntent.clarificationMessage,
+      });
     }
 
     if (dataOpsIntent.requiresClarification) {
+      console.log(`⚠️ Intent requires clarification: ${dataOpsIntent.clarificationMessage}`);
       return {
         answer: dataOpsIntent.clarificationMessage || 'Could you clarify which part of the data to work with?',
         requiresClarification: true,
@@ -79,9 +89,14 @@ export class DataOpsHandler extends BaseHandler {
         chatHistory
       );
 
+      console.log(`📊 DataOpsHandler returning: answer length=${result.answer.length}, preview rows=${result.preview?.length || 0}, saved=${result.saved}`);
+      if (result.preview && result.preview.length > 0) {
+        console.log(`📊 Preview sample:`, JSON.stringify(result.preview[0], null, 2));
+      }
+      
       return {
         answer: result.answer,
-        table: result.preview,
+        table: result.preview || result.data?.slice(0, 50) || [], // Fallback to data if preview not set
         operationResult: {
           summary: result.summary,
           saved: result.saved,
