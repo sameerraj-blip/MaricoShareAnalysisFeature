@@ -629,18 +629,71 @@ def create_derived_column(
     df = pd.DataFrame(data)
     errors = []
     
+    def find_column_fuzzy(search_name: str) -> str | None:
+        """Find column name using fuzzy matching (case-insensitive, handles spaces/underscores)"""
+        if not search_name:
+            return None
+        
+        search_normalized = search_name.strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+        
+        # First try exact match (case-insensitive)
+        for col in df.columns:
+            if col.strip().lower() == search_name.strip().lower():
+                return col
+        
+        # Then try normalized match (ignoring spaces, underscores, dashes)
+        for col in df.columns:
+            col_normalized = col.strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+            if col_normalized == search_normalized:
+                return col
+        
+        # Then try prefix match
+        for col in df.columns:
+            col_normalized = col.strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+            if col_normalized.startswith(search_normalized) and len(search_normalized) >= 3:
+                return col
+        
+        # Then try contains match
+        for col in df.columns:
+            col_normalized = col.strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+            if search_normalized in col_normalized and len(search_normalized) >= 3:
+                return col
+        
+        return None
+    
     # Replace [ColumnName] with df['ColumnName'] in expression
     # Pattern: [ColumnName] or [Column Name]
+    # Handle nested brackets by replacing from innermost to outermost
     def replace_column_ref(match):
         col_name = match.group(1)
-        if col_name in df.columns:
-            return f"df['{col_name}']"
+        # Try to find the column using fuzzy matching
+        matched_col = find_column_fuzzy(col_name)
+        
+        if matched_col:
+            # Escape single quotes in column name if present
+            col_name_escaped = matched_col.replace("'", "\\'")
+            return f"df['{col_name_escaped}']"
         else:
-            errors.append(f"Column '{col_name}' not found in expression")
+            # Show available columns in error message for debugging
+            available_cols = list(df.columns)[:10]  # Show first 10 columns
+            available_cols_str = ', '.join(available_cols)
+            if len(df.columns) > 10:
+                available_cols_str += f", ... (total: {len(df.columns)} columns)"
+            errors.append(
+                f"Column '{col_name}' not found. Available columns: {available_cols_str}"
+            )
             return "None"
     
-    # Replace [ColumnName] patterns
-    python_expr = re.sub(r'\[([^\]]+)\]', replace_column_ref, expression)
+    # Replace [ColumnName] patterns - process multiple times to handle nested cases
+    python_expr = expression
+    max_iterations = 10  # Prevent infinite loops
+    iteration = 0
+    while '[' in python_expr and iteration < max_iterations:
+        new_expr = re.sub(r'\[([^\]]+)\]', replace_column_ref, python_expr)
+        if new_expr == python_expr:
+            break  # No more replacements
+        python_expr = new_expr
+        iteration += 1
     
     if errors:
         return {
@@ -648,17 +701,131 @@ def create_derived_column(
             "errors": errors
         }
     
+    # Debug: print the expression being evaluated and available columns
+    print(f"Evaluating expression: {python_expr}")
+    print(f"Available columns in DataFrame: {list(df.columns)}")
+    print(f"DataFrame shape: {df.shape}")
+    
     try:
+        # Check if expression uses Python ternary (if...else) instead of np.where
+        # This will cause "ambiguous truth value" error with boolean arrays
+        if ' if ' in python_expr and ' else ' in python_expr and 'np.where' not in python_expr:
+            # Try to convert simple Python ternary to np.where using AST parsing
+            # Pattern: value_if_true if condition else value_if_false
+            # Convert to: np.where(condition, value_if_true, value_if_false)
+            try:
+                # Use regex to match common ternary patterns
+                # Pattern 1: "value1" if condition else "value2" (same quotes)
+                ternary_pattern1 = r'(["\'])([^"\']+)\1\s+if\s+(.+?)\s+else\s+\1([^"\']+)\1'
+                match = re.search(ternary_pattern1, python_expr)
+                if match:
+                    quote = match.group(1)
+                    value_if_true = f"{quote}{match.group(2)}{quote}"
+                    condition = match.group(3).strip()
+                    value_if_false = f"{quote}{match.group(4)}{quote}"
+                    python_expr = f"np.where({condition}, {value_if_true}, {value_if_false})"
+                    print(f"Converted Python ternary to np.where (pattern 1): {python_expr}")
+                else:
+                    # Pattern 2: 'value1' if condition else 'value2' (different quotes or no quotes)
+                    ternary_pattern2 = r'(["\']?)([^"\']+?)\1\s+if\s+(.+?)\s+else\s+(["\']?)([^"\']+?)\4'
+                    match = re.search(ternary_pattern2, python_expr)
+                    if match:
+                        quote1 = match.group(1) if match.group(1) else ''
+                        value_if_true = f"{quote1}{match.group(2)}{quote1}" if quote1 else match.group(2)
+                        condition = match.group(3).strip()
+                        quote2 = match.group(4) if match.group(4) else ''
+                        value_if_false = f"{quote2}{match.group(5)}{quote2}" if quote2 else match.group(5)
+                        python_expr = f"np.where({condition}, {value_if_true}, {value_if_false})"
+                        print(f"Converted Python ternary to np.where (pattern 2): {python_expr}")
+                    else:
+                        # Couldn't auto-convert, provide helpful error
+                        errors.append(
+                            "Conditional expressions must use np.where() format, not Python 'if...else'. "
+                            f"Found: {python_expr}. "
+                            "Please use format: np.where(condition, value_if_true, value_if_false). "
+                            "Example: np.where(df['qty_ordered'] > df['qty_ordered'].mean(), 'outperform', 'notperforming')"
+                        )
+                        return {
+                            "data": data,
+                            "errors": errors
+                        }
+            except Exception as e:
+                # If AST parsing fails, try simple regex fallback
+                try:
+                    # Match: "value1" if condition else "value2"
+                    ternary_pattern = r'(["\'])([^"\']+)\1\s+if\s+(.+?)\s+else\s+(["\'])([^"\']+)\4'
+                    match = re.search(ternary_pattern, python_expr)
+                    if match:
+                        value_if_true = f"{match.group(1)}{match.group(2)}{match.group(1)}"
+                        condition = match.group(3).strip()
+                        value_if_false = f"{match.group(4)}{match.group(5)}{match.group(4)}"
+                        python_expr = f"np.where({condition}, {value_if_true}, {value_if_false})"
+                        print(f"Converted Python ternary to np.where (regex fallback): {python_expr}")
+                    else:
+                        # Couldn't auto-convert, provide helpful error
+                        errors.append(
+                            f"Error processing conditional expression: {str(e)}. "
+                            "Conditional expressions must use np.where() format, not Python 'if...else'. "
+                            f"Found: {python_expr}. "
+                            "Please use format: np.where(condition, value_if_true, value_if_false). "
+                            "Example: np.where(df['qty_ordered'] > df['qty_ordered'].mean(), 'outperform', 'notperforming')"
+                        )
+                        return {
+                            "data": data,
+                            "errors": errors
+                        }
+                except Exception as e2:
+                    # If everything fails, provide helpful error
+                    errors.append(
+                        f"Error processing conditional expression: {str(e2)}. "
+                        "Conditional expressions must use np.where() format. "
+                        "Example: np.where(df['qty_ordered'] > df['qty_ordered'].mean(), 'outperform', 'notperforming')"
+                    )
+                    return {
+                        "data": data,
+                        "errors": errors
+                    }
+        
         # Evaluate the expression
-        # Use safe evaluation context
-        safe_dict = {"df": df, "pd": pd, "np": np, "__builtins__": {}}
+        # Use safe evaluation context with additional numpy/pandas functions
+        safe_dict = {
+            "df": df, 
+            "pd": pd, 
+            "np": np, 
+            "__builtins__": {},
+            # Add common numpy/pandas functions that might be used
+            "mean": lambda x: x.mean() if hasattr(x, 'mean') else np.mean(x),
+            "std": lambda x: x.std() if hasattr(x, 'std') else np.std(x),
+            "sum": lambda x: x.sum() if hasattr(x, 'sum') else np.sum(x),
+            "max": lambda x: x.max() if hasattr(x, 'max') else np.max(x),
+            "min": lambda x: x.min() if hasattr(x, 'min') else np.min(x),
+        }
+        
         result = eval(python_expr, safe_dict)
         
         # Handle scalar result (same value for all rows)
-        if isinstance(result, (int, float, str, bool)) or pd.isna(result):
+        if isinstance(result, (int, float, str, bool)) or (isinstance(result, float) and pd.isna(result)):
             df[new_column_name] = result
         elif isinstance(result, pd.Series):
-            df[new_column_name] = result
+            # Ensure the Series has the same index as df
+            if len(result) == len(df) and result.index.equals(df.index):
+                df[new_column_name] = result
+            elif len(result) == len(df):
+                # Same length but different index - reset index
+                df[new_column_name] = result.values
+            else:
+                # Try to align
+                df[new_column_name] = result
+        elif isinstance(result, np.ndarray):
+            # Convert numpy array to pandas Series
+            if len(result) == len(df):
+                df[new_column_name] = pd.Series(result, index=df.index)
+            else:
+                errors.append(f"Expression returned array of length {len(result)}, expected {len(df)}")
+                return {
+                    "data": data,
+                    "errors": errors
+                }
         else:
             errors.append(f"Expression returned unexpected type: {type(result)}")
             return {

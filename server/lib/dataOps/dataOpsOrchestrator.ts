@@ -1218,10 +1218,17 @@ export async function parseDataOpsIntent(
       (lowerMessage.includes('column') || lowerMessage.includes('new column'))) {
     
     // Check if it's a derived column (has expression with column references or operations)
-    if (lowerMessage.includes('sum') || lowerMessage.includes('add') || lowerMessage.includes('+') ||
+    // Also check for conditional logic (if/then/else/otherwise/when)
+    const hasConditionalLogic = /\b(if|when|where)\s+.+\s+(then|put|set|assign|use|return)/i.test(lowerMessage) ||
+                                 /\botherwise|else\b/i.test(lowerMessage) ||
+                                 /\bmore\s+than|less\s+than|greater\s+than|equal\s+to|not\s+equal/i.test(lowerMessage);
+    
+    if (hasConditionalLogic ||
+        lowerMessage.includes('sum') || lowerMessage.includes('add') || lowerMessage.includes('+') ||
         lowerMessage.includes('multiply') || lowerMessage.includes('*') || lowerMessage.includes('times') ||
         lowerMessage.includes('subtract') || lowerMessage.includes('-') || lowerMessage.includes('minus') ||
         lowerMessage.includes('divide') || lowerMessage.includes('/') ||
+        lowerMessage.includes('mean') || lowerMessage.includes('average') || lowerMessage.includes('median') ||
         lowerMessage.includes('=') && (lowerMessage.includes('[') || availableColumns.some(col => lowerMessage.includes(col)))) {
       // This is a derived column - will be handled by AI extraction
       return {
@@ -1795,11 +1802,13 @@ Operations:
 - "create_column": User wants to create new column with static/default value (e.g., "create column status with value active", "add column Notes", "create column Price with default 100")
   * Extract newColumnName: the name of the new column to create
   * Extract defaultValue: the static value to put in all rows (string, number, boolean, or null)
-- "create_derived_column": User wants to create new column from expression (e.g., "create column XYZ = A + B", "add two columns X and Y", "create column XYZ with sum of PA and PAB")
+- "create_derived_column": User wants to create new column from expression (e.g., "create column XYZ = A + B", "add two columns X and Y", "create column XYZ with sum of PA and PAB", "create column xyz where if qty_ordered is more than the mean of qty_ordered then put it as 'outperform' otherwise 'notperforming'")
   * Extract newColumnName: the name of the new column to create
   * Extract expression: formula using [ColumnName] format (e.g., "[PA nGRP Adstocked] + [PAB nGRP Adstocked]")
+  * For conditional logic (if/then/else), use np.where format: "np.where([Column] > [Column].mean(), 'value1', 'value2')"
   * If user says "sum of X and Y", expression should be "[X] + [Y]"
   * If user says "add X and Y", expression should be "[X] + [Y]"
+  * If user says "if X > mean(X) then 'A' else 'B'", expression should be "np.where([X] > [X].mean(), 'A', 'B')"
 - "modify_column": User wants to increase/decrease/multiply/divide an existing column
   * Extract column, transformType, transformValue
 - "normalize_column": User wants to normalize or standardize an existing column
@@ -2976,9 +2985,11 @@ User query: "${message}"
 
 Available columns: ${columnsList}
 
+CRITICAL: You MUST use EXACT column names from the available columns list above. Match column names case-sensitively and exactly as they appear in the list.
+
 Extract:
 1. newColumnName: The name of the new column to create
-2. expression: The formula using [ColumnName] format
+2. expression: The formula using [ColumnName] format where ColumnName must match EXACTLY one of the available columns
 
 Examples:
 - "create column XYZ with value of each row is the sum of PA nGRP Adstocked and PAB nGRP Adstocked"
@@ -2987,16 +2998,28 @@ Examples:
   → columnName: "Total", expression: "[Price] * [Quantity]"
 - "add two columns X and Y and name it Sum"
   → columnName: "Sum", expression: "[X] + [Y]"
+- "create column xyz where if qty_ordered is more than the mean of qty_ordered then put it as 'outperform' otherwise 'notperforming'"
+  → columnName: "xyz", expression: "np.where([qty_ordered] > [qty_ordered].mean(), 'outperform', 'notperforming')"
+- "add column status where if price > 100 then 'high' else 'low'"
+  → columnName: "status", expression: "np.where([price] > 100, 'high', 'low')"
+- "create column category where if quantity > mean(quantity) then 'above_average' otherwise 'below_average'"
+  → columnName: "category", expression: "np.where([quantity] > [quantity].mean(), 'above_average', 'below_average')"
 
 Rules:
 - Use [ColumnName] format for column references
+- CRITICAL: For conditional logic (if/then/else), you MUST use np.where(condition, value_if_true, value_if_false) format
+- NEVER use Python ternary operator (value_if_true if condition else value_if_false) - this will cause errors with arrays
+- For mean/average of a column, use [ColumnName].mean()
+- For comparisons: "more than" or "greater than" → >, "less than" → <, "equal to" → ==, "not equal" → !=
+- String values should be in quotes: 'value' or "value"
 - Default operation when multiple columns are mentioned is addition (+)
 - Match column names to available columns (case-insensitive)
+- When comparing a column to its mean: use [ColumnName] > [ColumnName].mean() inside np.where()
 
 Return JSON:
 {
   "columnName": "NewColumnName",
-  "expression": "[Column1] + [Column2]"
+  "expression": "[Column1] + [Column2]" or "np.where([Column1] > [Column1].mean(), 'value1', 'value2')"
 }`;
 
     const response = await openai.chat.completions.create({
@@ -3023,12 +3046,27 @@ Return JSON:
       const columnPattern = /\[([^\]]+)\]/g;
       const matches = [...expression.matchAll(columnPattern)];
       
+      // Track which columns were matched and which weren't
+      const unmatchedColumns: string[] = [];
+      
       for (const match of matches) {
         const colRef = match[1];
+        // Try to match the column name
         const matchedCol = findMatchingColumn(colRef, availableColumns);
         if (matchedCol) {
-          expression = expression.replace(`[${colRef}]`, `[${matchedCol}]`);
+          // Replace all occurrences of this column reference
+          expression = expression.replace(new RegExp(`\\[${colRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`, 'g'), `[${matchedCol}]`);
+          console.log(`✅ Matched column reference "${colRef}" → "${matchedCol}"`);
+        } else {
+          unmatchedColumns.push(colRef);
+          console.warn(`⚠️ Could not match column reference: "${colRef}"`);
         }
+      }
+      
+      // If there are unmatched columns, log available columns for debugging
+      if (unmatchedColumns.length > 0) {
+        console.warn(`⚠️ Unmatched columns: ${unmatchedColumns.join(', ')}`);
+        console.warn(`📋 Available columns (first 20): ${availableColumns.slice(0, 20).join(', ')}`);
       }
       
       return {
@@ -3495,16 +3533,37 @@ export async function executeDataOperation(
       }
       
       if (!expression) {
+        const availableColumns = sessionDoc?.dataSummary?.columns?.map(c => c.name) || Object.keys(data[0] || {});
+        const columnsList = availableColumns.slice(0, 10).join(', ');
         return {
-          answer: `Please specify the formula for column "${newColumnName}". For example: "Create column ${newColumnName} = [Column A] + [Column B]"`
+          answer: `Please specify the formula for column "${newColumnName}". For example: "Create column ${newColumnName} = [Column A] + [Column B]"\n\nAvailable columns: ${columnsList}${availableColumns.length > 10 ? '...' : ''}`
         };
       }
+      
+      // Log the expression and available columns for debugging
+      const availableColumns = sessionDoc?.dataSummary?.columns?.map(c => c.name) || Object.keys(data[0] || {});
+      console.log(`🔍 Creating derived column "${newColumnName}" with expression: ${expression}`);
+      console.log(`📋 Available columns: ${availableColumns.slice(0, 10).join(', ')}${availableColumns.length > 10 ? '...' : ''}`);
       
       const result = await createDerivedColumn(data, newColumnName, expression);
       
       if (result.errors && result.errors.length > 0) {
+        // Extract column names from the expression to provide better error messages
+        const columnPattern = /\[([^\]]+)\]/g;
+        const expressionColumns = [...expression.matchAll(columnPattern)].map(m => m[1]);
+        const availableColumnsList = availableColumns.slice(0, 10).join(', ');
+        
+        let errorMessage = `Error creating column: ${result.errors.join('; ')}`;
+        
+        // If the error mentions a column not found, suggest similar columns
+        if (result.errors.some(e => e.includes('not found'))) {
+          errorMessage += `\n\nExpression columns: ${expressionColumns.join(', ')}`;
+          errorMessage += `\nAvailable columns: ${availableColumnsList}${availableColumns.length > 10 ? '...' : ''}`;
+          errorMessage += `\n\nPlease check that the column names in your expression match the available columns. Column names are case-sensitive.`;
+        }
+        
         return {
-          answer: `Error creating column: ${result.errors.join(', ')}`
+          answer: errorMessage
         };
       }
       
