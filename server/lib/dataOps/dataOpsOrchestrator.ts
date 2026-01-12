@@ -3899,11 +3899,118 @@ export async function executeDataOperation(
         console.log(`   - rows_before: ${result.rows_before}`);
         console.log(`   - rows_after: ${result.rows_after}`);
         console.log(`   - data length: ${result.data?.length || 0}`);
+        console.log(`   - has large file buffer: ${!!(result as any)._largeFileBuffer}`);
 
-        const pivotData = result.data;
+        const pivotData = result.data || [];
         const rowsBefore = result.rows_before;
         const rowsAfter = result.rows_after;
+        const largeFileBuffer = (result as any)._largeFileBuffer as Buffer | undefined;
 
+        // If we have a large file buffer, save it directly to blob storage
+        if (largeFileBuffer) {
+          console.log(`💾 Large pivot table detected. Saving ${(largeFileBuffer.length / 1024 / 1024).toFixed(2)}MB buffer directly to blob storage...`);
+          
+          // Get current document for username
+          const doc = sessionDoc ?? await getChatBySessionIdEfficient(sessionId);
+          if (!doc) {
+            throw new Error('Session not found');
+          }
+          
+          // Get current version
+          const currentVersion = doc.currentDataBlob?.version || 1;
+          const newVersion = currentVersion + 1;
+          const username = doc.username;
+          
+          // Import blob storage function
+          const { updateProcessedDataBlob } = await import('../blobStorage.js');
+          
+          // Save buffer directly to blob storage
+          const blobResult = await updateProcessedDataBlob(
+            sessionId,
+            largeFileBuffer, // Pass buffer directly
+            newVersion,
+            username
+          );
+          
+          console.log(`✅ Saved large pivot data to blob storage: ${blobResult.blobName}`);
+          
+          // Update CosmosDB metadata
+          doc.currentDataBlob = {
+            blobUrl: blobResult.blobUrl,
+            blobName: blobResult.blobName,
+            version: newVersion,
+            lastUpdated: Date.now(),
+          };
+          
+          // Update sample rows with preview
+          doc.sampleRows = pivotData.slice(0, 100);
+          
+          // Update data summary
+          if (pivotData.length > 0) {
+            const firstRow = pivotData[0];
+            const columns = Object.keys(firstRow).map(name => {
+              // Get sample values from preview data
+              const sampleValues = pivotData
+                .slice(0, Math.min(10, pivotData.length))
+                .map(row => row[name] ?? null)
+                .filter(val => val !== null)
+                .slice(0, 5);
+              
+              return {
+                name,
+                type: 'unknown' as string,
+                sampleValues: sampleValues.length > 0 ? sampleValues : [null],
+              };
+            });
+            doc.dataSummary = {
+              ...doc.dataSummary,
+              rowCount: rowsAfter,
+              columns,
+            };
+          }
+          
+          // Save updated document
+          const { updateChatDocument } = await import('../../models/chat.model.js');
+          await updateChatDocument(doc);
+          
+          // Build description
+          let description = `Created pivot on "${indexCol}" showing ${valueColumns.length} column${valueColumns.length === 1 ? '' : 's'}`;
+          
+          // Get unique values from preview
+          const uniquePivotValues = new Set<string>();
+          if (pivotData.length > 0) {
+            const firstRow = pivotData[0];
+            Object.keys(firstRow).forEach(key => {
+              if (key.includes('_') && key !== indexCol) {
+                const parts = key.split('_');
+                if (parts.length > 1) {
+                  uniquePivotValues.add(parts.slice(1).join('_'));
+                }
+              }
+            });
+          }
+          
+          const pivotValuesText = uniquePivotValues.size > 0 
+            ? Array.from(uniquePivotValues).slice(0, 3).join(', ') + (uniquePivotValues.size > 3 ? '...' : '')
+            : 'various values';
+          
+          let answer = `✅ I've created a pivot table on "${indexCol}".`;
+          answer += ` The values from "${indexCol}" (${pivotValuesText}) have been converted into separate columns.`;
+          answer += ` All other columns have been preserved.`;
+          answer += ` The new table has ${rowsAfter} row${rowsAfter === 1 ? '' : 's'} (down from ${rowsBefore}) and has been saved to blob storage.`;
+          answer += ` Showing preview of first ${pivotData.length} rows.`;
+          
+          const previewData = pivotData.slice(0, 50);
+          
+          return {
+            answer,
+            data: pivotData, // Preview data only
+            preview: previewData,
+            saved: true,
+          };
+        }
+
+        // Normal flow for smaller pivot tables
         if (!pivotData || pivotData.length === 0) {
           console.error(`❌ Pivot returned empty data!`);
           return {
@@ -3937,12 +4044,69 @@ export async function executeDataOperation(
         );
         console.log(`✅ Saved pivot data: version ${saveResult.version}, blob: ${saveResult.blobName}`);
 
-        let answer = `✅ I've created a pivot on "${indexCol}" showing ${valueColumns.length} column${valueColumns.length === 1 ? '' : 's'}.`;
-        answer += ` The data structure has been updated - you now have ${rowsAfter} row${rowsAfter === 1 ? '' : 's'} (down from ${rowsBefore}) grouped by "${indexCol}".`;
+        // Get unique values from the pivot column to show in the answer
+        const uniquePivotValues = new Set<string>();
+        if (pivotData.length > 0) {
+          const firstRow = pivotData[0];
+          // Find columns that contain the pivot index column name (these are the pivoted columns)
+          Object.keys(firstRow).forEach(key => {
+            if (key.includes('_') && key !== indexCol) {
+              // Extract the pivot value from column names like "Sales_Complete" -> "Complete"
+              const parts = key.split('_');
+              if (parts.length > 1) {
+                uniquePivotValues.add(parts.slice(1).join('_'));
+              }
+            }
+          });
+        }
+        
+        const pivotValuesText = uniquePivotValues.size > 0 
+          ? Array.from(uniquePivotValues).slice(0, 3).join(', ') + (uniquePivotValues.size > 3 ? '...' : '')
+          : 'various values';
+        
+        let answer = `✅ I've created a pivot table on "${indexCol}".`;
+        answer += ` The values from "${indexCol}" (${pivotValuesText}) have been converted into separate columns.`;
+        answer += ` All other columns have been preserved.`;
+        answer += ` The new table has ${rowsAfter} row${rowsAfter === 1 ? '' : 's'} (down from ${rowsBefore}) and has been saved to blob storage.`;
 
-        // For pivot, always show the pivoted data (first 50 rows)
-        // Don't try to get from CosmosDB rawData as it might be empty for large datasets
-        const previewData = pivotData.length > 0 ? pivotData.slice(0, 50) : [];
+        // For pivot, show data grouped by status category (3-4 rows per category)
+        // Sort by status column if it exists, then group and limit
+        let previewData: Record<string, any>[] = [];
+        
+        if (pivotData.length > 0) {
+          // Check if status column exists in the data
+          const hasStatusColumn = pivotData.some(row => indexCol in row);
+          
+          if (hasStatusColumn) {
+            // Group by status and show 3-4 rows per category
+            const groupedByStatus = new Map<string, Record<string, any>[]>();
+            
+            for (const row of pivotData) {
+              const statusValue = row[indexCol] ?? 'Unknown';
+              const statusKey = String(statusValue);
+              
+              if (!groupedByStatus.has(statusKey)) {
+                groupedByStatus.set(statusKey, []);
+              }
+              
+              const group = groupedByStatus.get(statusKey)!;
+              if (group.length < 4) { // Show max 4 rows per status category
+                group.push(row);
+              }
+            }
+            
+            // Flatten grouped data, maintaining status order
+            const statusOrder = Array.from(groupedByStatus.keys()).sort();
+            for (const status of statusOrder) {
+              previewData.push(...groupedByStatus.get(status)!);
+            }
+            
+            console.log(`✅ Grouped preview by status: ${groupedByStatus.size} categories, ${previewData.length} total rows`);
+          } else {
+            // No status column, just show first 50 rows
+            previewData = pivotData.slice(0, 50);
+          }
+        }
         
         console.log(`✅ Pivot complete: ${rowsAfter} rows, showing preview of ${previewData.length} rows`);
         if (previewData.length > 0) {

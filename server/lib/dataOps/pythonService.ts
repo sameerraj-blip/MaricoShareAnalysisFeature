@@ -18,6 +18,11 @@ if (typeof fetch !== 'undefined') {
 const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8001';
 const REQUEST_TIMEOUT = 300000; // 5 minutes
 
+// Import fs for file operations (to handle large responses)
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
 
 interface RemoveNullsRequest {
   data: Record<string, any>[];
@@ -499,8 +504,204 @@ export async function createPivotTable(
       throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
     
-    return await response.json() as PivotResponse;
+    // Check Content-Length to detect potentially large responses
+    const contentLength = response.headers.get('content-length');
+    const LARGE_RESPONSE_THRESHOLD = 50 * 1024 * 1024; // 50MB
+    
+    // For large responses, write to temp file first to avoid string length limits
+    if (contentLength && parseInt(contentLength, 10) > LARGE_RESPONSE_THRESHOLD) {
+      console.warn(`⚠️ Large pivot response detected (${(parseInt(contentLength, 10) / 1024 / 1024).toFixed(2)}MB). Writing to temp file...`);
+      
+      const tempFile = path.join(os.tmpdir(), `pivot_${Date.now()}_${Math.random().toString(36).substring(7)}.json`);
+      
+      try {
+        // Write response stream directly to file
+        const fileStream = fs.createWriteStream(tempFile);
+        const reader = response.body?.getReader();
+        
+        if (!reader) {
+          throw new Error('Response body is not readable');
+        }
+        
+        let done = false;
+        while (!done) {
+          const { value, done: streamDone } = await reader.read();
+          done = streamDone;
+          if (value) {
+            fileStream.write(Buffer.from(value));
+          }
+        }
+        fileStream.end();
+        
+        // Wait for file to be fully written
+        await new Promise<void>((resolve, reject) => {
+          fileStream.on('finish', resolve);
+          fileStream.on('error', reject);
+        });
+        
+        // For very large files, we can't parse the entire JSON due to string length limits
+        // Instead, save the file buffer to blob storage and parse only a preview
+        const fileSize = fs.statSync(tempFile).size;
+        const VERY_LARGE_THRESHOLD = 200 * 1024 * 1024; // 200MB - be more aggressive
+        
+        // Read file buffer (we'll save this to blob storage)
+        const fileBuffer = fs.readFileSync(tempFile);
+        
+        // Try to parse a preview from the beginning of the file
+        let previewRows: Record<string, any>[] = [];
+        let rowsBefore = 0;
+        let rowsAfter = 0;
+        
+        try {
+          // Read just the first 2MB to extract preview and metadata
+          const previewBuffer = fileBuffer.slice(0, Math.min(2 * 1024 * 1024, fileBuffer.length));
+          const previewText = previewBuffer.toString('utf8');
+          
+          // Try to extract metadata (rows_before, rows_after) from the JSON
+          const rowsBeforeMatch = previewText.match(/"rows_before":\s*(\d+)/);
+          const rowsAfterMatch = previewText.match(/"rows_after":\s*(\d+)/);
+          
+          if (rowsBeforeMatch) rowsBefore = parseInt(rowsBeforeMatch[1], 10);
+          if (rowsAfterMatch) rowsAfter = parseInt(rowsAfterMatch[1], 10);
+          
+          // Try to parse first few rows from preview
+          const dataStart = previewText.indexOf('"data":[');
+          if (dataStart !== -1) {
+            // Find the opening bracket
+            let bracketPos = dataStart + 7;
+            let bracketCount = 0;
+            let inString = false;
+            let escapeNext = false;
+            let currentRow = '';
+            let rowsParsed = 0;
+            const maxPreviewRows = 50;
+            
+            for (let i = bracketPos; i < previewText.length && rowsParsed < maxPreviewRows; i++) {
+              const char = previewText[i];
+              
+              if (escapeNext) {
+                escapeNext = false;
+                currentRow += char;
+                continue;
+              }
+              
+              if (char === '\\') {
+                escapeNext = true;
+                currentRow += char;
+                continue;
+              }
+              
+              if (char === '"') {
+                inString = !inString;
+                currentRow += char;
+                continue;
+              }
+              
+              if (!inString) {
+                if (char === '{') {
+                  if (bracketCount === 0) {
+                    currentRow = '{';
+                  } else {
+                    currentRow += char;
+                  }
+                  bracketCount++;
+                } else if (char === '}') {
+                  currentRow += char;
+                  bracketCount--;
+                  if (bracketCount === 0) {
+                    // Complete row object
+                    try {
+                      const row = JSON.parse(currentRow);
+                      previewRows.push(row);
+                      rowsParsed++;
+                      currentRow = '';
+                    } catch (e) {
+                      // Skip invalid row
+                      currentRow = '';
+                    }
+                  }
+                } else if (char === ']' && bracketCount === 0) {
+                  // End of data array
+                  break;
+                } else {
+                  currentRow += char;
+                }
+              } else {
+                currentRow += char;
+              }
+            }
+          }
+        } catch (previewError) {
+          console.warn('⚠️ Could not parse preview from large file:', previewError);
+        }
+        
+        // Clean up temp file
+        try {
+          fs.unlinkSync(tempFile);
+        } catch (unlinkError) {
+          console.warn('⚠️ Could not delete temp file:', unlinkError);
+        }
+        
+        // Return response with file buffer for blob storage and preview only
+        return {
+          data: previewRows, // Preview only (first 50 rows)
+          rows_before: rowsBefore,
+          rows_after: rowsAfter,
+          _largeFileBuffer: fileBuffer, // Special flag - buffer to save to blob storage
+        } as any;
+      } catch (error) {
+        // Clean up temp file on error (unlinkSync is synchronous, no .catch needed)
+        if (fs.existsSync(tempFile)) {
+          try {
+            fs.unlinkSync(tempFile);
+          } catch (unlinkError) {
+            console.warn('⚠️ Could not delete temp file on error:', unlinkError);
+          }
+        }
+        
+        if (error instanceof Error && (
+          error.message.includes('Cannot create a string longer than') ||
+          error.message.includes('ERR_STRING_TOO_LONG')
+        )) {
+          throw new Error(
+            `Pivot table result is too large to process (${contentLength ? (parseInt(contentLength, 10) / 1024 / 1024).toFixed(2) + 'MB' : 'very large'}). ` +
+            `The pivot operation created too many columns. ` +
+            `Please try: 1) Pivoting on a column with fewer unique values, ` +
+            `2) Filtering your data first, or 3) Specifying only specific value columns to aggregate.`
+          );
+        }
+        throw error;
+      }
+    }
+    
+    // For normal-sized responses, parse JSON normally
+    try {
+      return await response.json() as PivotResponse;
+    } catch (jsonError) {
+      // If it's the string length error, provide helpful message
+      if (jsonError instanceof Error && (
+        jsonError.message.includes('Cannot create a string longer than') ||
+        jsonError.message.includes('ERR_STRING_TOO_LONG')
+      )) {
+        throw new Error(
+          `Pivot table result is too large to process in memory. ` +
+          `The pivot operation created too many columns. ` +
+          `Please try: 1) Pivoting on a column with fewer unique values, ` +
+          `2) Filtering your data first, or 3) Specifying only specific value columns to aggregate.`
+        );
+      }
+      throw jsonError;
+    }
   } catch (error) {
+    // Check if it's the string length error
+    if (error instanceof Error && error.message.includes('Cannot create a string longer than')) {
+      throw new Error(
+        `Pivot table result is too large. The pivot operation created too many columns. ` +
+        `This usually happens when the pivot column has many unique values. ` +
+        `Please try: 1) Pivoting on a column with fewer unique values, 2) Filtering your data first, ` +
+        `or 3) Specifying only specific value columns to aggregate.`
+      );
+    }
     console.error('Error calling Python service pivot:', error);
     throw error;
   }

@@ -1474,7 +1474,22 @@ def pivot_table(
     pivot_funcs: Optional[Dict[str, Literal["sum", "avg", "mean", "min", "max", "count"]]] = None
 ) -> Dict[str, Any]:
     """
-    Create a pivot table.
+    Create a pivot table where the index column's values become column headers.
+    
+    This creates a true pivot table where:
+    - The index_column's unique values become new column headers
+    - Value columns are aggregated for each index value
+    - All other columns are preserved in the result
+    
+    Example:
+        Input: Week | Status | Sales | Brand
+               Week1|Complete| 100  | BrandA
+               Week1|InProgress| 200 | BrandA
+               Week2|Complete| 150  | BrandB
+        
+        Output: Week | Sales_Complete | Sales_InProgress | Brand
+                Week1|     100        |       200        | BrandA
+                Week2|     150        |       None       | BrandB
     
     ID COLUMN HANDLING:
     - ID columns (e.g., order_id, customer_id, item_id) are automatically identified
@@ -1485,14 +1500,14 @@ def pivot_table(
     
     Args:
         data: List of dictionaries representing rows
-        index_column: Column to use as pivot index (rows)
-        value_columns: Optional list of columns to aggregate (if None, uses all columns except index)
+        index_column: Column whose values will become column headers (e.g., "Status" -> "Complete", "In Progress", "Not Started")
+        value_columns: Optional list of columns to aggregate (if None, uses all numeric columns except index)
         pivot_funcs: Optional dict mapping column names to aggregation functions
                     Note: ID columns will override any specified function and use COUNT(DISTINCT)
     
     Returns:
         Dictionary with:
-            - data: Pivoted data
+            - data: Pivoted data with preserved columns
             - rows_before: Number of rows before pivot
             - rows_after: Number of rows after pivot
     """
@@ -1533,11 +1548,18 @@ def pivot_table(
                     return True
         return pd.api.types.is_string_dtype(series)
     
-    # Determine value columns
+    # Get unique values from index column (these will become column headers)
+    index_values = df[index_column].dropna().unique().tolist()
+    print(f"🔍 Pivot - Index column '{index_column}' has {len(index_values)} unique values: {index_values[:10]}{'...' if len(index_values) > 10 else ''}")
+    
+    # No limit on unique values - allow any number of pivot values
+    
+    # Determine value columns to aggregate
     if value_columns:
         raw_value_columns = value_columns
     else:
-        raw_value_columns = [c for c in all_columns if c != index_column]
+        # Use all numeric columns except the index column
+        raw_value_columns = [c for c in all_columns if c != index_column and is_numeric_column(c, df[c])]
     
     # Separate ID columns, string columns, and regular numeric columns
     regular_value_columns = []
@@ -1556,23 +1578,46 @@ def pivot_table(
     
     print(f"🔍 Pivot - Numeric: {regular_value_columns}, ID (excluded): {id_value_columns}, String (excluded): {string_value_columns}")
     
+    # Identify columns to preserve (all columns except index_column and value_columns)
+    # NOTE: We will add the index_column back after pivoting so users can see the original status values
+    # These will be kept in the result
+    columns_to_preserve = [
+        c for c in all_columns 
+        if c != index_column 
+        and c not in regular_value_columns 
+        and c not in id_value_columns
+    ]
+    print(f"📋 Pivot - Preserving {len(columns_to_preserve)} columns: {columns_to_preserve}")
+    print(f"📋 Pivot - Index column '{index_column}' will be added back to result after pivoting")
+    
+    # Estimate output size: number of columns = preserved columns + (value columns * unique index values)
+    estimated_columns = len(columns_to_preserve) + (len(regular_value_columns) + len(id_value_columns)) * len(index_values)
+    if estimated_columns > 1000:
+        print(f"⚠️ Warning: Pivot will create approximately {estimated_columns} columns. This may result in a very large output.")
+        # Still allow it, but warn the user
+    
     # Validate ID columns - ensure they NEVER use sum/avg/min/max
-    # ID columns must use COUNT(DISTINCT) to count unique entities, not aggregate values
     if pivot_funcs:
         for id_col in id_value_columns:
             if id_col in pivot_funcs and pivot_funcs[id_col] in ['sum', 'avg', 'mean', 'min', 'max']:
                 print(f"⚠️ ID column '{id_col}' cannot use {pivot_funcs[id_col]} in pivot. ID columns represent identifiers/entities.")
                 print(f"   Automatically switching to COUNT(DISTINCT) (nunique) to count unique entities.")
-                # Remove from pivot_funcs - will use default nunique below
                 del pivot_funcs[id_col]
     
-    # Identify columns to preserve (not part of pivot) - includes string columns
-    columns_to_preserve = [c for c in all_columns if c != index_column and c not in regular_value_columns and c not in id_value_columns]
+    if not regular_value_columns and not id_value_columns:
+        raise ValueError("No columns to aggregate in pivot")
     
-    # Build aggregation dictionary
+    # Create pivot tables for each value column
+    # We'll combine all value columns into a single pivot operation for efficiency
+    all_value_cols = regular_value_columns + id_value_columns
+    
+    if not all_value_cols:
+        raise ValueError("No columns to aggregate in pivot")
+    
+    # Build aggregation dictionary for all value columns at once
     agg_dict = {}
     
-    # Process regular value columns
+    # Process regular numeric columns
     for col in regular_value_columns:
         func = (pivot_funcs or {}).get(col, 'sum')
         if func == 'avg' or func == 'mean':
@@ -1582,57 +1627,165 @@ def pivot_table(
         else:
             agg_dict[col] = func
     
-    # Process ID columns - always use nunique (COUNT(DISTINCT)) for unique entity counts
-    # ID columns represent identifiers/entities, so we count distinct values, not sum/average
-    # This gives us the number of unique entities per group (e.g., unique customers, unique orders)
+    # Process ID columns - always use nunique (COUNT(DISTINCT))
     for id_col in id_value_columns:
-        # Use nunique for COUNT(DISTINCT) - this counts unique ID values per group
-        # This is the correct aggregation for identifier fields
         agg_dict[id_col] = 'nunique'
-        print(f"📊 Pivot - ID column '{id_col}' will use COUNT(DISTINCT) -> will be renamed to '{get_count_name_for_id_column(id_col)}'")
     
-    if not agg_dict:
-        raise ValueError("No columns to aggregate in pivot")
+    print(f"✅ Pivoting {len(all_value_cols)} value column(s) using aggregation functions: {agg_dict}")
     
-    # Perform aggregation (pivot is essentially groupby + aggregate)
-    grouped = df.groupby(index_column, as_index=False).agg(agg_dict)
+    # Create pivot table: index_column values become columns
+    # Group by preserved columns (if any), pivot on index_column, aggregate value columns
+    if columns_to_preserve:
+        # Group by preserved columns, pivot index_column values into columns
+        # Use agg_dict if we have multiple functions, otherwise use the single function
+        aggfunc_param = agg_dict if len(set(agg_dict.values())) > 1 else list(agg_dict.values())[0]
+        
+        pivot_df = df.pivot_table(
+            index=columns_to_preserve,
+            columns=index_column,
+            values=all_value_cols,
+            aggfunc=aggfunc_param,
+            fill_value=None
+        )
+        
+        # Flatten MultiIndex columns: create columns like "Sales_Complete", "Sales_In Progress"
+        if isinstance(pivot_df.columns, pd.MultiIndex):
+            # MultiIndex: (value_col, index_value)
+            new_columns = []
+            for col_tuple in pivot_df.columns:
+                value_col = col_tuple[0]
+                index_val = str(col_tuple[1]).replace(' ', '_')
+                # Handle ID columns - use count name
+                if value_col in id_value_columns:
+                    count_name = get_count_name_for_id_column(value_col)
+                    new_columns.append(f"{count_name}_{index_val}")
+                else:
+                    new_columns.append(f"{value_col}_{index_val}")
+            pivot_df.columns = new_columns
+        else:
+            # Single value column
+            new_columns = []
+            for col in pivot_df.columns:
+                index_val = str(col).replace(' ', '_')
+                if len(regular_value_columns) == 1:
+                    new_columns.append(f"{regular_value_columns[0]}_{index_val}")
+                elif len(id_value_columns) == 1:
+                    count_name = get_count_name_for_id_column(id_value_columns[0])
+                    new_columns.append(f"{count_name}_{index_val}")
+                else:
+                    new_columns.append(str(col))
+            pivot_df.columns = new_columns
+        
+        pivot_df = pivot_df.reset_index()
+        result_df = pivot_df
+        
+        # Ensure we have all unique combinations of preserved columns
+        unique_combinations = df[columns_to_preserve].drop_duplicates()
+        result_df = unique_combinations.merge(result_df, on=columns_to_preserve, how='left')
+        
+    else:
+        # No preserved columns - aggregate everything into a single row
+        # This creates a summary pivot table
+        aggfunc_param = agg_dict if len(set(agg_dict.values())) > 1 else list(agg_dict.values())[0]
+        
+        pivot_df = df.pivot_table(
+            columns=index_column,
+            values=all_value_cols,
+            aggfunc=aggfunc_param,
+            fill_value=None
+        )
+        
+        # Flatten MultiIndex columns
+        if isinstance(pivot_df.columns, pd.MultiIndex):
+            new_columns = []
+            for col_tuple in pivot_df.columns:
+                value_col = col_tuple[0]
+                index_val = str(col_tuple[1]).replace(' ', '_')
+                if value_col in id_value_columns:
+                    count_name = get_count_name_for_id_column(value_col)
+                    new_columns.append(f"{count_name}_{index_val}")
+                else:
+                    new_columns.append(f"{value_col}_{index_val}")
+            pivot_df.columns = new_columns
+        
+        pivot_df = pivot_df.reset_index(drop=True)
+        result_df = pivot_df
+        
+        print(f"⚠️ No preserved columns - created summary pivot with {len(result_df)} row(s)")
     
-    # Rename ID column aggregations to meaningful count names
-    # ID columns are aggregated using COUNT(DISTINCT), so rename to reflect unique entity counts
-    for id_col in id_value_columns:
-        count_name = get_count_name_for_id_column(id_col)
-        if id_col in grouped.columns:
-            grouped = grouped.rename(columns={id_col: count_name})
-            print(f"✅ Pivot - Renamed ID column aggregation: '{id_col}' -> '{count_name}' (COUNT(DISTINCT))")
+    # Add the index_column back to the result by finding the status value with the highest aggregated value
+    # This gives a "primary status" for each row
+    if index_column not in result_df.columns and columns_to_preserve:
+        status_column_data = []
+        
+        for idx, row in result_df.iterrows():
+            # Find which pivot columns have the highest non-null values
+            # The pivot columns are named like "ValueColumn_StatusValue"
+            max_value = None
+            max_status = None
+            
+            for col in result_df.columns:
+                if col not in columns_to_preserve and '_' in col:
+                    # This is likely a pivot column
+                    value = row[col]
+                    if pd.notna(value) and value != 0:
+                        # Extract status value from column name
+                        # Try to match against known index_values
+                        col_lower = col.lower()
+                        for status_val in index_values:
+                            status_val_clean = str(status_val).replace(' ', '_').lower()
+                            # Check if status value appears in column name
+                            if status_val_clean in col_lower or col_lower.endswith('_' + status_val_clean):
+                                # Use the status value with the highest aggregated value
+                                if max_value is None or (isinstance(value, (int, float)) and isinstance(max_value, (int, float)) and value > max_value):
+                                    max_value = value
+                                    max_status = status_val
+                                break
+                        # If no match found, try extracting from column name directly
+                        if max_status is None:
+                            parts = col.split('_')
+                            if len(parts) > 1:
+                                # Try to match the last part or combination
+                                potential_status = '_'.join(parts[-2:]) if len(parts) > 2 else parts[-1]
+                                if potential_status in [str(v).replace(' ', '_') for v in index_values]:
+                                    if max_value is None or (isinstance(value, (int, float)) and isinstance(max_value, (int, float)) and value > max_value):
+                                        max_value = value
+                                        max_status = potential_status
+            
+            # If we found a status, use it; otherwise try to get from original data
+            if max_status is not None:
+                status_column_data.append(max_status)
+            else:
+                # Try to find a matching row in original data to get status
+                matching_status = None
+                for orig_idx, orig_row in df.iterrows():
+                    match = True
+                    for preserve_col in columns_to_preserve:
+                        if preserve_col in result_df.columns and preserve_col in orig_row:
+                            if str(orig_row[preserve_col]) != str(row[preserve_col]):
+                                match = False
+                                break
+                    if match and index_column in orig_row:
+                        matching_status = orig_row[index_column]
+                        break
+                
+                status_column_data.append(matching_status if matching_status is not None else index_values[0] if index_values else None)
+        
+        result_df[index_column] = status_column_data
+        print(f"✅ Added '{index_column}' column back to pivot result (using primary status based on highest values)")
     
-    # Rename regular aggregated columns to show function
-    rename_dict = {}
-    for col in regular_value_columns:
-        if col in grouped.columns:
-            func = (pivot_funcs or {}).get(col, 'sum')
-            if func == 'avg' or func == 'mean':
-                rename_dict[col] = f"{col} (Avg)"
-            elif func == 'min':
-                rename_dict[col] = f"{col} (Min)"
-            elif func == 'max':
-                rename_dict[col] = f"{col} (Max)"
-            elif func == 'count':
-                rename_dict[col] = f"{col} (Count)"
-            else:  # sum
-                rename_dict[col] = f"{col} (Sum)"
+    # Sort by index_column (status) so rows are grouped by status category
+    if index_column in result_df.columns:
+        result_df = result_df.sort_values(by=index_column, na_position='last')
+        print(f"✅ Sorted result by '{index_column}' column")
     
-    grouped = grouped.rename(columns=rename_dict)
+    print(f"✅ Pivot complete. Result columns: {list(result_df.columns)}")
+    print(f"✅ Result shape: {result_df.shape}")
     
-    # The grouped dataframe already contains only:
-    # - index column (pivot index)
-    # - Aggregated value columns (with their aggregation functions)
-    # No need to preserve other columns - they are not relevant to the pivot
-    print(f"✅ Pivot complete. Result columns: {list(grouped.columns)}")
-    
-    rows_after = len(grouped)
+    rows_after = len(result_df)
     
     # Convert back to list of dictionaries
-    result_data = grouped.to_dict("records")
+    result_data = result_df.to_dict("records")
     
     # Convert numpy types to native Python types
     for row in result_data:
