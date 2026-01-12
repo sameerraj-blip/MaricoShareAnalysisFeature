@@ -115,13 +115,17 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
     : undefined;
 
   // Answer the question using the latest data
+  // Include permanent context if available
   const answerResult = await answerQuestion(
     latestData,
     message,
     processingChatHistory,
     chatDocument.dataSummary,
     sessionId,
-    chatLevelInsights
+    chatLevelInsights,
+    undefined, // onThinkingStep
+    undefined, // mode
+    chatDocument.permanentContext // permanent context
   );
 
   // Enrich charts with data and insights
@@ -206,19 +210,12 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
         content: validated.answer,
         charts: validated.charts || [], // Pass FULL charts with data - addMessagesBySessionId will handle blob storage
         insights: validated.insights,
+        preview: validated.preview || undefined, // Save preview data for data operations
+        summary: validated.summary || undefined, // Save summary data for data operations
         timestamp: assistantMessageTimestamp,
       },
     ]);
     console.log(`✅ Messages saved to chat: ${chatDocument.id}`);
-    
-    // Store conversation context in RAG (non-blocking)
-    try {
-      const { storeConversationContext } = await import('../../lib/ragService.js');
-      await storeConversationContext(message, validated.answer, sessionId);
-    } catch (ragError) {
-      console.error('⚠️ Failed to store conversation context (non-blocking):', ragError);
-      // Don't fail the request - RAG is optional
-    }
   } catch (cosmosError) {
     console.error("⚠️ Failed to save messages to CosmosDB:", cosmosError);
     // Continue without failing the chat - CosmosDB is optional

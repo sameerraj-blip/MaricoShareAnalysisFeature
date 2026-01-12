@@ -926,7 +926,7 @@ export class GeneralHandler extends BaseHandler {
 
     const historyContext = recentHistory ? `\n\nCONVERSATION HISTORY:\n${recentHistory}` : '';
 
-    const prompt = `You are a helpful data analyst assistant. The user is asking for advice or suggestions about their data analysis or models.
+    let prompt = `You are a helpful data analyst assistant. The user is asking for advice or suggestions about their data analysis or models.
 
 User question: "${question}"
 ${historyContext}
@@ -939,6 +939,9 @@ Provide a helpful, conversational response with practical suggestions. Keep it c
 Do NOT generate charts or visualizations. Just provide text advice.
 
 Respond naturally and conversationally.`;
+
+    // Add permanent context if available
+    prompt = this.addPermanentContextToPrompt(prompt, context);
 
     try {
       const model = getModelForTask('generation');

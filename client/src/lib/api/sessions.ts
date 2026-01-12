@@ -38,6 +38,9 @@ export const sessionsApi = {
   updateSessionName: (sessionId: string, fileName: string) =>
     api.patch(`/api/sessions/${sessionId}`, { fileName }),
 
+  updateSessionContext: (sessionId: string, permanentContext: string) =>
+    api.patch(`/api/sessions/${sessionId}/context`, { permanentContext }),
+
   deleteSession: (sessionId: string) => api.delete(`/api/sessions/${sessionId}`),
 };
 

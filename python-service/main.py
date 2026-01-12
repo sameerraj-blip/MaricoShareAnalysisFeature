@@ -3,10 +3,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional, Literal, Union
 import uvicorn
 from config import config
-from data_operations import remove_nulls, get_preview, get_summary, convert_type, create_derived_column
+from data_operations import remove_nulls, get_preview, get_summary, convert_type, create_derived_column, aggregate_data, pivot_table, identify_outliers, treat_outliers
 from ml_models import (
     train_linear_regression,
     train_log_log_regression,
@@ -90,6 +90,39 @@ class ConvertTypeRequest(BaseModel):
     data: List[Dict[str, Any]]
     column: str
     target_type: Literal["numeric", "string", "date", "percentage", "boolean"]
+
+
+class AggregateRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    group_by_column: str
+    agg_columns: Optional[List[str]] = None
+    agg_funcs: Optional[Dict[str, Literal["sum", "avg", "mean", "min", "max", "count", "median", "std", "var", "p90", "p95", "p99", "any", "all"]]] = None
+    order_by_column: Optional[str] = None
+    order_by_direction: Literal["asc", "desc"] = "asc"
+    user_intent: Optional[str] = None  # User's original message for semantic intent detection
+
+
+class PivotRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    index_column: str
+    value_columns: Optional[List[str]] = None
+    pivot_funcs: Optional[Dict[str, Literal["sum", "avg", "mean", "min", "max", "count"]]] = None
+
+
+class IdentifyOutliersRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    column: Optional[str] = None
+    method: Literal["iqr", "zscore", "isolation_forest", "local_outlier_factor"] = "iqr"
+    threshold: Optional[float] = None
+
+
+class TreatOutliersRequest(BaseModel):
+    data: List[Dict[str, Any]]
+    column: Optional[str] = None
+    method: Literal["iqr", "zscore", "isolation_forest", "local_outlier_factor"] = "iqr"
+    threshold: Optional[float] = None
+    treatment: Literal["remove", "cap", "winsorize", "transform", "impute"] = "remove"
+    treatment_value: Optional[Union[Literal["mean", "median", "mode", "min", "max"], float]] = None
 
 
 class TrainModelRequest(BaseModel):
@@ -290,6 +323,107 @@ async def convert_type_endpoint(request: ConvertTypeRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"Error in convert_type: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/aggregate")
+async def aggregate_endpoint(request: AggregateRequest):
+    """Aggregate data by grouping on a column"""
+    try:
+        if len(request.data) > config.MAX_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Data exceeds maximum rows limit of {config.MAX_ROWS}"
+            )
+        
+        result = aggregate_data(
+            data=request.data,
+            group_by_column=request.group_by_column,
+            agg_columns=request.agg_columns,
+            agg_funcs=request.agg_funcs,
+            order_by_column=request.order_by_column,
+            order_by_direction=request.order_by_direction,
+            user_intent=request.user_intent
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error in aggregate: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/pivot")
+async def pivot_endpoint(request: PivotRequest):
+    """Create a pivot table"""
+    try:
+        if len(request.data) > config.MAX_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Data exceeds maximum rows limit of {config.MAX_ROWS}"
+            )
+        
+        result = pivot_table(
+            data=request.data,
+            index_column=request.index_column,
+            value_columns=request.value_columns,
+            pivot_funcs=request.pivot_funcs
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error in pivot: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/identify-outliers")
+async def identify_outliers_endpoint(request: IdentifyOutliersRequest):
+    """Identify outliers in data"""
+    try:
+        if len(request.data) > config.MAX_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Data exceeds maximum rows limit of {config.MAX_ROWS}"
+            )
+        
+        result = identify_outliers(
+            data=request.data,
+            column=request.column,
+            method=request.method,
+            threshold=request.threshold
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error in identify_outliers: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/treat-outliers")
+async def treat_outliers_endpoint(request: TreatOutliersRequest):
+    """Treat outliers in data"""
+    try:
+        if len(request.data) > config.MAX_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Data exceeds maximum rows limit of {config.MAX_ROWS}"
+            )
+        
+        result = treat_outliers(
+            data=request.data,
+            column=request.column,
+            method=request.method,
+            threshold=request.threshold,
+            treatment=request.treatment,
+            treatment_value=request.treatment_value
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error in treat_outliers: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 

@@ -7,9 +7,13 @@ import {
   getChatBySessionIdForUser,
   deleteSessionBySessionId,
   updateSessionFileName,
+  updateSessionPermanentContext,
   ChatDocument 
 } from "../models/chat.model.js";
 import { loadChartsFromBlob } from "../lib/blobStorage.js";
+import { loadLatestData } from "../utils/dataLoader.js";
+import { getDataSummary } from "../lib/dataOps/pythonService.js";
+import { generateAISuggestions } from "../lib/suggestionGenerator.js";
 
 // Get all sessions
 export const getAllSessionsEndpoint = async (req: Request, res: Response) => {
@@ -418,6 +422,264 @@ export const updateSessionNameEndpoint = async (req: Request, res: Response) => 
     res.status(500).json({
       error: errorMessage
     });
+  }
+};
+
+// Update session permanent context by session ID
+export const updateSessionContextEndpoint = async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+    const { permanentContext } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+    
+    if (permanentContext === undefined || (typeof permanentContext !== 'string' && permanentContext !== null)) {
+      return res.status(400).json({ error: 'Permanent context must be a string or null' });
+    }
+
+    // Get username from headers or query parameters
+    const username = req.headers['x-user-email'] || req.query.username;
+    
+    if (!username) {
+      return res.status(400).json({ 
+        error: 'Username is required. Please ensure you are logged in.' 
+      });
+    }
+
+    // Update the session permanent context
+    const updatedSession = await updateSessionPermanentContext(
+      sessionId, 
+      username as string, 
+      permanentContext || ''
+    );
+    
+    res.json({
+      success: true,
+      message: `Session context updated successfully`,
+      session: {
+        id: updatedSession.id,
+        sessionId: updatedSession.sessionId,
+        permanentContext: updatedSession.permanentContext,
+        lastUpdatedAt: updatedSession.lastUpdatedAt,
+      }
+    });
+  } catch (error) {
+    console.error('Update session context error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to update session context';
+    
+    // Check if it's a "not found" error
+    if (errorMessage.includes('not found') || errorMessage.includes('Session not found')) {
+      return res.status(404).json({
+        error: errorMessage
+      });
+    }
+    
+    // Check if it's an unauthorized error
+    if (errorMessage.includes('Unauthorized')) {
+      return res.status(403).json({
+        error: errorMessage
+      });
+    }
+    
+    // Check if it's a CosmosDB initialization error
+    if (errorMessage.includes('not initialized')) {
+      return res.status(503).json({
+        error: 'Database is initializing. Please try again in a moment.',
+        retryAfter: 2
+      });
+    }
+    
+    res.status(500).json({
+      error: errorMessage
+    });
+  }
+};
+
+// Get data summary for a session
+export const getDataSummaryEndpoint = async (req: Request, res: Response) => {
+  try {
+    console.log('📊 getDataSummaryEndpoint called', { 
+      sessionId: req.params.sessionId,
+      path: req.path,
+      method: req.method 
+    });
+    
+    const { sessionId } = req.params;
+    const username = req.headers['x-user-email'] || req.query.username;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    if (!username) {
+      return res.status(401).json({ error: 'Username is required' });
+    }
+
+    // Get session document
+    const session = await getChatBySessionIdForUser(sessionId, username as string);
+    
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (!session.dataSummary) {
+      return res.status(404).json({ error: 'Data summary not available for this session' });
+    }
+
+    // Check if we have pre-computed data summary statistics (from upload)
+    if (session.dataSummaryStatistics && session.dataSummaryStatistics.summary) {
+      console.log('✅ Using pre-computed data summary statistics from upload');
+      
+      // Generate recommended questions
+      const chatHistory = session.messages || [];
+      const lastAnswer = chatHistory.length > 0 && chatHistory[chatHistory.length - 1].role === 'assistant'
+        ? chatHistory[chatHistory.length - 1].content
+        : undefined;
+      
+      let recommendedQuestions: string[] = [];
+      try {
+        recommendedQuestions = await generateAISuggestions(
+          chatHistory,
+          session.dataSummary,
+          lastAnswer
+        );
+      } catch (error) {
+        console.error('Failed to generate AI suggestions:', error);
+        // Fallback to default suggestions
+        if (session.dataSummary.numericColumns.length > 0) {
+          recommendedQuestions = [
+            `What affects ${session.dataSummary.numericColumns[0]}?`,
+            `Show me trends for ${session.dataSummary.numericColumns[0]}`,
+            'What are the top performers?',
+            'Analyze correlations in the data'
+          ];
+        } else {
+          recommendedQuestions = [
+            'Show me trends over time',
+            'What are the top performers?',
+            'Analyze the data',
+            'What patterns do you see?'
+          ];
+        }
+      }
+
+      return res.json({
+        summary: session.dataSummaryStatistics.summary,
+        qualityScore: session.dataSummaryStatistics.qualityScore,
+        recommendedQuestions,
+      });
+    }
+
+    // Fallback: Compute on-demand if not pre-computed
+    console.log('⚠️ No pre-computed data summary found, computing on-demand...');
+    
+    // Load latest data (including any modifications from data operations)
+    let data = await loadLatestData(session);
+    
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'No data available for this session' });
+    }
+
+    // For large datasets, sample the data before sending to Python service
+    // Python service has limits and sending 200k+ rows causes timeouts
+    const MAX_ROWS_FOR_SUMMARY = 50000; // Limit to 50k rows for summary calculation
+    if (data.length > MAX_ROWS_FOR_SUMMARY) {
+      console.log(`📊 Dataset has ${data.length} rows, sampling ${MAX_ROWS_FOR_SUMMARY} rows for summary calculation`);
+      
+      // Use stratified sampling: take evenly spaced rows to get a representative sample
+      const step = Math.floor(data.length / MAX_ROWS_FOR_SUMMARY);
+      const sampledData: Record<string, any>[] = [];
+      for (let i = 0; i < data.length && sampledData.length < MAX_ROWS_FOR_SUMMARY; i += step) {
+        sampledData.push(data[i]);
+      }
+      data = sampledData;
+      console.log(`✅ Sampled ${data.length} rows for summary calculation`);
+    }
+
+    // Get summary statistics from Python service
+    const summaryResponse = await getDataSummary(data);
+    
+    // Calculate quality score based on null values
+    // Scale statistics to full dataset size (if we sampled the data)
+    const fullDataRowCount = session.dataSummary?.rowCount || data.length;
+    
+    // Calculate total cells and nulls for quality score
+    const totalCells = summaryResponse.summary.reduce((sum, col) => sum + fullDataRowCount, 0);
+    const totalNulls = summaryResponse.summary.reduce((sum, col) => {
+      // Scale null count proportionally
+      const nullPercentage = col.total_values > 0 ? col.null_values / col.total_values : 0;
+      return sum + Math.round(nullPercentage * fullDataRowCount);
+    }, 0);
+    const nullPercentage = totalCells > 0 ? (totalNulls / totalCells) * 100 : 0;
+    const qualityScore = Math.max(0, Math.round(100 - nullPercentage));
+    
+    // Scale summary statistics to full dataset size for display
+    // Statistical measures (mean, median, std_dev, min, max) remain the same from sample
+    // Only scale counts (total_values, null_values, non_null_values)
+    const scaledSummary = summaryResponse.summary.map(col => {
+      const nullPercentage = col.total_values > 0 ? col.null_values / col.total_values : 0;
+      const scaledNulls = Math.round(nullPercentage * fullDataRowCount);
+      return {
+        ...col,
+        total_values: fullDataRowCount,
+        null_values: scaledNulls,
+        non_null_values: fullDataRowCount - scaledNulls,
+      };
+    });
+
+    // Generate recommended questions
+    const chatHistory = session.messages || [];
+    const lastAnswer = chatHistory.length > 0 && chatHistory[chatHistory.length - 1].role === 'assistant'
+      ? chatHistory[chatHistory.length - 1].content
+      : undefined;
+    
+    let recommendedQuestions: string[] = [];
+    try {
+      recommendedQuestions = await generateAISuggestions(
+        chatHistory,
+        session.dataSummary,
+        lastAnswer
+      );
+    } catch (error) {
+      console.error('Failed to generate AI suggestions:', error);
+      // Fallback to default suggestions
+      if (session.dataSummary.numericColumns.length > 0) {
+        recommendedQuestions = [
+          `What affects ${session.dataSummary.numericColumns[0]}?`,
+          `Show me trends for ${session.dataSummary.numericColumns[0]}`,
+          'What are the top performers?',
+          'Analyze correlations in the data'
+        ];
+      } else {
+        recommendedQuestions = [
+          'Show me trends over time',
+          'What are the top performers?',
+          'Analyze the data',
+          'What patterns do you see?'
+        ];
+      }
+    }
+
+    res.json({
+      summary: scaledSummary,
+      qualityScore,
+      recommendedQuestions,
+    });
+  } catch (error) {
+    console.error('Get data summary error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to fetch data summary';
+    
+    if (errorMessage.includes('not found') || errorMessage.includes('Session not found')) {
+      return res.status(404).json({ error: errorMessage });
+    }
+    
+    if (errorMessage.includes('Unauthorized')) {
+      return res.status(403).json({ error: errorMessage });
+    }
+    
+    res.status(500).json({ error: errorMessage });
   }
 };
 

@@ -48,12 +48,14 @@ export async function saveModifiedData(
 
   // Save new version to blob
   // updateProcessedDataBlob handles large datasets efficiently
+  console.log(`💾 Saving aggregated data to blob storage: ${modifiedData.length} rows, version ${newVersion}`);
   const newBlob = await updateProcessedDataBlob(
     sessionId,
     modifiedData,
     newVersion,
     username
   );
+  console.log(`✅ Saved to blob storage: ${newBlob.blobName} (${newBlob.blobUrl})`);
 
   // Calculate metrics
   const rowsBefore = doc.dataSummary?.rowCount || 0;
@@ -91,6 +93,10 @@ export async function saveModifiedData(
   
   // Update data summary
   doc.dataSummary = createDataSummary(modifiedData);
+  
+  // Clear pre-computed data summary statistics since data has changed
+  // It will be recomputed on next request or can be recomputed during next upload
+  doc.dataSummaryStatistics = undefined;
 
   // Update column statistics
   doc.columnStatistics = generateColumnStatistics(modifiedData, doc.dataSummary.numericColumns);
@@ -155,6 +161,7 @@ export async function saveModifiedData(
 
   // Update document
   await updateChatDocument(doc);
+  console.log(`✅ Updated CosmosDB document with blob reference: version ${newVersion}, blob: ${newBlob.blobName}`);
 
   return {
     version: newVersion,

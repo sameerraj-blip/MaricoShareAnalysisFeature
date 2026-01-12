@@ -25,6 +25,23 @@ export interface ChatDocument {
   rawData: Record<string, any>[]; // Complete raw data from uploaded file (updated after each data operation)
   sampleRows: Record<string, any>[]; // Sample rows for preview (first 100)
   columnStatistics: Record<string, any>; // Statistical analysis of numeric columns
+  dataSummaryStatistics?: { // Pre-computed detailed statistics from Python service
+    summary: Array<{
+      variable: string;
+      datatype: string;
+      total_values: number;
+      null_values: number;
+      non_null_values: number;
+      mean?: number | null;
+      median?: number | null;
+      mode?: any;
+      std_dev?: number | null;
+      min?: number | string | null;
+      max?: number | string | null;
+    }>;
+    qualityScore: number;
+    computedAt: number; // Timestamp when statistics were computed
+  };
   blobInfo?: { // Azure Blob Storage information
     blobUrl: string;
     blobName: string;
@@ -55,6 +72,7 @@ export interface ChatDocument {
     analysisVersion: string; // Version of analysis algorithm
   };
   dataOpsMode?: boolean; // Whether Data Ops mode is enabled for this session
+  permanentContext?: string; // Permanent context provided by user during upload, sent to AI with each message
 }
 
 // Helper functions
@@ -146,7 +164,24 @@ export const createChatDocument = async (
     fileSize: number;
     analysisVersion: string;
   },
-  insights: Insight[] = []
+  insights: Insight[] = [],
+  dataSummaryStatistics?: {
+    summary: Array<{
+      variable: string;
+      datatype: string;
+      total_values: number;
+      null_values: number;
+      non_null_values: number;
+      mean?: number | null;
+      median?: number | null;
+      mode?: any;
+      std_dev?: number | null;
+      min?: number | string | null;
+      max?: number | string | null;
+    }>;
+    qualityScore: number;
+    computedAt: number;
+  }
 ): Promise<ChatDocument> => {
   const timestamp = Date.now();
   const normalizedUsername = normalizeEmail(username) || username;
@@ -218,6 +253,7 @@ export const createChatDocument = async (
     rawData: shouldStoreRawData ? rawData : [], // Only store rawData if it's small enough
     sampleRows,
     columnStatistics,
+    dataSummaryStatistics, // Pre-computed data summary statistics
     blobInfo,
     collaborators: [normalizedUsername],
     analysisMetadata: analysisMetadata || {
@@ -843,6 +879,42 @@ export const updateSessionFileName = async (
     return updated;
   } catch (error) {
     console.error("❌ Failed to update session fileName:", error);
+    throw error;
+  }
+};
+
+/**
+ * Update session permanent context by session ID
+ */
+export const updateSessionPermanentContext = async (
+  sessionId: string,
+  username: string,
+  permanentContext: string
+): Promise<ChatDocument> => {
+  try {
+    const chatDocument = await getChatBySessionIdEfficient(sessionId);
+    
+    if (!chatDocument) {
+      throw new Error(`Session not found for sessionId: ${sessionId}`);
+    }
+    
+    // Verify the username matches
+    const normalizedUsername = normalizeEmail(username) || username;
+    const collaborators = ensureCollaborators(chatDocument);
+    
+    if (!collaborators.includes(normalizedUsername)) {
+      throw new Error('Unauthorized: Session does not belong to this user');
+    }
+    
+    // Update the permanent context
+    chatDocument.permanentContext = permanentContext.trim();
+    
+    // Update the document
+    const updated = await updateChatDocument(chatDocument);
+    console.log(`✅ Updated session permanent context: ${sessionId}`);
+    return updated;
+  } catch (error) {
+    console.error("❌ Failed to update session permanent context:", error);
     throw error;
   }
 };

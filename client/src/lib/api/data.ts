@@ -25,6 +25,25 @@ export const dataApi = {
     api.get<RawDataResponse>(
       `/data/chat/${chatId}/raw-data?username=${username}&page=${page}&limit=${limit}`
     ),
+
+  getDataSummary: (sessionId: string) =>
+    api.get<{
+      summary: Array<{
+        variable: string;
+        datatype: string;
+        total_values: number;
+        null_values: number;
+        non_null_values: number;
+        mean?: number | null;
+        median?: number | null;
+        mode?: any;
+        std_dev?: number | null;
+        min?: number | string | null;
+        max?: number | string | null;
+      }>;
+      qualityScore: number;
+      recommendedQuestions: string[];
+    }>(`/api/sessions/${sessionId}/data-summary`),
 };
 
 

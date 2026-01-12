@@ -4,12 +4,10 @@ import { processChartData } from './chartGenerator.js';
 import { optimizeChartData } from './chartDownsampling.js';
 import { analyzeCorrelations } from './correlationAnalyzer.js';
 import { generateChartInsights } from './insightGenerator.js';
-import { retrieveRelevantContext, retrieveSimilarPastQA, chunkData, generateChunkEmbeddings, clearVectorStore } from './ragService.js';
 import { parseUserQuery } from './queryParser.js';
 import { applyQueryTransformations } from './dataTransform.js';
 import type { ParsedQuery } from '../shared/queryTypes.js';
 import { calculateSmartDomainsForChart } from './axisScaling.js';
-import { findMatchingColumn } from './agents/utils/columnMatcher.js';
 
 export async function analyzeUpload(
   data: Record<string, any>[],
@@ -133,8 +131,9 @@ export async function answerQuestion(
   sessionId?: string,
   chatInsights?: Insight[],
   onThinkingStep?: (step: { step: string; status: 'pending' | 'active' | 'completed' | 'error'; timestamp: number; details?: string }) => void,
-  mode?: 'analysis' | 'dataOps' | 'modeling'
-): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[] }> {
+  mode?: 'analysis' | 'dataOps' | 'modeling',
+  permanentContext?: string
+): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[]; table?: any; operationResult?: any }> {
   // CRITICAL: This log should ALWAYS appear first
   console.log('🚀 answerQuestion() CALLED with question:', question);
   console.log('📋 SessionId:', sessionId);
@@ -178,7 +177,8 @@ export async function answerQuestion(
       sessionId || 'unknown',
       chatInsights,
       onThinkingStep,
-      mode
+      mode,
+      permanentContext
     );
     
     console.log('📤 Agent system result:', { 
@@ -1694,7 +1694,7 @@ Output format: [{"type": "...", "title": "...", "x": "...", "y": "...", "aggrega
 
 // generateChartInsights is now centralized in insightGenerator.ts
 
-async function generateInsights(
+export async function generateInsights(
   data: Record<string, any>[],
   summary: DataSummary
 ): Promise<Insight[]> {
@@ -2667,6 +2667,103 @@ export async function generateGeneralAnswer(
     return { variablesToAdd, previousChart };
   };
 
+  // Check for "trends in X over time" queries FIRST (before other detections)
+  const detectTrendInQuery = (q: string): { variable: string | null; xAxis: string | null } | null => {
+    const ql = q.toLowerCase();
+    
+    // Pattern: "trends in X over time" or "trends in X" or "X over time"
+    const trendInMatch = q.match(/\b(?:trends?\s+in|trends?\s+for|analyze\s+trends?\s+in)\s+([a-zA-Z0-9_\s]+?)(?:\s+over\s+time|$)/i);
+    const overTimeMatch = q.match(/([a-zA-Z0-9_\s]+?)\s+over\s+time/i);
+    
+    if (!trendInMatch && !overTimeMatch) {
+      return null;
+    }
+    
+    const variableRaw = trendInMatch ? trendInMatch[1].trim() : (overTimeMatch ? overTimeMatch[1].trim() : null);
+    if (!variableRaw) {
+      return null;
+    }
+    
+    // Match variable to actual column
+    const variable = findMatchingColumn(variableRaw, availableColumns);
+    if (!variable || !summary.numericColumns.includes(variable)) {
+      console.log(`⚠️ Could not match trend variable "${variableRaw}" to a numeric column`);
+      return null;
+    }
+    
+    // Find time/date column for X-axis
+    const xAxis = summary.dateColumns[0] || 
+                  findMatchingColumn('Month', availableColumns) || 
+                  findMatchingColumn('Date', availableColumns) ||
+                  findMatchingColumn('Time', availableColumns) ||
+                  availableColumns[0];
+    
+    console.log(`✅ Detected trend query: variable="${variable}", xAxis="${xAxis}"`);
+    return { variable, xAxis };
+  };
+
+  const trendInQuery = detectTrendInQuery(question);
+  if (trendInQuery && trendInQuery.variable && trendInQuery.xAxis) {
+    console.log('✅ Processing trend query:', trendInQuery);
+    
+    // Create line chart for trend
+    const trendSpec: ChartSpec = {
+      type: 'line',
+      title: `Trend of ${trendInQuery.variable} Over Time`,
+      x: trendInQuery.xAxis,
+      y: trendInQuery.variable,
+      xLabel: trendInQuery.xAxis,
+      yLabel: trendInQuery.variable,
+      aggregate: 'none',
+    };
+    
+    console.log('🔄 Processing trend chart data...');
+    const trendData = processChartData(workingData, trendSpec);
+    console.log(`✅ Trend chart data: ${trendData.length} points`);
+    
+    if (trendData.length === 0) {
+      return { 
+        answer: `No valid data points found for trend chart. Please check that columns "${trendInQuery.xAxis}" and "${trendInQuery.variable}" contain valid data.` 
+      };
+    }
+    
+    // Calculate smart axis domains
+    const smartDomains = calculateSmartDomainsForChart(
+      trendData,
+      trendSpec.x,
+      trendSpec.y,
+      undefined,
+      {
+        yOptions: { useIQR: true, paddingPercent: 5, includeOutliers: true },
+      }
+    );
+    
+    // Generate chart insights and full insights
+    const chartInsights = await generateChartInsights(trendSpec, trendData, summary, chatInsights);
+    
+    // Generate full insights array
+    let fullInsights: Insight[] = [];
+    try {
+      fullInsights = await generateInsights(trendData, summary);
+      console.log(`✅ Generated ${fullInsights.length} insights for trend chart`);
+    } catch (insightError) {
+      console.error('⚠️ Failed to generate insights for trend chart:', insightError);
+    }
+    
+    const answer = `I've created a trend line showing ${trendInQuery.variable} over time (${trendInQuery.xAxis}).`;
+    
+    return withNotes({
+      answer,
+      charts: [{
+        ...trendSpec,
+        data: trendData,
+        ...smartDomains,
+        keyInsight: chartInsights.keyInsight,
+      }],
+      insights: fullInsights,
+    });
+  }
+
   // Check for "add" queries first (before "both" detection)
   const addQuery = detectAddQuery(question);
   if (addQuery && addQuery.variablesToAdd.length > 0 && addQuery.previousChart) {
@@ -3273,92 +3370,84 @@ export async function generateGeneralAnswer(
   // Handle pure conversational queries IMMEDIATELY (before RAG)
   if (isPureConversation) {
     // Use AI for more natural, context-aware responses to conversational queries
-    // This makes it feel like a real conversation, not a script
+    // Enhanced to be more ChatGPT-like with comprehensive responses
     try {
-      const conversationalPrompt = `You are a friendly, helpful data analyst assistant. The user just said: "${question}"
+      // Check if this is a simple greeting vs a general question
+      const isSimpleChat = /^(hi|hello|hey|thanks|thank you|bye|goodbye|ok|okay|sure|yes|no)$/i.test(question.trim());
+      
+      // Build response guidelines based on question type
+      let responseGuidelines = '';
+      if (isSimpleChat) {
+        responseGuidelines = '- For simple greetings/casual responses: Keep it warm, friendly, and brief (1-2 sentences). Be enthusiastic and engaging.';
+      } else {
+        responseGuidelines = `- For general questions or discussions: Provide comprehensive, detailed, and helpful responses. Explain concepts clearly, provide examples when relevant, and be thorough but not overwhelming.
+- Structure longer responses with clear paragraphs if needed
+- Use natural, conversational language - like talking to a knowledgeable friend
+- If the question relates to data analysis, you can mention your data analysis capabilities
+- If it's a general knowledge question, answer it fully and accurately
+- Be helpful, accurate, and engaging in all responses`;
+      }
+      
+      const conversationalPrompt = `You are an intelligent, helpful, and friendly AI assistant with expertise in data analysis. You're having a natural conversation with the user.
 
-${historyContext ? `CONVERSATION HISTORY:\n${historyContext}\n\nUse this to respond naturally and contextually.` : ''}
+USER'S MESSAGE: "${question}"
 
-Respond naturally and conversationally. Be warm, friendly, and engaging. If they're greeting you, greet them back enthusiastically. If they're thanking you, acknowledge it warmly. If they're asking what you can do, briefly explain you help with data analysis.
+${historyContext ? `CONVERSATION HISTORY:\n${historyContext}\n\nUse this conversation history to provide context-aware, natural responses. Reference previous topics when relevant.` : ''}
 
-Keep it SHORT (1-2 sentences max) and natural. Don't be robotic. Use emojis sparingly (1 max).
+YOUR CAPABILITIES:
+- You're primarily a data analyst assistant, but you can also answer general questions, explain concepts, provide insights, and engage in natural conversation
+- You can discuss data analysis, statistics, machine learning, business intelligence, and related topics
+- You can answer general knowledge questions, explain how things work, provide advice, and have meaningful conversations
+- You maintain context from previous messages and reference them naturally when relevant
 
-Just respond conversationally - no data analysis needed here.`;
+RESPONSE GUIDELINES:
+${responseGuidelines}
+
+- Maintain a warm, friendly, and professional tone
+- Use emojis sparingly (1-2 max, only when appropriate)
+- Be conversational and natural, not robotic
+- If you don't know something, say so honestly and offer to help with what you can do
+
+Respond naturally and helpfully to the user's message.`;
 
       const response = await openai.chat.completions.create({
         model: MODEL as string,
         messages: [
           {
             role: 'system',
-            content: 'You are a friendly, conversational data analyst assistant. Respond naturally and warmly to casual conversation. Keep responses brief and engaging.',
+            content: 'You are an intelligent, helpful, and friendly AI assistant with expertise in data analysis. You can answer general questions, explain concepts, provide insights, and engage in natural, flowing conversations. You maintain context from previous messages and provide comprehensive, helpful responses when needed.',
           },
           {
             role: 'user',
             content: conversationalPrompt,
           },
         ],
-        temperature: 0.9, // Higher temperature for more natural, varied responses
-        max_tokens: 100, // Short responses for casual chat
+        temperature: 0.8, // Balanced temperature for natural but coherent responses
+        max_tokens: isSimpleChat ? 150 : 800, // Longer responses for general questions
       });
 
-      const answer = response.choices[0].message.content?.trim() || "Hi! I'm here to help you explore your data. What would you like to know?";
+      const answer = response.choices[0].message.content?.trim() || "Hi! I'm here to help you. What would you like to know?";
       return { answer };
     } catch (error) {
       console.error('Conversational response error, using fallback:', error);
       // Fallback responses
       const fallbackResponses: Record<string, string> = {
-        'hi': "Hi there! 👋 I'm here to help you explore your data. What would you like to know?",
-        'hello': "Hello! 👋 Ready to dive into your data? Ask me anything!",
-        'hey': "Hey! 👋 What can I help you discover in your data today?",
-        'how are you': "I'm doing great, thanks for asking! Ready to help you analyze your data. What would you like to explore?",
-        'what\'s up': "Not much! Just here waiting to help you with your data analysis. What can I show you?",
-        'thanks': "You're welcome! Happy to help. Anything else you'd like to explore?",
-        'thank you': "You're very welcome! Feel free to ask if you need anything else.",
+        'hi': "Hi there! 👋 I'm here to help you explore your data and answer your questions. What would you like to know?",
+        'hello': "Hello! 👋 Ready to dive into your data or discuss anything else? Ask me anything!",
+        'hey': "Hey! 👋 What can I help you discover today?",
+        'how are you': "I'm doing great, thanks for asking! Ready to help you analyze your data or answer any questions. What would you like to explore?",
+        'what\'s up': "Not much! Just here waiting to help you with your data analysis or any questions you might have. What can I show you?",
+        'thanks': "You're welcome! Happy to help. Anything else you'd like to explore or discuss?",
+        'thank you': "You're very welcome! Feel free to ask if you need anything else. I'm here to help!",
       };
       
-      const response = fallbackResponses[questionLower] || "I'm here to help! What would you like to know about your data?";
+      const response = fallbackResponses[questionLower] || "I'm here to help! I can assist with data analysis, answer general questions, explain concepts, and have meaningful conversations. What would you like to know?";
       return { answer: response };
     }
   }
 
-  // STEP 2: RAG retrieval (only for data-related questions)
+  // RAG retrieval removed
   let retrievedContext: string = '';
-  if (sessionId) {
-    try {
-      const relevantChunks = await retrieveRelevantContext(
-        question,
-        workingData,
-        summary,
-        chatHistory,
-        sessionId,
-        5 // Top 5 most relevant chunks
-      );
-      
-      // Also retrieve similar past Q&A
-      const similarQA = await retrieveSimilarPastQA(question, chatHistory, 2);
-      
-      if (relevantChunks.length > 0 || similarQA.length > 0) {
-        retrievedContext = '\n\nRETRIEVED RELEVANT DATA CONTEXT:\n';
-        
-        if (relevantChunks.length > 0) {
-          retrievedContext += 'Relevant data patterns and information:\n';
-          relevantChunks.forEach((chunk, idx) => {
-            retrievedContext += `${idx + 1}. [${chunk.type}] ${chunk.content}\n`;
-          });
-        }
-        
-        if (similarQA.length > 0) {
-          retrievedContext += '\nSimilar past questions and answers:\n';
-          similarQA.forEach((qa, idx) => {
-            retrievedContext += `${idx + 1}. ${qa.content}\n`;
-          });
-        }
-      }
-    } catch (error) {
-      console.error('RAG retrieval error (continuing without RAG):', error);
-      // Continue without RAG if there's an error
-    }
-  }
   
   // Extract key topics and entities from conversation history for better context
   const conversationTopics = chatHistory
@@ -3390,7 +3479,7 @@ Just respond conversationally - no data analysis needed here.`;
     dataContext = `- ${summary.rowCount} rows, ${summary.columnCount} columns\n- Numeric columns: ${summary.numericColumns.join(', ')}`;
   }
   
-  const prompt = `You are a friendly, conversational data analyst assistant. You're having a natural, flowing conversation with the user about their data. Be warm, helpful, and engaging - like talking to a colleague over coffee.
+  const prompt = `You are an intelligent, helpful, and friendly AI assistant with expertise in data analysis. You're having a natural, flowing conversation with the user. You can answer questions about their data, explain concepts, provide insights, discuss general topics, and engage in meaningful conversations. Be warm, helpful, and engaging - like talking to a knowledgeable friend.
 
 CRITICAL DATA OPERATION HANDLING - EXECUTE IMMEDIATELY:
 - If the user asks for "aggregated value for category X", "total for category X", "aggregated column name value for the column category X", "what is the total value for men's fashion category", or similar aggregation queries with category filters:
@@ -3442,6 +3531,13 @@ CONVERSATION STYLE - CRITICAL:
 - Match their energy - if they're excited, be excited; if they're casual, be casual
 - Don't be overly formal - use everyday language
 
+RESPONSE GUIDELINES:
+- If the question is about the user's data: Analyze it, provide insights, and generate charts if requested
+- If the question is general knowledge or conceptual: Answer it comprehensively and helpfully, even if it's not directly about their data
+- If the question requests a chart or visualization: Generate appropriate chart specifications
+- If the question is conversational or exploratory: Engage naturally and provide thoughtful responses
+- Always be helpful, accurate, and engaging regardless of the question type
+
 If the question requests a chart or visualization, generate appropriate chart specifications. Otherwise, provide a helpful, conversational answer.
 
 CHART GUIDELINES:
@@ -3476,7 +3572,7 @@ Output JSON:
     messages: [
       {
         role: 'system',
-        content: `You are a friendly, conversational data analyst assistant. You're having a natural, flowing conversation with the user about their data.
+        content: `You are an intelligent, helpful, and friendly AI assistant with expertise in data analysis. You can answer questions about data, explain concepts, provide insights, discuss general topics, and engage in natural, flowing conversations. You're having a natural conversation with the user.
 
 CRITICAL DATA OPERATION RULES:
 - If user asks for "aggregated value for category X", "total for category X", "aggregated column name value for the column category X", or similar:

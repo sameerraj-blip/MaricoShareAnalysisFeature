@@ -178,8 +178,11 @@ CLASSIFICATION RULES:
    * These are DIRECT aggregation queries with category filters and should be handled immediately by the general handler WITHOUT asking for clarification
    * Set requiresClarification: false and confidence >= 0.9 for these queries
 5. "comparison" - User wants to compare variables, find "best" option, rank items, or asks "which is better/best" (vs, and, between, best competitor/product/brand, ranking)
-6. "conversational" - Greetings, thanks, casual chat, questions about the bot
-7. "custom" - Doesn't fit other categories
+6. "conversational" - Greetings, thanks, casual chat, questions about the bot, general knowledge questions, explanations, advice, or any question that doesn't require data analysis
+   * IMPORTANT: General questions that don't mention specific data columns or analysis should be classified as "conversational"
+   * Examples: "What is machine learning?", "How does correlation work?", "Explain regression", "What's the difference between mean and median?", "Tell me about data science"
+   * These are conversational/educational questions, not data analysis requests
+7. "custom" - Doesn't fit other categories, but still requires data analysis
    * Also includes general yes/no questions that are not clearly about modeling, correlation, charts, or statistics
    * HIGH PRIORITY: Aggregation queries with category filters should ALWAYS be classified as "custom" with high confidence
    * These are direct data operations that should be executed immediately without asking for clarification

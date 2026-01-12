@@ -4,7 +4,7 @@ import { MessageBubble } from '@/pages/Home/Components/MessageBubble';
 import { ColumnSidebar } from '@/pages/Home/Components/ColumnSidebar';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles, Loader2, ChevronUp, ChevronDown } from 'lucide-react';
+import { Send, Upload as UploadIcon, Square, Filter, Database, BarChart3, Settings, Info, Sparkles, Loader2, ChevronUp, ChevronDown, FileText } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import {
   Select,
@@ -42,6 +42,7 @@ interface ChatInterfaceProps {
   sessionId?: string | null; // Session ID for downloading modified datasets
   isReplacingAnalysis?: boolean; // Whether we're replacing the current analysis
   isLargeFileLoading?: boolean; // Whether a large file is being loaded
+  onOpenDataSummary?: () => void; // Callback to open data summary modal
 }
 
 // Dynamic suggestions based on conversation context
@@ -110,6 +111,7 @@ export function ChatInterface({
   sessionId,
   isReplacingAnalysis = false,
   isLargeFileLoading = false,
+  onOpenDataSummary,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
@@ -504,6 +506,22 @@ export function ChatInterface({
 
   return (
     <div className="flex h-[calc(100vh-80px)] relative bg-gradient-to-br from-slate-50 to-white">
+      {/* Data Summary Button - Left Side */}
+      {sessionId && onOpenDataSummary && (
+        <div className="absolute left-4 top-4 z-30">
+          <Button
+            onClick={onOpenDataSummary}
+            variant="outline"
+            size="sm"
+            className="bg-white/95 backdrop-blur-sm shadow-md hover:shadow-lg transition-all border-gray-200 hover:border-primary"
+            title="View Data Summary"
+          >
+            <FileText className="h-4 w-4 mr-2" />
+            <span className="hidden sm:inline">Data Summary</span>
+          </Button>
+        </div>
+      )}
+      
       {/* Loading Overlay when replacing analysis */}
       {isReplacingAnalysis && (
         <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-50 flex items-center justify-center">

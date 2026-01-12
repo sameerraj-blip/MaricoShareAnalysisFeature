@@ -13,6 +13,7 @@ export interface HandlerContext {
   chatHistory: Message[];
   sessionId: string;
   chatInsights?: Insight[];
+  permanentContext?: string; // Permanent context provided by user during upload
 }
 
 /**
@@ -205,6 +206,21 @@ export abstract class BaseHandler {
     }
 
     return answer;
+  }
+
+  /**
+   * Add permanent context to a prompt if available
+   */
+  protected addPermanentContextToPrompt(prompt: string, context: HandlerContext): string {
+    if (context.permanentContext && context.permanentContext.trim()) {
+      return `## IMPORTANT CONTEXT PROVIDED BY USER:
+${context.permanentContext}
+
+---
+
+${prompt}`;
+    }
+    return prompt;
   }
 }
 

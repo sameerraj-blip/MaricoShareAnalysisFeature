@@ -1,10 +1,13 @@
 import { useEffect, useState, useRef } from 'react';
 import { FileUpload } from '@/pages/Home/Components/FileUpload';
 import { ChatInterface } from './Components/ChatInterface';
+import { ContextModal } from './Components/ContextModal';
+import { DataSummaryModal } from './Components/DataSummaryModal';
 import { useHomeState, useHomeMutations, useHomeHandlers, useSessionLoader } from './modules';
 import { sessionsApi } from '@/lib/api';
 import { useChatMessagesStream } from '@/hooks/useChatMessagesStream';
 import { Message } from '@/shared/schema';
+import { useToast } from '@/hooks/use-toast';
 
 interface HomeProps {
   resetTrigger?: number;
@@ -19,6 +22,12 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [isLargeFileLoading, setIsLargeFileLoading] = useState(false);
+  const [showContextModal, setShowContextModal] = useState(false);
+  const [contextModalSessionId, setContextModalSessionId] = useState<string | null>(null);
+  const [isSavingContext, setIsSavingContext] = useState(false);
+  const [showDataSummaryModal, setShowDataSummaryModal] = useState(false);
+  const contextModalShownRef = useRef<Set<string>>(new Set());
+  const { toast } = useToast();
   const {
     sessionId,
     fileName,
@@ -514,6 +523,63 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     fetchCollaborators();
   }, [sessionId]);
 
+  // Show context modal when a new session is created (after upload)
+  useEffect(() => {
+    if (sessionId && !contextModalShownRef.current.has(sessionId)) {
+      // Check if session already has context - if so, don't show modal
+      const checkAndShowModal = async () => {
+        try {
+          const data = await sessionsApi.getSessionDetails(sessionId);
+          const sessionData = data.session || data;
+          // Only show modal if there's no existing permanent context
+          if (!sessionData.permanentContext) {
+            setContextModalSessionId(sessionId);
+            setShowContextModal(true);
+            contextModalShownRef.current.add(sessionId);
+          }
+        } catch (e) {
+          console.error('Failed to check session context:', e);
+          // Show modal anyway if we can't check
+          setContextModalSessionId(sessionId);
+          setShowContextModal(true);
+          contextModalShownRef.current.add(sessionId);
+        }
+      };
+      checkAndShowModal();
+    }
+  }, [sessionId]);
+
+  // Handle saving context
+  const handleSaveContext = async (context: string) => {
+    if (!contextModalSessionId) return;
+    
+    setIsSavingContext(true);
+    try {
+      await sessionsApi.updateSessionContext(contextModalSessionId, context);
+      setShowContextModal(false);
+      setContextModalSessionId(null);
+      toast({
+        title: 'Context Saved',
+        description: 'Your context has been saved and will be included with each message.',
+      });
+    } catch (error) {
+      console.error('Failed to save context:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to save context. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSavingContext(false);
+    }
+  };
+
+  // Handle closing context modal
+  const handleCloseContextModal = () => {
+    setShowContextModal(false);
+    setContextModalSessionId(null);
+  };
+
   // Don't show file upload if we're loading a session (even if sessionId isn't set yet)
   // Only show file upload if there's no session data being loaded AND no sessionId
   // Only auto-open the dialog when resetTrigger > 0 (explicitly starting new analysis)
@@ -540,36 +606,51 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   }
 
   return (
-    <ChatInterface
-      messages={messages}
-      onSendMessage={handleSendMessage}
-      onUploadNew={handleUploadNew}
-      isLoading={chatMutation.isPending}
-      onLoadHistory={handleLoadHistory}
-      canLoadHistory={!!sessionId}
-      loadingHistory={isLoadingHistory}
-      sampleRows={sampleRows}
-      columns={columns}
-      numericColumns={numericColumns}
-      dateColumns={dateColumns}
-      totalRows={totalRows}
-      totalColumns={totalColumns}
-      onStopGeneration={handleStopGeneration}
-      onEditMessage={handleEditMessage}
-      thinkingSteps={thinkingSteps}
-      thinkingTargetTimestamp={thinkingTargetTimestamp}
-      aiSuggestions={suggestions}
-      collaborators={collaborators}
-      mode={mode}
-      sessionId={sessionId}
-      isLargeFileLoading={isLargeFileLoading}
-      onModeChange={(newMode) => {
-        setMode(newMode);
-        // onModeChange will update the URL, which will update initialMode prop
-        if (onModeChange) {
-          onModeChange(newMode);
-        }
-      }}
-    />
+    <>
+      <ChatInterface
+        messages={messages}
+        onSendMessage={handleSendMessage}
+        onUploadNew={handleUploadNew}
+        isLoading={chatMutation.isPending}
+        onLoadHistory={handleLoadHistory}
+        canLoadHistory={!!sessionId}
+        loadingHistory={isLoadingHistory}
+        sampleRows={sampleRows}
+        columns={columns}
+        numericColumns={numericColumns}
+        dateColumns={dateColumns}
+        totalRows={totalRows}
+        totalColumns={totalColumns}
+        onStopGeneration={handleStopGeneration}
+        onEditMessage={handleEditMessage}
+        thinkingSteps={thinkingSteps}
+        thinkingTargetTimestamp={thinkingTargetTimestamp}
+        aiSuggestions={suggestions}
+        collaborators={collaborators}
+        mode={mode}
+        sessionId={sessionId}
+        isLargeFileLoading={isLargeFileLoading}
+        onModeChange={(newMode) => {
+          setMode(newMode);
+          // onModeChange will update the URL, which will update initialMode prop
+          if (onModeChange) {
+            onModeChange(newMode);
+          }
+        }}
+        onOpenDataSummary={() => setShowDataSummaryModal(true)}
+      />
+      <ContextModal
+        isOpen={showContextModal}
+        onClose={handleCloseContextModal}
+        onSave={handleSaveContext}
+        isLoading={isSavingContext}
+      />
+      <DataSummaryModal
+        isOpen={showDataSummaryModal}
+        onClose={() => setShowDataSummaryModal(false)}
+        sessionId={sessionId}
+        onSendMessage={handleSendMessage}
+      />
+    </>
   );
 }

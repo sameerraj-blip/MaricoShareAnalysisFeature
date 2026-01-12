@@ -50,6 +50,8 @@ export const messageSchema = z.object({
   timestamp: z.number(),
   thinkingSteps: z.array(thinkingStepSchema).optional(), // Temporary thinking steps shown during processing
   userEmail: z.string().optional(), // Email of the user who sent the message (for shared analyses)
+  preview: z.array(z.record(z.union([z.string(), z.number(), z.null()]))).optional(), // Preview data for data operations (aggregate, pivot, etc.)
+  summary: z.array(z.any()).optional(), // Summary data for data operations
 });
 
 export type Message = z.infer<typeof messageSchema>;
