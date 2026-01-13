@@ -6,6 +6,7 @@ import { DataSummary, Message, ChartSpec, Insight, ThinkingStep } from '../../sh
 import { createErrorResponse, getFallbackSuggestions } from './utils/errorRecovery.js';
 import { askClarifyingQuestion } from './utils/clarification.js';
 import { DataOpsHandler } from './handlers/dataOpsHandler.js';
+import { GeneralHandler } from './handlers/generalHandler.js';
 import { extractRequiredColumns, extractColumnsFromHistory } from './utils/columnExtractor.js';
 import queryCache from '../cache.js';
 
@@ -99,6 +100,9 @@ export class AgentOrchestrator {
       // ============================================
       // COMPLETE SEPARATE ROUTE FOR DATA OPS MODE
       // ============================================
+      // Check if this is a general analysis question first (will be detected by DataOpsHandler)
+      let isGeneralQuestion = false;
+      
       if (mode === 'dataOps') {
         console.log(`🔧 Data Ops Mode: Using separate route (bypassing analysis logic)`);
         
@@ -160,30 +164,39 @@ export class AgentOrchestrator {
           
           this.emitThinkingStep(onThinkingStep, "Performing data operation", "completed");
           
-          // Handle response
-          if (response.error) {
-            console.log(`⚠️ DataOpsHandler returned error: ${response.error}`);
-            this.emitThinkingStep(onThinkingStep, "Performing data operation", "error", response.error);
+          // If DataOpsHandler signals this is a general analysis question, route to analysis flow
+          if ((response as any).shouldTryNextHandler || (response.answer === '' && !response.error && !response.requiresClarification)) {
+            console.log(`📊 DataOpsHandler detected general analysis question, routing to general analysis handler`);
+            this.emitThinkingStep(onThinkingStep, "Routing to general analysis", "completed");
+            // Mark as general question and break out to process through analysis flow
+            isGeneralQuestion = true;
+            // Don't return - we'll process it through analysis flow below
+          } else {
+            // Handle response
+            if (response.error) {
+              console.log(`⚠️ DataOpsHandler returned error: ${response.error}`);
+              this.emitThinkingStep(onThinkingStep, "Performing data operation", "error", response.error);
+              return {
+                answer: response.answer || `Error: ${response.error}`,
+                table: response.table,
+                operationResult: response.operationResult,
+              };
+            }
+            
+            if (response.requiresClarification) {
+              this.emitThinkingStep(onThinkingStep, "Need more information", "active");
+              return askClarifyingQuestion(intent, summary);
+            }
+            
+            // Success - return response
             return {
-              answer: response.answer || `Error: ${response.error}`,
+              answer: response.answer,
+              charts: response.charts,
+              insights: response.insights,
               table: response.table,
               operationResult: response.operationResult,
             };
           }
-          
-          if (response.requiresClarification) {
-            this.emitThinkingStep(onThinkingStep, "Need more information", "active");
-            return askClarifyingQuestion(intent, summary);
-          }
-          
-          // Success - return response
-          return {
-            answer: response.answer,
-            charts: response.charts,
-            insights: response.insights,
-            table: response.table,
-            operationResult: response.operationResult,
-          };
           
         } catch (error) {
           console.error('❌ DataOpsHandler error:', error);
@@ -192,6 +205,17 @@ export class AgentOrchestrator {
             answer: `An error occurred while performing the data operation: ${error instanceof Error ? error.message : String(error)}`,
           };
         }
+        
+        // If we detected a general analysis question, continue to analysis flow
+        if (!isGeneralQuestion) {
+          // Normal dataOps flow completed, but we already returned above
+          // This shouldn't be reached, but just in case
+          return {
+            answer: 'Data operation completed',
+          };
+        }
+        // If isGeneralQuestion is true, we'll continue to analysis flow below
+        console.log(`📊 Continuing to analysis flow for general question`);
       }
       
       // ============================================
@@ -206,7 +230,19 @@ export class AgentOrchestrator {
       // ============================================
       // ANALYSIS MODE ROUTE (existing logic)
       // Also handles modeling mode (routes through same flow)
+      // Also handles general questions detected in dataOps mode
       // ============================================
+      
+      // If we're in dataOps mode but detected a general question, process it as analysis
+      if (mode === 'dataOps' && isGeneralQuestion) {
+        console.log(`📊 Processing general question from dataOps mode through analysis flow`);
+        // Continue with analysis flow using the original question
+      } else if (mode === 'dataOps' && !isGeneralQuestion) {
+        // Normal dataOps completed, shouldn't reach here but just in case
+        return {
+          answer: 'Data operation completed',
+        };
+      }
       
       this.emitThinkingStep(onThinkingStep, "Understanding your question", "active");
 
@@ -232,6 +268,23 @@ export class AgentOrchestrator {
       console.log(`🎯 Classifying intent for: "${finalQuestion}"`);
       const intent = await classifyIntent(finalQuestion, chatHistory, summary);
       console.log(`🎯 Intent: ${intent.type} (confidence: ${intent.confidence.toFixed(2)})`);
+      
+      // CRITICAL: For complex multi-condition queries, force route to GeneralHandler
+      // These queries need the full data and complex processing
+      const isComplexQuery = finalQuestion && (
+        /which\s+(months|categories|skus|items|products).*had.*above|which\s+(months|categories|skus|items|products).*had.*below/i.test(finalQuestion) ||
+        /which\s+(months|categories|skus|items|products).*compared.*while.*also/i.test(finalQuestion) ||
+        /which\s+(months|categories|skus|items|products).*above.*but.*only.*from/i.test(finalQuestion)
+      );
+      
+      if (isComplexQuery && intent.type !== 'custom') {
+        console.log(`🔄 Detected complex multi-condition query, routing to GeneralHandler (custom type)`);
+        intent.type = 'custom';
+        intent.confidence = Math.max(intent.confidence, 0.8);
+        intent.customRequest = finalQuestion;
+        intent.originalQuestion = finalQuestion;
+      }
+      
       this.emitThinkingStep(onThinkingStep, "Figuring out the best way to answer", "completed");
 
       // Step 2.5: Extract required columns for optimized data loading
@@ -597,15 +650,37 @@ export class AgentOrchestrator {
     console.log(`🔄 Error recovery: ${errorMessage}`);
 
     // Fallback Chain:
-    // 1. Try general handler
-    const generalHandler = this.handlers.find(h => h.canHandle(intent));
+    // 1. Try general handler (even if it's not the primary handler)
+    // For complex queries, always try the general handler as it can handle multi-condition queries
+    // CRITICAL: Only find GeneralHandler by name to avoid infinite recursion with other handlers
+    const generalHandler = this.handlers.find(h => {
+      const handlerName = h.constructor.name;
+      return handlerName === 'GeneralHandler';
+    });
     if (generalHandler) {
       try {
-        console.log(`🔄 Trying general handler as fallback...`);
-        this.emitThinkingStep(onThinkingStep, "Trying fallback handler...", "active");
-        const response = await generalHandler.handle(intent, context);
-        if (!response.error) {
-          this.emitThinkingStep(onThinkingStep, "Trying fallback handler...", "completed");
+        console.log(`🔄 Trying general handler as fallback for complex query...`);
+        this.emitThinkingStep(onThinkingStep, "Processing complex query...", "active");
+        // Create a new intent that the general handler can process
+        const generalIntent: AnalysisIntent = {
+          type: 'custom',
+          confidence: 0.8, // Give it higher confidence to avoid clarification
+          customRequest: question,
+          originalQuestion: question,
+        };
+        // Ensure context has the full data
+        const handlerContext: HandlerContext = {
+          data: context.data,
+          summary: context.summary,
+          context: context.context,
+          chatHistory: context.chatHistory,
+          sessionId: context.sessionId,
+          chatInsights: context.chatInsights,
+          permanentContext: context.permanentContext,
+        };
+        const response = await generalHandler.handle(generalIntent, handlerContext);
+        if (!response.error && response.answer && response.answer.trim().length > 0) {
+          this.emitThinkingStep(onThinkingStep, "Processing complex query...", "completed");
           return {
             answer: response.answer,
             charts: response.charts,
@@ -615,8 +690,8 @@ export class AgentOrchestrator {
           };
         }
       } catch (fallbackError) {
-        console.log(`⚠️ General handler also failed`);
-        this.emitThinkingStep(onThinkingStep, "Trying fallback handler...", "error");
+        console.log(`⚠️ General handler also failed:`, fallbackError);
+        this.emitThinkingStep(onThinkingStep, "Processing complex query...", "error");
       }
     }
 

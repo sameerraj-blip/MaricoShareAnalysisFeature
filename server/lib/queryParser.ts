@@ -366,6 +366,13 @@ YOUR TASK:
 - CRITICAL: If the user asks about "seasonal patterns", "seasonal trends", "seasonal variations", or "patterns over time", 
   set "dateAggregationPeriod" to "month" (to show trends over time with month-year grouping). Also ensure the date column 
   is included in "groupBy" if not already specified.
+- CRITICAL: If the user asks about "month-over-month growth", "month over month growth", "consistent month-over-month growth", 
+  "month-over-month revenue growth", or similar time series growth patterns:
+  * Set "dateAggregationPeriod" to "month" (to group by month-year)
+  * Include the date column in "groupBy" 
+  * Include the category/grouping column in "groupBy" (e.g., "category", "Category", "product_category")
+  * Set aggregations to sum the revenue/total column
+  * These queries require time series analysis - extract all relevant filters and aggregations
 - IMPORTANT: Distinguish between:
   * "month" - groups by month-year (e.g., "Jan 2024", "Jan 2022" are separate)
   * "monthOnly" - groups by month name only, combining all years (e.g., all "Jan" values combined regardless of year)
@@ -375,6 +382,15 @@ YOUR TASK:
   (e.g., "Month", "Date", "Year" - whatever date column exists), NOT the period name like "year" or "month". 
   For example, if dateAggregationPeriod is "year" and the date column is "Month", set groupBy to ["Month"], not ["year"].
 - If the user specifies numeric conditions (>, <, between, etc.), capture in valueFilters.
+- CRITICAL: Handle "above average", "below average", "above the yearly monthly average", "above the monthly average", "above average", "below average" patterns:
+  * These are comparisons to calculated averages/means
+  * Extract the reference: "average", "mean", "yearly monthly average", "monthly average"
+  * Set reference: "mean" for average comparisons
+  * Extract the column being compared (e.g., "total revenue", "revenue", "total", "value")
+  * Example: "above the yearly monthly average" → operator: ">", reference: "mean", column: "total" (or revenue column)
+  * Example: "below average" → operator: "<", reference: "mean", column: (infer from context)
+  * Example: "Which months had total revenue above the yearly monthly average" → valueFilter: {column: "total", operator: ">", reference: "mean"}
+  * The column should be the metric being compared - match to available numeric columns
 - If the user wants to exclude categories, use exclusionFilters.
 - CRITICAL: If the user asks for aggregation with category filters, extract and handle immediately:
   * Patterns include:
