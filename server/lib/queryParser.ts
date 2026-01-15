@@ -73,6 +73,38 @@ function sanitiseTimeFilters(filters?: Nullable<TimeFilter>[]): TimeFilter[] | u
   return cleaned.length ? cleaned : undefined;
 }
 
+/**
+ * Converts Indian number units (crore, lakh) to actual numbers
+ */
+function convertIndianNumberUnits(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return value;
+  
+  const str = String(value).toLowerCase().trim();
+  
+  // Handle crore (10 million)
+  const croreMatch = str.match(/(\d+(?:\.\d+)?)\s*crore/i);
+  if (croreMatch) {
+    const num = parseFloat(croreMatch[1]);
+    if (!isNaN(num)) {
+      return num * 10000000; // 10 million
+    }
+  }
+  
+  // Handle lakh (100 thousand)
+  const lakhMatch = str.match(/(\d+(?:\.\d+)?)\s*lakh/i);
+  if (lakhMatch) {
+    const num = parseFloat(lakhMatch[1]);
+    if (!isNaN(num)) {
+      return num * 100000; // 100 thousand
+    }
+  }
+  
+  // Try to parse as regular number
+  const num = parseFloat(str);
+  return !isNaN(num) ? num : null;
+}
+
 function sanitiseValueFilters(filters?: Nullable<ValueFilter>[]): ValueFilter[] | undefined {
   if (!filters) return undefined;
   const cleaned: ValueFilter[] = [];
@@ -82,12 +114,18 @@ function sanitiseValueFilters(filters?: Nullable<ValueFilter>[]): ValueFilter[] 
       column: filter.column,
       operator: filter.operator,
     };
-    if (typeof filter.value === 'number' && !isNaN(filter.value)) {
-      entry.value = filter.value;
+    
+    // Convert Indian number units if present
+    const convertedValue = convertIndianNumberUnits(filter.value);
+    if (convertedValue !== null) {
+      entry.value = convertedValue;
     }
-    if (typeof filter.value2 === 'number' && !isNaN(filter.value2)) {
-      entry.value2 = filter.value2;
+    
+    const convertedValue2 = convertIndianNumberUnits(filter.value2);
+    if (convertedValue2 !== null) {
+      entry.value2 = convertedValue2;
     }
+    
     if (filter.reference) entry.reference = filter.reference;
     cleaned.push(entry);
   }
@@ -382,6 +420,13 @@ YOUR TASK:
   (e.g., "Month", "Date", "Year" - whatever date column exists), NOT the period name like "year" or "month". 
   For example, if dateAggregationPeriod is "year" and the date column is "Month", set groupBy to ["Month"], not ["year"].
 - If the user specifies numeric conditions (>, <, between, etc.), capture in valueFilters.
+- CRITICAL: Handle Indian number units in value filters:
+  * "crore" = 10,000,000 (10 million) - convert "₹2 crore" to value: 20000000
+  * "lakh" = 100,000 (hundred thousand) - convert "₹5 lakh" to value: 500000
+  * Examples: "more than ₹2 crore" → operator: ">", value: 20000000
+  * Examples: "exceeding ₹5 crore" → operator: ">", value: 50000000
+  * Examples: "less than ₹10 lakh" → operator: "<", value: 1000000
+  * Extract the numeric value and multiply by the unit multiplier
 - CRITICAL: Handle "above average", "below average", "above the yearly monthly average", "above the monthly average", "above average", "below average" patterns:
   * These are comparisons to calculated averages/means
   * Extract the reference: "average", "mean", "yearly monthly average", "monthly average"

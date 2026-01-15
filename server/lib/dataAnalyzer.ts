@@ -7,6 +7,16 @@ import { generateChartInsights } from './insightGenerator.js';
 import { parseUserQuery } from './queryParser.js';
 import { applyQueryTransformations } from './dataTransform.js';
 import type { ParsedQuery } from '../shared/queryTypes.js';
+import { executeAnalyticalQuery, generateQueryContextForAI } from './analyticalQueryExecutor.js';
+import { 
+  isAnalyticalQuery,
+  isInformationSeekingQuery,
+  identifyRelevantColumnsAndFilterData,
+  generateExecutionPlan, 
+  executePlan, 
+  generateExplanation,
+  generateQueryPlanOnly
+} from './analyticalQueryEngine.js';
 import { calculateSmartDomainsForChart } from './axisScaling.js';
 
 export async function analyzeUpload(
@@ -138,6 +148,38 @@ export async function answerQuestion(
   console.log('🚀 answerQuestion() CALLED with question:', question);
   console.log('📋 SessionId:', sessionId);
   console.log('📊 Data rows:', data?.length);
+  
+  // PRIORITY CHECK: For information-seeking queries, route directly to query execution
+  // This bypasses the agent system to prevent automatic data operations (aggregation, table creation)
+  // Only execute queries and return results - don't modify data structure unless explicitly asked
+  const { isInformationSeekingQuery } = await import('./analyticalQueryEngine.js');
+  if (isInformationSeekingQuery(question) && mode !== 'dataOps') {
+    console.log('🔍 Detected information-seeking query - routing directly to query execution (bypassing agent system)');
+    try {
+      const result = await generateGeneralAnswer(
+        data,
+        question,
+        chatHistory,
+        summary,
+        sessionId,
+        null,
+        [],
+        chatInsights
+      );
+      
+      if (result && result.answer && result.answer.trim().length > 0) {
+        console.log('✅ Information-seeking query executed successfully');
+        return {
+          answer: result.answer,
+          charts: result.charts,
+          insights: result.insights,
+        };
+      }
+    } catch (error) {
+      console.error('❌ Error executing information-seeking query:', error);
+      // Fall through to agent system as backup
+    }
+  }
   
   // Try new agent system first
   console.log('🔍 Attempting to use new agent system for query:', question);
@@ -2153,6 +2195,172 @@ export async function generateGeneralAnswer(
   chatInsights?: Insight[],
   requiredColumns?: string[]
 ): Promise<{ answer: string; charts?: ChartSpec[]; insights?: Insight[] }> {
+  // QUERY-ONLY ARCHITECTURE: For information-seeking queries, execute query and return results (no explanations)
+  if (isInformationSeekingQuery(question)) {
+    console.log('🔍 Detected information-seeking query, using query-only reasoning layer');
+    try {
+      // Step 1: Identify relevant columns AND filter data based on query conditions
+      console.log('📋 Step 1: Identifying relevant columns and filtering data...');
+      const columnIdentification = await identifyRelevantColumnsAndFilterData(question, data, summary, chatHistory);
+      console.log('✅ Columns identified:', columnIdentification.identifiedColumns);
+      console.log('📝 Column mapping:', columnIdentification.columnMapping);
+      console.log('🔍 Filters applied:', columnIdentification.filterDescription);
+      console.log(`📊 Data filtered: ${data.length} → ${columnIdentification.filteredData.length} rows`);
+      
+      // Step 2: Generate execution plan using identified columns and filtered data
+      console.log('📋 Step 2: Generating execution plan...');
+      const executionPlan = await generateExecutionPlan(question, summary, chatHistory, columnIdentification, data);
+      console.log('✅ Execution plan generated:', executionPlan.description);
+      
+      // Step 3: Execute plan using Python engine with filtered data
+      console.log('📋 Step 3: Executing plan with filtered data...');
+      const executionResult = await executePlan(executionPlan, columnIdentification.filteredData);
+      
+      if (!executionResult.success || !executionResult.data) {
+        throw new Error(executionResult.error || 'Execution failed');
+      }
+      
+      console.log(`✅ Query executed: ${executionResult.data.length} rows returned`);
+      
+      // Step 4: Format results as a clean response (no explanations, just the data)
+      const results = executionResult.data;
+      let formattedAnswer = '';
+      
+      if (results.length === 0) {
+        formattedAnswer = 'No results found.';
+      } else {
+        // Helper function to format values
+        const formatValue = (key: string, value: any): string => {
+          if (value === null || value === undefined) {
+            return 'N/A';
+          }
+          
+          // Format numbers with Indian currency if it's a revenue/amount column
+          if (typeof value === 'number') {
+            const keyLower = key.toLowerCase();
+            if (keyLower.includes('revenue') || keyLower.includes('total') || keyLower.includes('amount') || keyLower.includes('value') || keyLower.includes('sales')) {
+              if (value >= 10000000) {
+                return `₹${(value / 10000000).toFixed(2)} crore`;
+              } else if (value >= 100000) {
+                return `₹${(value / 100000).toFixed(2)} lakh`;
+              } else {
+                return `₹${value.toLocaleString('en-IN')}`;
+              }
+            }
+            // Format other numbers with thousand separators
+            return value.toLocaleString('en-IN');
+          }
+          
+          return String(value);
+        };
+        
+        if (results.length === 1) {
+          // Single result - format as key-value pairs
+          const result = results[0];
+          const entries = Object.entries(result)
+            .map(([key, value]) => `${key}: ${formatValue(key, value)}`)
+            .join('\n');
+          formattedAnswer = entries;
+        } else {
+          // Multiple results - format as table
+          const headers = Object.keys(results[0]);
+          const maxResults = 100; // Limit to top 100 results
+          const displayResults = results.slice(0, maxResults);
+          
+          // Calculate column widths for better alignment
+          const columnWidths = headers.map(header => {
+            const headerWidth = header.length;
+            const maxValueWidth = Math.max(
+              ...displayResults.map(row => formatValue(header, row[header]).length)
+            );
+            return Math.max(headerWidth, maxValueWidth, 10); // Minimum width of 10
+          });
+          
+          // Format header row
+          const headerRow = headers
+            .map((header, idx) => header.padEnd(columnWidths[idx]))
+            .join(' | ');
+          
+          // Format separator
+          const separator = columnWidths.map(width => '-'.repeat(width)).join(' | ');
+          
+          // Format data rows
+          const dataRows = displayResults.map(row => 
+            headers
+              .map((header, idx) => formatValue(header, row[header]).padEnd(columnWidths[idx]))
+              .join(' | ')
+          );
+          
+          formattedAnswer = `${headerRow}\n${separator}\n${dataRows.join('\n')}`;
+          
+          // Add summary if results were limited
+          if (results.length > maxResults) {
+            formattedAnswer += `\n\n(Showing top ${maxResults} of ${results.length} results)`;
+          } else {
+            formattedAnswer += `\n\n(Total: ${results.length} results)`;
+          }
+        }
+      }
+      
+      return {
+        answer: formattedAnswer,
+        charts: undefined,
+        insights: undefined,
+      };
+    } catch (error) {
+      console.error('❌ Error in information-seeking query execution:', error);
+      // Fall through to current architecture
+      console.log('⚠️ Falling back to current architecture');
+    }
+  }
+  
+  // CURRENT ARCHITECTURE: Route analytical (non-visualization) queries through execution plan engine with execution
+  if (isAnalyticalQuery(question)) {
+    console.log('🔍 Detected analytical query, using new execution plan architecture');
+    try {
+      // Step 1: Identify relevant columns AND filter data based on query conditions
+      console.log('📋 Step 1: Identifying relevant columns and filtering data...');
+      const columnIdentification = await identifyRelevantColumnsAndFilterData(question, data, summary, chatHistory);
+      console.log('✅ Columns identified:', columnIdentification.identifiedColumns);
+      console.log('📝 Column mapping:', columnIdentification.columnMapping);
+      console.log('🔍 Filters applied:', columnIdentification.filterDescription);
+      console.log(`📊 Data filtered: ${data.length} → ${columnIdentification.filteredData.length} rows`);
+      
+      // Step 2: Generate execution plan using identified columns and filtered data
+      console.log('📋 Step 2: Generating execution plan...');
+      const executionPlan = await generateExecutionPlan(question, summary, chatHistory, columnIdentification, data);
+      console.log('✅ Execution plan generated:', executionPlan.description);
+      
+      // Step 3: Execute plan using Python engine with filtered data
+      console.log('📋 Step 3: Executing plan with filtered data...');
+      const executionResult = await executePlan(executionPlan, columnIdentification.filteredData);
+      
+      if (!executionResult.success || !executionResult.data) {
+        throw new Error(executionResult.error || 'Execution failed');
+      }
+      
+      console.log(`✅ Query executed: ${executionResult.data.length} rows returned`);
+      
+      // Step 3: Generate explanation using Azure OpenAI
+      const explanation = await generateExplanation(
+        question,
+        executionPlan,
+        executionResult.data,
+        summary
+      );
+      
+      return {
+        answer: explanation,
+        charts: undefined, // No charts for analytical queries
+        insights: undefined,
+      };
+    } catch (error) {
+      console.error('❌ Error in analytical query engine:', error);
+      // Fall through to legacy implementation
+      console.log('⚠️ Falling back to legacy implementation');
+    }
+  }
+  
   // CRITICAL: Handle aggregation queries with category filters directly using regex
   // These are data operations that should be performed immediately, not passed to AI
   const aggregationWithCategoryResult = await handleAggregationWithCategoryDirect(question, data, summary);
@@ -2241,6 +2449,26 @@ export async function generateGeneralAnswer(
     if (transformedData.length > 0 || descriptions.length > 0) {
       workingData = transformedData;
     }
+  }
+  
+  // Execute analytical query executor for analytical questions
+  // This runs queries on CSV data and provides results to Azure AI
+  // Reuse already parsed query to avoid duplicate parsing
+  let analyticalQueryContext = '';
+  try {
+    const analyticalResult = await executeAnalyticalQuery(question, data, summary, chatHistory, parsedQuery);
+    if (analyticalResult.isAnalytical && analyticalResult.queryResults) {
+      console.log('✅ Analytical query executed, injecting results into AI prompt');
+      analyticalQueryContext = generateQueryContextForAI(analyticalResult);
+      // Use the query results data if available and we haven't already transformed
+      if (analyticalResult.queryResults.data.length > 0 && !preParsedQuery) {
+        workingData = analyticalResult.queryResults.data;
+        transformationNotes.push(analyticalResult.queryResults.summary);
+      }
+    }
+  } catch (error) {
+    console.error('⚠️ Analytical query executor failed:', error);
+    // Continue without analytical query context
   }
   
   const withNotes = <T extends { answer: string }>(result: T): T => {
@@ -3532,6 +3760,7 @@ ${dataContext}
 ${parsedQuery && parsedQuery.aggregations && parsedQuery.aggregations.length > 0 ? `\nAggregated columns: ${parsedQuery.aggregations.map(agg => agg.alias || `${agg.column}_${agg.operation}`).join(', ')}` : ''}
 ${aggregationColumnHints}
 ${retrievedContext}
+${analyticalQueryContext}
 
 AVAILABLE COLUMNS IN DATASET:
 ${summary.columns.map(c => `- ${c.name} [${c.type}]`).join('\n')}
@@ -3630,7 +3859,15 @@ CRITICAL EXECUTION RULES - EXECUTE IMMEDIATELY, NO CLARIFICATION:
 - NEVER ask for clarification when the question is clear and data is available - execute immediately and return results
 - NEVER say "I encountered an issue" or "Could you rephrase" - if data is available, use it to answer the question
 
-If the question requests a chart or visualization, generate appropriate chart specifications. Otherwise, provide a helpful answer with ACTUAL RESULTS and VALUES.
+🚨 CRITICAL: IF QUERY RESULTS ARE PROVIDED ABOVE (marked with "QUERY RESULTS FOR ANALYTICAL QUESTION"):
+- DO NOT generate a chart - answer the question directly using the query results
+- DO NOT say "No valid data points found" - the query has been executed and results are above
+- DO NOT try to create a trend chart or any visualization - use the provided query results
+- ANSWER DIRECTLY with the actual values from the query results
+- If the user asks "which region/category generated more than X", list the regions/categories from the query results
+- Format your answer clearly: "The regions that meet the criteria are: [list with values from query results]"
+
+If the question requests a chart or visualization AND NO QUERY RESULTS ARE PROVIDED, generate appropriate chart specifications. Otherwise, provide a helpful answer with ACTUAL RESULTS and VALUES.
 
 CHART GUIDELINES:
 - You can use ANY column (categorical or numeric) for x or y
