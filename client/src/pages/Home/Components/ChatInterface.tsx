@@ -13,9 +13,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { getUserEmail } from '@/utils/userStorage';
 import { useToast } from '@/hooks/use-toast';
 import { AvailableModelsDialog } from '@/components/AvailableModelsDialog';
+import { FilterDataModal } from '@/components/FilterDataModal';
+import { FilterCondition } from '@/components/ColumnFilterDialog';
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -113,6 +121,7 @@ export function ChatInterface({
   isLargeFileLoading = false,
   onOpenDataSummary,
 }: ChatInterfaceProps) {
+  const [filterModalOpen, setFilterModalOpen] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const [selectedCollaborator, setSelectedCollaborator] = useState<string>('all');
   const [showScrollToTop, setShowScrollToTop] = useState(false);
@@ -284,6 +293,30 @@ export function ChatInterface({
       inputRef.current?.focus();
     }
   }, [inputValue, isLoading, onSendMessage]);
+
+  const handleFilterApply = useCallback((condition: FilterCondition) => {
+    // Build filter message
+    let filterMessage = 'filter data where ';
+    
+    if (condition.operator === 'between') {
+      filterMessage += `${condition.column} is between ${condition.value} and ${condition.value2}`;
+    } else if (condition.operator === 'in') {
+      const valuesStr = condition.values?.map(v => `"${v}"`).join(', ') || '';
+      filterMessage += `${condition.column} is in [${valuesStr}]`;
+    } else if (condition.operator === 'contains') {
+      filterMessage += `${condition.column} contains "${condition.value}"`;
+    } else if (condition.operator === 'startsWith') {
+      filterMessage += `${condition.column} starts with "${condition.value}"`;
+    } else if (condition.operator === 'endsWith') {
+      filterMessage += `${condition.column} ends with "${condition.value}"`;
+    } else {
+      filterMessage += `${condition.column} ${condition.operator} ${condition.value}`;
+    }
+
+    // Close modal and send filter message
+    setFilterModalOpen(false);
+    onSendMessage(filterMessage);
+  }, [onSendMessage]);
 
   // Debounce timer ref for mention state updates
   const mentionUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -717,6 +750,30 @@ export function ChatInterface({
                 </Select>
               </div>
             )}
+            {/* Filter Data Dropdown - Only show in dataOps mode */}
+            {mode === 'dataOps' && columns && columns.length > 0 && (
+              <div className="flex-shrink-0">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-11 px-4 text-sm font-medium border-2 border-gray-200 bg-white hover:bg-gray-50 focus:ring-2 focus:ring-primary/40 focus:border-primary shadow-sm rounded-xl"
+                    >
+                      <Filter className="w-4 h-4 mr-2 text-gray-600" />
+                      <span>Filter Data</span>
+                      <ChevronDown className="w-4 h-4 ml-2 text-gray-600" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent side="top" align="start" className="w-56">
+                    <DropdownMenuItem onClick={() => setFilterModalOpen(true)}>
+                      <Filter className="w-4 h-4 mr-2" />
+                      <span>Filter Data</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            )}
             {/* Show Available Models button when in modeling mode */}
             {mode === 'modeling' && (
               <div className="flex-shrink-0">
@@ -833,6 +890,19 @@ export function ChatInterface({
             className="w-full h-full border-0 shadow-none bg-transparent"
           />
         </div>
+      )}
+
+      {/* Filter Data Modal */}
+      {mode === 'dataOps' && columns && columns.length > 0 && (
+        <FilterDataModal
+          open={filterModalOpen}
+          onOpenChange={setFilterModalOpen}
+          columns={columns}
+          numericColumns={numericColumns}
+          dateColumns={dateColumns}
+          data={sampleRows}
+          onApply={handleFilterApply}
+        />
       )}
     </div>
   );

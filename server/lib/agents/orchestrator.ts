@@ -8,6 +8,7 @@ import { askClarifyingQuestion } from './utils/clarification.js';
 import { DataOpsHandler } from './handlers/dataOpsHandler.js';
 import { GeneralHandler } from './handlers/generalHandler.js';
 import { extractRequiredColumns, extractColumnsFromHistory } from './utils/columnExtractor.js';
+import { detectComplexQuery } from './complexQueryDetector.js';
 import queryCache from '../cache.js';
 
 export type ThinkingStepCallback = (step: ThinkingStep) => void;
@@ -271,11 +272,32 @@ export class AgentOrchestrator {
       
       // CRITICAL: For complex multi-condition queries, force route to GeneralHandler
       // These queries need the full data and complex processing
-      const isComplexQuery = finalQuestion && (
-        /which\s+(months|categories|skus|items|products).*had.*above|which\s+(months|categories|skus|items|products).*had.*below/i.test(finalQuestion) ||
-        /which\s+(months|categories|skus|items|products).*compared.*while.*also/i.test(finalQuestion) ||
-        /which\s+(months|categories|skus|items|products).*above.*but.*only.*from/i.test(finalQuestion)
-      );
+      // Use AI-based detection instead of regex patterns for better accuracy
+      let isComplexQuery = false;
+      if (finalQuestion && mode !== 'dataOps') {
+        try {
+          this.emitThinkingStep(onThinkingStep, "Analyzing query complexity", "active");
+          const complexityDetection = await detectComplexQuery(finalQuestion, chatHistory, summary);
+          isComplexQuery = complexityDetection.isComplex && complexityDetection.confidence >= 0.7;
+          
+          if (isComplexQuery) {
+            console.log(`🔄 AI detected complex query (confidence: ${complexityDetection.confidence.toFixed(2)})`);
+            if (complexityDetection.complexityReasons && complexityDetection.complexityReasons.length > 0) {
+              console.log(`   Reasons: ${complexityDetection.complexityReasons.join(', ')}`);
+            }
+          }
+          this.emitThinkingStep(onThinkingStep, "Analyzing query complexity", "completed", 
+            isComplexQuery ? 'Complex query detected' : 'Simple query');
+        } catch (error) {
+          console.error('⚠️ Error detecting complex query, falling back to simple check:', error);
+          // Fallback: Use simple pattern check if AI detection fails
+          isComplexQuery = finalQuestion && (
+            /which\s+(months|categories|skus|items|products).*had.*above|which\s+(months|categories|skus|items|products).*had.*below/i.test(finalQuestion) ||
+            /which\s+(months|categories|skus|items|products).*compared.*while.*also/i.test(finalQuestion) ||
+            /which\s+(months|categories|skus|items|products).*above.*but.*only.*from/i.test(finalQuestion)
+          );
+        }
+      }
       
       if (isComplexQuery && intent.type !== 'custom') {
         console.log(`🔄 Detected complex multi-condition query, routing to GeneralHandler (custom type)`);

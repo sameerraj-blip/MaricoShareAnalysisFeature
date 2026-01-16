@@ -12,11 +12,17 @@ interface DataPreviewTableProps {
   sessionId?: string | null; // Session ID for downloading the full modified dataset
 }
 
-export function DataPreviewTable({ data, title, maxRows = 100, sessionId }: DataPreviewTableProps) {
+export function DataPreviewTable({ 
+  data, 
+  title, 
+  maxRows = 100, 
+  sessionId,
+}: DataPreviewTableProps) {
   const [downloadingFormat, setDownloadingFormat] = useState<'csv' | 'xlsx' | null>(null);
   const { toast } = useToast();
   
   const displayData = useMemo(() => {
+    if (!data || data.length === 0) return [];
     return data.slice(0, maxRows);
   }, [data, maxRows]);
 
@@ -48,7 +54,8 @@ export function DataPreviewTable({ data, title, maxRows = 100, sessionId }: Data
     }
   };
 
-  if (!data || data.length === 0) {
+  // Early return after all hooks
+  if (!data || data.length === 0 || !data[0]) {
     return (
       <Card className="p-4">
         <p className="text-sm text-gray-500">No data to display</p>
@@ -56,7 +63,7 @@ export function DataPreviewTable({ data, title, maxRows = 100, sessionId }: Data
     );
   }
 
-  const columns = Object.keys(data[0] || {});
+  const columns = Object.keys(data[0]);
 
   return (
     <Card className="p-4 mt-2">

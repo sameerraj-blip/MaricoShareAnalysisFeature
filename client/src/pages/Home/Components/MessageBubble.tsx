@@ -10,6 +10,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { getUserEmail } from '@/utils/userStorage';
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
+import { FilterAppliedMessage } from '@/components/FilterAppliedMessage';
+import { FilterCondition } from '@/components/ColumnFilterDialog';
 
 /**
  * Extract loading state for a correlation chart from thinking steps
@@ -99,6 +101,106 @@ const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
   sessionId,
 }, ref) => {
   const isUser = message.role === 'user';
+
+  // Detect if this is a filter operation response
+  const isFilterResponse = useMemo(() => {
+    if (isUser) return false;
+    const content = message.content?.toLowerCase() || '';
+    return content.includes("i've filtered the dataset") || 
+           content.includes('filtered the dataset') || 
+           content.includes('filtered data') ||
+           (content.includes('filter conditions:') && content.includes('rows before'));
+  }, [message.content, isUser]);
+
+  // Extract filter condition from message if it's a filter response
+  const filterCondition = useMemo((): FilterCondition | null => {
+    if (!isFilterResponse) return null;
+    
+    const content = message.content || '';
+    
+    // Try to extract from "Filter conditions:" line (backend format)
+    const filterConditionsMatch = content.match(/\*\*Filter conditions:\*\*\s*(.+?)(?:\n|$)/i);
+    if (filterConditionsMatch) {
+      const conditionStr = filterConditionsMatch[1].trim();
+      
+      // Parse different operator patterns
+      // Pattern: "column between value and value2"
+      const betweenMatch = conditionStr.match(/([^\s]+)\s+between\s+(.+?)\s+and\s+(.+?)(?:\s|$)/i);
+      if (betweenMatch) {
+        return {
+          column: betweenMatch[1],
+          operator: 'between',
+          value: betweenMatch[2].trim(),
+          value2: betweenMatch[3].trim(),
+        };
+      }
+      
+      // Pattern: "column in [value1, value2, ...]"
+      const inMatch = conditionStr.match(/([^\s]+)\s+in\s+\[(.+?)\]/i);
+      if (inMatch) {
+        const values = inMatch[2].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+        return {
+          column: inMatch[1],
+          operator: 'in',
+          values,
+        };
+      }
+      
+      // Pattern: "column contains value"
+      const containsMatch = conditionStr.match(/([^\s]+)\s+contains\s+"(.+?)"/i);
+      if (containsMatch) {
+        return {
+          column: containsMatch[1],
+          operator: 'contains',
+          value: containsMatch[2],
+        };
+      }
+      
+      // Pattern: "column starts with value"
+      const startsWithMatch = conditionStr.match(/([^\s]+)\s+starts\s+with\s+"(.+?)"/i);
+      if (startsWithMatch) {
+        return {
+          column: startsWithMatch[1],
+          operator: 'startsWith',
+          value: startsWithMatch[2],
+        };
+      }
+      
+      // Pattern: "column ends with value"
+      const endsWithMatch = conditionStr.match(/([^\s]+)\s+ends\s+with\s+"(.+?)"/i);
+      if (endsWithMatch) {
+        return {
+          column: endsWithMatch[1],
+          operator: 'endsWith',
+          value: endsWithMatch[2],
+        };
+      }
+      
+      // Pattern: "column operator value" (for =, !=, >, >=, <, <=)
+      const operatorMatch = conditionStr.match(/([^\s]+)\s+(>=|<=|!=|>|<|=)\s+(.+?)(?:\s|$)/);
+      if (operatorMatch) {
+        return {
+          column: operatorMatch[1],
+          operator: operatorMatch[2] as FilterCondition['operator'],
+          value: operatorMatch[3].trim().replace(/^"|"$/g, ''),
+        };
+      }
+    }
+    
+    return null;
+  }, [isFilterResponse, message.content]);
+
+  // Extract row counts from message
+  const rowCounts = useMemo(() => {
+    if (!isFilterResponse) return null;
+    const content = message.content || '';
+    const rowsBeforeMatch = content.match(/\*\*Rows before:\*\*\s*(\d+(?:,\d+)*)/i);
+    const rowsAfterMatch = content.match(/\*\*Rows after:\*\*\s*(\d+(?:,\d+)*)/i);
+    return {
+      rowsBefore: rowsBeforeMatch ? parseInt(rowsBeforeMatch[1].replace(/,/g, ''), 10) : undefined,
+      rowsAfter: rowsAfterMatch ? parseInt(rowsAfterMatch[1].replace(/,/g, ''), 10) : undefined,
+    };
+  }, [isFilterResponse, message.content]);
   
   // Memoize getUserEmail to avoid reading localStorage on every render
   const currentUserEmail = useMemo(() => getUserEmail()?.toLowerCase(), []);
@@ -214,6 +316,17 @@ const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
         {/* Display thinking steps below user messages */}
         {isUser && thinkingSteps && thinkingSteps.length > 0 && (
           <ThinkingDisplay steps={thinkingSteps} />
+        )}
+
+        {/* Show Filter Applied Message for filter operations */}
+        {!isUser && isFilterResponse && filterCondition && (
+          <div className="mb-3">
+            <FilterAppliedMessage
+              condition={filterCondition}
+              rowsBefore={rowCounts?.rowsBefore}
+              rowsAfter={rowCounts?.rowsAfter}
+            />
+          </div>
         )}
 
         {!isUser && message.content && (
@@ -338,7 +451,10 @@ const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
         {/* Display data preview for Data Ops responses */}
         {!isUser && (message as any).preview && Array.isArray((message as any).preview) && (message as any).preview.length > 0 && (
           <div className="mt-3">
-            <DataPreviewTable data={(message as any).preview} sessionId={sessionId} />
+            <DataPreviewTable 
+              data={(message as any).preview} 
+              sessionId={sessionId}
+            />
           </div>
         )}
 

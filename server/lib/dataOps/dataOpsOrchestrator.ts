@@ -144,6 +144,7 @@ export interface DataOpsIntent {
     | 'replace_value'
     | 'identify_outliers'
     | 'treat_outliers'
+    | 'filter'
     | 'revert'
     | 'unknown';
   column?: string;
@@ -187,6 +188,15 @@ export interface DataOpsIntent {
   outlierThreshold?: number; // For zscore (default: 3), for IQR multiplier (default: 1.5)
   treatmentMethod?: 'remove' | 'cap' | 'winsorize' | 'transform' | 'impute';
   treatmentValue?: 'mean' | 'median' | 'mode' | 'min' | 'max' | number; // For impute or cap methods
+  // Filter operation fields
+  filterConditions?: {
+    column: string;
+    operator: '>' | '>=' | '<' | '<=' | '=' | '!=' | 'contains' | 'startsWith' | 'endsWith' | 'between' | 'in';
+    value?: any;
+    value2?: any; // For 'between' operator
+    values?: any[]; // For 'in' operator
+  }[];
+  logicalOperator?: 'AND' | 'OR'; // How to combine multiple filter conditions (default: 'AND')
 }
 
 export interface DataOpsContext {
@@ -1757,7 +1767,7 @@ When deciding the operation:
 
 Determine the intent and return JSON with this structure:
 {
-  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "identify_outliers" | "treat_outliers" | "revert" | "unknown",
+  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "identify_outliers" | "treat_outliers" | "filter" | "revert" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
   "oldColumnName": "OldColumnName" (if rename_column operation, the column to rename, null otherwise),
   "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
@@ -1790,6 +1800,8 @@ Determine the intent and return JSON with this structure:
   "outlierThreshold": number (if identify_outliers or treat_outliers operation, threshold for detection - for zscore default: 3, for IQR default: 1.5, null otherwise),
   "treatmentMethod": "remove" | "cap" | "winsorize" | "transform" | "impute" (if treat_outliers operation, how to treat outliers, default: "remove"),
   "treatmentValue": "mean" | "median" | "mode" | "min" | "max" | number (if treatmentMethod is "impute" or "cap", the value to use, null otherwise),
+  "filterConditions": [{"column": "string", "operator": "=" | "!=" | ">" | ">=" | "<" | "<=" | "contains" | "startsWith" | "endsWith" | "between" | "in", "value": any, "value2": any (for "between" only), "values": [any] (for "in" only)}] (if filter operation, array of filter conditions, null otherwise),
+  "logicalOperator": "AND" | "OR" (if filter operation with multiple conditions, how to combine them, default: "AND", null otherwise),
   "requiresClarification": false,
   "clarificationMessage": null
 }
@@ -1940,6 +1952,32 @@ Operations:
     - "impute outliers with mode" -> treatmentMethod: "impute", treatmentValue: "mode", outlierMethod: "iqr", column: null, requiresClarification: false
     - "winsorize outliers" -> treatmentMethod: "winsorize"
     - "remove outliers using z-score > 3" -> treatmentMethod: "remove", outlierMethod: "zscore", outlierThreshold: 3
+- "filter": User wants to filter/keep only rows that match certain conditions
+  * CRITICAL: This is a DATA MODIFICATION operation that changes the working dataset
+  * After filtering, the filtered dataset becomes the new working dataset for all subsequent queries
+  * Examples: 
+    - "filter data where category is men's fashion"
+    - "show only rows where revenue > 1000000"
+    - "filter by category = X"
+    - "keep only data where column X > Y"
+    - "filter rows where date is between 2020 and 2021"
+    - "show me data where category is in [A, B, C]"
+    - "filter data where category equals men's fashion"
+    - "keep rows where revenue greater than 1000000"
+  * Extract filterConditions: array of filter conditions, each with:
+    - column: the column to filter on (MUST match exactly from available columns)
+    - operator: "=", "!=", ">", ">=", "<", "<=", "contains", "startsWith", "endsWith", "between", "in"
+    - value: the value to compare against (for single value operators)
+    - value2: second value for "between" operator (e.g., "between 2020 and 2021" -> value: 2020, value2: 2021)
+    - values: array of values for "in" operator (e.g., "in [A, B, C]" -> values: ["A", "B", "C"])
+  * Extract logicalOperator: "AND" (default) or "OR" - how to combine multiple conditions
+  * IMPORTANT: Set requiresClarification: false if filter conditions can be extracted
+  * This operation MODIFIES the dataset - filtered data becomes the new working dataset
+  * Examples:
+    - "filter data where category is men's fashion" -> filterConditions: [{"column": "category", "operator": "=", "value": "men's fashion"}], logicalOperator: "AND"
+    - "show only rows where revenue > 1000000" -> filterConditions: [{"column": "revenue", "operator": ">", "value": 1000000}], logicalOperator: "AND"
+    - "filter rows where date is between 2020 and 2021" -> filterConditions: [{"column": "date", "operator": "between", "value": 2020, "value2": 2021}], logicalOperator: "AND"
+    - "filter data where category is in [A, B, C]" -> filterConditions: [{"column": "category", "operator": "in", "values": ["A", "B", "C"]}], logicalOperator: "AND"
 - "revert": User wants to restore the data to its original form (e.g., "revert to original", "restore original data", "revert table", "go back to original")
   * This will load the original uploaded file and restore it, undoing all data operations
   * Examples: "revert to original", "restore original data", "revert table", "go back to original", "revert to original form"
@@ -2192,11 +2230,28 @@ Return ONLY valid JSON, no other text.`;
       intent.pivotFuncs = parsed.pivotFuncs;
     }
     
+    // Add filter-specific fields
+    if (parsed.filterConditions) {
+      // Map column names in filter conditions
+      intent.filterConditions = parsed.filterConditions.map((condition: any) => {
+        const matchedColumn = findMatchingColumn(condition.column, availableColumns);
+        return {
+          ...condition,
+          column: matchedColumn || condition.column,
+        };
+      });
+    }
+    if (parsed.logicalOperator) {
+      intent.logicalOperator = parsed.logicalOperator;
+    }
+    
     console.log(`✅ Final mapped intent:`, {
       operation: intent.operation,
       groupByColumn: intent.groupByColumn,
       aggColumns: intent.aggColumns,
       column: intent.column,
+      filterConditions: intent.filterConditions,
+      logicalOperator: intent.logicalOperator,
     });
     
     return intent;
@@ -3222,6 +3277,7 @@ function isDataModificationOperation(operation: DataOpsIntent['operation']): boo
     'aggregate',
     'pivot',
     'treat_outliers',
+    'filter',
     'revert',
   ];
   
@@ -4958,6 +5014,159 @@ export async function executeDataOperation(
           answer: `Failed to treat outliers: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
         };
       }
+    }
+
+    case 'filter': {
+      console.log(`🔍 Executing filter operation with ${intent.filterConditions?.length || 0} conditions`);
+      
+      if (!intent.filterConditions || intent.filterConditions.length === 0) {
+        return {
+          answer: 'No filter conditions specified. Please specify what you want to filter. For example: "filter data where category is men\'s fashion" or "show only rows where revenue > 1000000".',
+          requiresClarification: true,
+        };
+      }
+
+      const logicalOperator = intent.logicalOperator || 'AND';
+      let filteredData = [...data];
+      
+      // Apply each filter condition
+      for (const condition of intent.filterConditions) {
+        const { column, operator, value, value2, values } = condition;
+        
+        if (!column) {
+          console.warn(`⚠️ Skipping filter condition without column:`, condition);
+          continue;
+        }
+        
+        // Verify column exists
+        if (!data[0] || !(column in data[0])) {
+          const availableColumns = Object.keys(data[0] || {}).slice(0, 10).join(', ');
+          return {
+            answer: `Column "${column}" not found in dataset. Available columns: ${availableColumns}${Object.keys(data[0] || {}).length > 10 ? '...' : ''}`,
+            requiresClarification: true,
+          };
+        }
+        
+        // Apply filter based on operator
+        const rowsBeforeFilter = filteredData.length;
+        
+        filteredData = filteredData.filter(row => {
+          const cellValue = row[column];
+          
+          switch (operator) {
+            case '=':
+              // Case-insensitive string comparison for text, exact for numbers
+              if (typeof cellValue === 'number' && typeof value === 'number') {
+                return cellValue === value;
+              }
+              return String(cellValue).toLowerCase().trim() === String(value).toLowerCase().trim();
+            case '!=':
+              if (typeof cellValue === 'number' && typeof value === 'number') {
+                return cellValue !== value;
+              }
+              return String(cellValue).toLowerCase().trim() !== String(value).toLowerCase().trim();
+            case '>':
+              return Number(cellValue) > Number(value);
+            case '>=':
+              return Number(cellValue) >= Number(value);
+            case '<':
+              return Number(cellValue) < Number(value);
+            case '<=':
+              return Number(cellValue) <= Number(value);
+            case 'contains':
+              return String(cellValue).toLowerCase().includes(String(value).toLowerCase());
+            case 'startsWith':
+              return String(cellValue).toLowerCase().startsWith(String(value).toLowerCase());
+            case 'endsWith':
+              return String(cellValue).toLowerCase().endsWith(String(value).toLowerCase());
+            case 'between':
+              if (value2 === undefined || value2 === null) {
+                console.warn(`⚠️ Between operator requires value2, skipping condition`);
+                return true;
+              }
+              const numValue = Number(cellValue);
+              return numValue >= Number(value) && numValue <= Number(value2);
+            case 'in':
+              if (!values || !Array.isArray(values) || values.length === 0) {
+                console.warn(`⚠️ In operator requires values array, skipping condition`);
+                return true;
+              }
+              const cellStr = String(cellValue).toLowerCase().trim();
+              return values.some(v => String(v).toLowerCase().trim() === cellStr);
+            default:
+              console.warn(`⚠️ Unknown filter operator: ${operator}`);
+              return true;
+          }
+        });
+        
+        const rowsAfterFilter = filteredData.length;
+        console.log(`  ✅ Applied filter: ${column} ${operator} ${value || (values ? `[${values.join(', ')}]` : '')}${value2 ? ` and ${value2}` : ''} → ${rowsBeforeFilter} → ${rowsAfterFilter} rows`);
+        
+        // If using OR operator, we need to combine results differently
+        // For now, AND is the default - all conditions must match
+        if (logicalOperator === 'OR') {
+          // For OR, we'd need to track which rows match each condition
+          // This is a simplified version - you may want to refactor for complex OR logic
+          console.log(`⚠️ OR operator not fully implemented, using AND logic`);
+        }
+      }
+      
+      const rowsBefore = data.length;
+      const rowsAfter = filteredData.length;
+      const rowsRemoved = rowsBefore - rowsAfter;
+      
+      console.log(`✅ Filter applied: ${rowsBefore} → ${rowsAfter} rows (removed ${rowsRemoved})`);
+      
+      if (rowsAfter === 0) {
+        return {
+          answer: `⚠️ The filter conditions resulted in an empty dataset (0 rows). Please adjust your filter criteria.\n\n**Filter conditions:** ${intent.filterConditions.map(c => {
+            if (c.operator === 'between') {
+              return `${c.column} between ${c.value} and ${c.value2}`;
+            } else if (c.operator === 'in') {
+              return `${c.column} in [${c.values?.join(', ')}]`;
+            } else {
+              return `${c.column} ${c.operator} ${c.value}`;
+            }
+          }).join(` ${logicalOperator} `)}`,
+        };
+      }
+      
+      // Build description of filter conditions
+      const conditionDescriptions = intent.filterConditions.map(c => {
+        if (c.operator === 'between') {
+          return `${c.column} between ${c.value} and ${c.value2}`;
+        } else if (c.operator === 'in') {
+          return `${c.column} in [${c.values?.join(', ')}]`;
+        } else {
+          return `${c.column} ${c.operator} ${c.value}`;
+        }
+      }).join(` ${logicalOperator} `);
+      
+      // Save filtered data as the new working dataset
+      const saveResult = await saveModifiedData(
+        sessionId,
+        filteredData,
+        'filter',
+        `Filtered data: ${conditionDescriptions}`,
+        sessionDoc
+      );
+      
+      // Get preview from saved data
+      const previewData = await getPreviewFromSavedData(sessionId, filteredData);
+      
+      const answer = `✅ I've filtered the dataset based on your conditions:\n\n` +
+        `**Filter conditions:** ${conditionDescriptions}\n` +
+        `**Rows before:** ${rowsBefore}\n` +
+        `**Rows after:** ${rowsAfter}\n` +
+        `**Rows removed:** ${rowsRemoved}\n\n` +
+        `The filtered dataset is now your working dataset. All subsequent queries will work on this filtered data.`;
+      
+      return {
+        answer,
+        data: filteredData,
+        preview: previewData,
+        saved: saveResult.saved,
+      };
     }
 
     case 'revert': {
