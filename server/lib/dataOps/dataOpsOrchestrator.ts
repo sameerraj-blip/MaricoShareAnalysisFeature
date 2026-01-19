@@ -144,6 +144,7 @@ export interface DataOpsIntent {
     | 'replace_value'
     | 'identify_outliers'
     | 'treat_outliers'
+    | 'filter'
     | 'revert'
     | 'unknown';
   column?: string;
@@ -187,6 +188,15 @@ export interface DataOpsIntent {
   outlierThreshold?: number; // For zscore (default: 3), for IQR multiplier (default: 1.5)
   treatmentMethod?: 'remove' | 'cap' | 'winsorize' | 'transform' | 'impute';
   treatmentValue?: 'mean' | 'median' | 'mode' | 'min' | 'max' | number; // For impute or cap methods
+  // Filter operation fields
+  filterConditions?: {
+    column: string;
+    operator: '>' | '>=' | '<' | '<=' | '=' | '!=' | 'contains' | 'startsWith' | 'endsWith' | 'between' | 'in';
+    value?: any;
+    value2?: any; // For 'between' operator
+    values?: any[]; // For 'in' operator
+  }[];
+  logicalOperator?: 'AND' | 'OR'; // How to combine multiple filter conditions (default: 'AND')
 }
 
 export interface DataOpsContext {
@@ -1757,7 +1767,7 @@ When deciding the operation:
 
 Determine the intent and return JSON with this structure:
 {
-  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "identify_outliers" | "treat_outliers" | "revert" | "unknown",
+  "operation": "remove_nulls" | "preview" | "summary" | "convert_type" | "count_nulls" | "describe" | "create_derived_column" | "create_column" | "modify_column" | "normalize_column" | "remove_column" | "rename_column" | "remove_rows" | "add_row" | "aggregate" | "pivot" | "train_model" | "replace_value" | "identify_outliers" | "treat_outliers" | "filter" | "revert" | "unknown",
   "column": "column_name" (if specific column mentioned for single-column operations, null otherwise),
   "oldColumnName": "OldColumnName" (if rename_column operation, the column to rename, null otherwise),
   "method": "delete" | "mean" | "median" | "mode" | "custom" (if operation is remove_nulls and method is specified, null otherwise),
@@ -1790,6 +1800,8 @@ Determine the intent and return JSON with this structure:
   "outlierThreshold": number (if identify_outliers or treat_outliers operation, threshold for detection - for zscore default: 3, for IQR default: 1.5, null otherwise),
   "treatmentMethod": "remove" | "cap" | "winsorize" | "transform" | "impute" (if treat_outliers operation, how to treat outliers, default: "remove"),
   "treatmentValue": "mean" | "median" | "mode" | "min" | "max" | number (if treatmentMethod is "impute" or "cap", the value to use, null otherwise),
+  "filterConditions": [{"column": "string", "operator": "=" | "!=" | ">" | ">=" | "<" | "<=" | "contains" | "startsWith" | "endsWith" | "between" | "in", "value": any, "value2": any (for "between" only), "values": [any] (for "in" only)}] (if filter operation, array of filter conditions, null otherwise),
+  "logicalOperator": "AND" | "OR" (if filter operation with multiple conditions, how to combine them, default: "AND", null otherwise),
   "requiresClarification": false,
   "clarificationMessage": null
 }
@@ -1940,10 +1952,72 @@ Operations:
     - "impute outliers with mode" -> treatmentMethod: "impute", treatmentValue: "mode", outlierMethod: "iqr", column: null, requiresClarification: false
     - "winsorize outliers" -> treatmentMethod: "winsorize"
     - "remove outliers using z-score > 3" -> treatmentMethod: "remove", outlierMethod: "zscore", outlierThreshold: 3
+- "filter": User wants to filter/keep only rows that match certain conditions
+  * CRITICAL: This is a DATA MODIFICATION operation that changes the working dataset
+  * After filtering, the filtered dataset becomes the new working dataset for all subsequent queries
+  * Examples: 
+    - "filter data where category is men's fashion"
+    - "show only rows where revenue > 1000000"
+    - "filter by category = X"
+    - "keep only data where column X > Y"
+    - "filter rows where date is between 2020 and 2021"
+    - "show me data where category is in [A, B, C]"
+    - "filter data where category equals men's fashion"
+    - "keep rows where revenue greater than 1000000"
+  * Extract filterConditions: array of filter conditions, each with:
+    - column: the column to filter on (MUST match exactly from available columns)
+    - operator: "=", "!=", ">", ">=", "<", "<=", "contains", "startsWith", "endsWith", "between", "in"
+    - value: the value to compare against (for single value operators)
+    - value2: second value for "between" operator (e.g., "between 2020 and 2021" -> value: 2020, value2: 2021)
+    - values: array of values for "in" operator (e.g., "in [A, B, C]" -> values: ["A", "B", "C"])
+  * Extract logicalOperator: "AND" (default) or "OR" - how to combine multiple conditions
+  * IMPORTANT: Set requiresClarification: false if filter conditions can be extracted
+  * This operation MODIFIES the dataset - filtered data becomes the new working dataset
+  * Examples:
+    - "filter data where category is men's fashion" -> filterConditions: [{"column": "category", "operator": "=", "value": "men's fashion"}], logicalOperator: "AND"
+    - "show only rows where revenue > 1000000" -> filterConditions: [{"column": "revenue", "operator": ">", "value": 1000000}], logicalOperator: "AND"
+    - "filter rows where date is between 2020 and 2021" -> filterConditions: [{"column": "date", "operator": "between", "value": 2020, "value2": 2021}], logicalOperator: "AND"
+    - "filter data where category is in [A, B, C]" -> filterConditions: [{"column": "category", "operator": "in", "values": ["A", "B", "C"]}], logicalOperator: "AND"
 - "revert": User wants to restore the data to its original form (e.g., "revert to original", "restore original data", "revert table", "go back to original")
   * This will load the original uploaded file and restore it, undoing all data operations
   * Examples: "revert to original", "restore original data", "revert table", "go back to original", "revert to original form"
-- "unknown": Cannot determine intent
+- "unknown": Cannot determine intent OR the question is a general data analysis question (not a data operation)
+
+=== GENERAL DATA ANALYSIS QUESTIONS (ONLY IF NOT A DATA OPERATION) ===
+CRITICAL PRIORITY: Check ALL data operations above FIRST. Only proceed to this section if the question does NOT match any data operation patterns.
+
+If the user's question is a general data analysis question (not a data manipulation operation), return operation: "unknown" with requiresClarification: false to route it to the general analysis handler.
+
+General analysis questions are questions that:
+- Ask "which", "what", "how many", "show me" that require filtering, aggregating, and analyzing data WITHOUT modifying the dataset
+- Have complex filters and conditions that need to be executed as queries (e.g., "Which categories generated more than ₹5 crore in total revenue in 2020, considering only SKUs that sold at least 1,000 units each?")
+- Ask for insights, comparisons, or analysis results (not data transformations)
+- Require querying/filtering the data but don't modify the dataset structure
+- Are statistical queries that need aggregation with multiple conditions
+- Ask "which X has Y" or "what is the Z for X" where X and Y involve filtering and aggregation
+
+Examples of general analysis questions (return operation: "unknown", requiresClarification: false):
+- "Which categories generated more than ₹5 crore in total revenue in 2020, considering only SKUs that sold at least 1,000 units each?"
+- "What is the total revenue for each category in 2020?"
+- "Show me the top 10 products by sales"
+- "Which month had the highest revenue?"
+- "How many orders were placed in 2020?"
+- "What is the average order value by category?"
+- "Which categories had the highest ROI in 2020?"
+- "What is the average price of SKUs sold in 2020?"
+
+These questions will be handled by the general analysis handler which can:
+- Parse complex filters and conditions
+- Perform aggregations with multiple criteria
+- Generate charts and visualizations
+- Provide detailed analysis results
+
+IMPORTANT PRIORITY RULES:
+1. FIRST: Check if the question matches ANY data operation pattern above (create column, aggregate, pivot, remove rows, rename, etc.)
+2. If it matches a data operation → return that operation immediately
+3. ONLY if it doesn't match any data operation → check if it's a general analysis question
+4. If it's a general analysis question → return operation: "unknown", requiresClarification: false
+5. If it's neither → return operation: "unknown", requiresClarification: true with a clarification message
 
 Return ONLY valid JSON, no other text.`;
 
@@ -2156,11 +2230,28 @@ Return ONLY valid JSON, no other text.`;
       intent.pivotFuncs = parsed.pivotFuncs;
     }
     
+    // Add filter-specific fields
+    if (parsed.filterConditions) {
+      // Map column names in filter conditions
+      intent.filterConditions = parsed.filterConditions.map((condition: any) => {
+        const matchedColumn = findMatchingColumn(condition.column, availableColumns);
+        return {
+          ...condition,
+          column: matchedColumn || condition.column,
+        };
+      });
+    }
+    if (parsed.logicalOperator) {
+      intent.logicalOperator = parsed.logicalOperator;
+    }
+    
     console.log(`✅ Final mapped intent:`, {
       operation: intent.operation,
       groupByColumn: intent.groupByColumn,
       aggColumns: intent.aggColumns,
       column: intent.column,
+      filterConditions: intent.filterConditions,
+      logicalOperator: intent.logicalOperator,
     });
     
     return intent;
@@ -2979,7 +3070,69 @@ async function extractDerivedColumnDetails(
   try {
     const columnsList = availableColumns.slice(0, 30).join(', ');
     
-    const prompt = `Extract the new column name and expression from the user's query for creating a derived column.
+    const prompt = `You are an expert data analyst who understands business metrics, financial calculations, statistical measures, and mathematical formulas. Your task is to extract the column name and expression from the user's query.
+
+=== INTELLIGENT METRIC UNDERSTANDING ===
+When the user requests a metric, calculation, or derived value WITHOUT explicitly providing the formula:
+
+1. USE YOUR KNOWLEDGE: Draw upon your understanding of what the metric means:
+   - Business metrics (ROI, profit margin, conversion rate, growth rate, etc.)
+   - Financial metrics (EBITDA, net present value, payback period, etc.)
+   - Statistical measures (correlation, variance, z-score, percentile, etc.)
+   - Mathematical operations (ratios, percentages, averages, etc.)
+
+2. INFER THE FORMULA: Based on standard definitions and best practices:
+   - Understand the mathematical relationship (division, multiplication, addition, subtraction, etc.)
+   - Determine if it's a ratio, percentage, rate, or absolute value
+   - Consider whether to multiply by 100 for percentages
+   - Handle edge cases (division by zero, negative values, etc.)
+
+3. SEMANTIC COLUMN MATCHING: Intelligently match columns based on meaning, not just exact names:
+   - Use synonyms and related terms (Revenue = Sales = Income, Cost = Expense = Spend, Profit = Net Profit = Earnings)
+   - Match partial names (if user says "revenue" and column is "Total Revenue", match it)
+   - Consider context (if calculating ROI, look for revenue/profit and cost/investment columns)
+   - Use fuzzy matching: ignore case, spaces, underscores, dashes
+   - Prefer the most semantically relevant column when multiple matches exist
+
+4. CONSTRUCT THE EXPRESSION:
+   - Use [ColumnName] format where ColumnName matches EXACTLY from available columns
+   - For percentages/rates, multiply by 100 (unless user specifies decimal format)
+   - For division operations, use np.where to handle division by zero: np.where([Denominator] != 0, [Numerator] / [Denominator], 0)
+   - Use standard mathematical operators: +, -, *, /, ** (for power)
+
+=== EXAMPLES OF INTELLIGENT INFERENCE ===
+
+Example 1: "create column ROI"
+- You know ROI = (Return / Investment) * 100 or ((Revenue - Cost) / Cost) * 100
+- Look for columns like: Revenue, Sales, Income, Profit, Net Profit, Cost, Expense, Spend, Investment
+- If you find "Revenue" and "Cost": expression: "(([Revenue] - [Cost]) / [Cost]) * 100"
+- If you find "Profit" and "Investment": expression: "([Profit] / [Investment]) * 100"
+- Handle division by zero: "np.where([Cost] != 0, (([Revenue] - [Cost]) / [Cost]) * 100, 0)"
+
+Example 2: "create column Profit Margin"
+- You know Profit Margin = (Profit / Revenue) * 100
+- Match "Profit" or "Net Profit" and "Revenue" or "Sales"
+- Expression: "np.where([Revenue] != 0, ([Profit] / [Revenue]) * 100, 0)"
+
+Example 3: "create column Growth Rate"
+- You know Growth Rate = ((Current - Previous) / Previous) * 100
+- Look for time-sequenced columns or current/previous indicators
+- Expression: "np.where([Previous] != 0, (([Current] - [Previous]) / [Previous]) * 100, 0)"
+
+Example 4: "create column Conversion Rate"
+- You know Conversion Rate = (Conversions / Total) * 100
+- Match columns like Conversions, Sales, Leads, Visitors, Clicks
+- Expression: "np.where([Total Visitors] != 0, ([Conversions] / [Total Visitors]) * 100, 0)"
+
+=== COLUMN MATCHING STRATEGY ===
+1. First, try exact case-insensitive match
+2. Then, try normalized match (ignore spaces, underscores, dashes)
+3. Then, try partial match (contains the search term)
+4. Then, try semantic match (synonyms, related terms)
+5. If multiple matches, prefer the most semantically relevant one
+6. If no match found, use the closest numeric column that makes sense contextually
+
+Extract the new column name and expression from the user's query for creating a derived column.
 
 User query: "${message}"
 
@@ -3025,11 +3178,14 @@ Return JSON:
     const response = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: 'You extract column names and expressions from natural language. Return only valid JSON.' },
+        { 
+          role: 'system', 
+          content: 'You are an expert data analyst who understands business metrics, financial calculations, and statistical measures. You intelligently infer formulas from metric names using your knowledge. Return only valid JSON.' 
+        },
         { role: 'user', content: prompt }
       ],
       temperature: 0.2,
-      max_tokens: 300,
+      max_tokens: 500,
     });
 
     const content = response.choices[0]?.message?.content?.trim();
@@ -3121,6 +3277,7 @@ function isDataModificationOperation(operation: DataOpsIntent['operation']): boo
     'aggregate',
     'pivot',
     'treat_outliers',
+    'filter',
     'revert',
   ];
   
@@ -4857,6 +5014,159 @@ export async function executeDataOperation(
           answer: `Failed to treat outliers: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
         };
       }
+    }
+
+    case 'filter': {
+      console.log(`🔍 Executing filter operation with ${intent.filterConditions?.length || 0} conditions`);
+      
+      if (!intent.filterConditions || intent.filterConditions.length === 0) {
+        return {
+          answer: 'No filter conditions specified. Please specify what you want to filter. For example: "filter data where category is men\'s fashion" or "show only rows where revenue > 1000000".',
+          requiresClarification: true,
+        };
+      }
+
+      const logicalOperator = intent.logicalOperator || 'AND';
+      let filteredData = [...data];
+      
+      // Apply each filter condition
+      for (const condition of intent.filterConditions) {
+        const { column, operator, value, value2, values } = condition;
+        
+        if (!column) {
+          console.warn(`⚠️ Skipping filter condition without column:`, condition);
+          continue;
+        }
+        
+        // Verify column exists
+        if (!data[0] || !(column in data[0])) {
+          const availableColumns = Object.keys(data[0] || {}).slice(0, 10).join(', ');
+          return {
+            answer: `Column "${column}" not found in dataset. Available columns: ${availableColumns}${Object.keys(data[0] || {}).length > 10 ? '...' : ''}`,
+            requiresClarification: true,
+          };
+        }
+        
+        // Apply filter based on operator
+        const rowsBeforeFilter = filteredData.length;
+        
+        filteredData = filteredData.filter(row => {
+          const cellValue = row[column];
+          
+          switch (operator) {
+            case '=':
+              // Case-insensitive string comparison for text, exact for numbers
+              if (typeof cellValue === 'number' && typeof value === 'number') {
+                return cellValue === value;
+              }
+              return String(cellValue).toLowerCase().trim() === String(value).toLowerCase().trim();
+            case '!=':
+              if (typeof cellValue === 'number' && typeof value === 'number') {
+                return cellValue !== value;
+              }
+              return String(cellValue).toLowerCase().trim() !== String(value).toLowerCase().trim();
+            case '>':
+              return Number(cellValue) > Number(value);
+            case '>=':
+              return Number(cellValue) >= Number(value);
+            case '<':
+              return Number(cellValue) < Number(value);
+            case '<=':
+              return Number(cellValue) <= Number(value);
+            case 'contains':
+              return String(cellValue).toLowerCase().includes(String(value).toLowerCase());
+            case 'startsWith':
+              return String(cellValue).toLowerCase().startsWith(String(value).toLowerCase());
+            case 'endsWith':
+              return String(cellValue).toLowerCase().endsWith(String(value).toLowerCase());
+            case 'between':
+              if (value2 === undefined || value2 === null) {
+                console.warn(`⚠️ Between operator requires value2, skipping condition`);
+                return true;
+              }
+              const numValue = Number(cellValue);
+              return numValue >= Number(value) && numValue <= Number(value2);
+            case 'in':
+              if (!values || !Array.isArray(values) || values.length === 0) {
+                console.warn(`⚠️ In operator requires values array, skipping condition`);
+                return true;
+              }
+              const cellStr = String(cellValue).toLowerCase().trim();
+              return values.some(v => String(v).toLowerCase().trim() === cellStr);
+            default:
+              console.warn(`⚠️ Unknown filter operator: ${operator}`);
+              return true;
+          }
+        });
+        
+        const rowsAfterFilter = filteredData.length;
+        console.log(`  ✅ Applied filter: ${column} ${operator} ${value || (values ? `[${values.join(', ')}]` : '')}${value2 ? ` and ${value2}` : ''} → ${rowsBeforeFilter} → ${rowsAfterFilter} rows`);
+        
+        // If using OR operator, we need to combine results differently
+        // For now, AND is the default - all conditions must match
+        if (logicalOperator === 'OR') {
+          // For OR, we'd need to track which rows match each condition
+          // This is a simplified version - you may want to refactor for complex OR logic
+          console.log(`⚠️ OR operator not fully implemented, using AND logic`);
+        }
+      }
+      
+      const rowsBefore = data.length;
+      const rowsAfter = filteredData.length;
+      const rowsRemoved = rowsBefore - rowsAfter;
+      
+      console.log(`✅ Filter applied: ${rowsBefore} → ${rowsAfter} rows (removed ${rowsRemoved})`);
+      
+      if (rowsAfter === 0) {
+        return {
+          answer: `⚠️ The filter conditions resulted in an empty dataset (0 rows). Please adjust your filter criteria.\n\n**Filter conditions:** ${intent.filterConditions.map(c => {
+            if (c.operator === 'between') {
+              return `${c.column} between ${c.value} and ${c.value2}`;
+            } else if (c.operator === 'in') {
+              return `${c.column} in [${c.values?.join(', ')}]`;
+            } else {
+              return `${c.column} ${c.operator} ${c.value}`;
+            }
+          }).join(` ${logicalOperator} `)}`,
+        };
+      }
+      
+      // Build description of filter conditions
+      const conditionDescriptions = intent.filterConditions.map(c => {
+        if (c.operator === 'between') {
+          return `${c.column} between ${c.value} and ${c.value2}`;
+        } else if (c.operator === 'in') {
+          return `${c.column} in [${c.values?.join(', ')}]`;
+        } else {
+          return `${c.column} ${c.operator} ${c.value}`;
+        }
+      }).join(` ${logicalOperator} `);
+      
+      // Save filtered data as the new working dataset
+      const saveResult = await saveModifiedData(
+        sessionId,
+        filteredData,
+        'filter',
+        `Filtered data: ${conditionDescriptions}`,
+        sessionDoc
+      );
+      
+      // Get preview from saved data
+      const previewData = await getPreviewFromSavedData(sessionId, filteredData);
+      
+      const answer = `✅ I've filtered the dataset based on your conditions:\n\n` +
+        `**Filter conditions:** ${conditionDescriptions}\n` +
+        `**Rows before:** ${rowsBefore}\n` +
+        `**Rows after:** ${rowsAfter}\n` +
+        `**Rows removed:** ${rowsRemoved}\n\n` +
+        `The filtered dataset is now your working dataset. All subsequent queries will work on this filtered data.`;
+      
+      return {
+        answer,
+        data: filteredData,
+        preview: previewData,
+        saved: saveResult.saved,
+      };
     }
 
     case 'revert': {

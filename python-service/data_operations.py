@@ -629,7 +629,11 @@ def create_derived_column(
     df = pd.DataFrame(data)
     errors = []
     
-    def find_column_fuzzy(search_name: str) -> str | None:
+    # Debug: print the received expression
+    print(f"📥 Received expression: '{expression}'")
+    print(f"📋 Available columns: {list(df.columns)}")
+    
+    def find_column_fuzzy(search_name: str) -> Optional[str]:
         """Find column name using fuzzy matching (case-insensitive, handles spaces/underscores)"""
         if not search_name:
             return None
@@ -666,6 +670,10 @@ def create_derived_column(
     # Handle nested brackets by replacing from innermost to outermost
     def replace_column_ref(match):
         col_name = match.group(1)
+        # Strip quotes if present (handles cases where AI includes quotes in column names)
+        col_name = col_name.strip().strip("'").strip('"').strip()
+        # Debug: print the extracted column name
+        print(f"🔍 Extracting column name from match: '{match.group(1)}' -> cleaned: '{col_name}'")
         # Try to find the column using fuzzy matching
         matched_col = find_column_fuzzy(col_name)
         
@@ -684,16 +692,32 @@ def create_derived_column(
             )
             return "None"
     
-    # Replace [ColumnName] patterns - process multiple times to handle nested cases
+    # Replace [ColumnName] patterns in a single pass
+    # Do manual replacement from right to left to avoid re-processing df['...'] patterns
     python_expr = expression
-    max_iterations = 10  # Prevent infinite loops
-    iteration = 0
-    while '[' in python_expr and iteration < max_iterations:
-        new_expr = re.sub(r'\[([^\]]+)\]', replace_column_ref, python_expr)
-        if new_expr == python_expr:
-            break  # No more replacements
-        python_expr = new_expr
-        iteration += 1
+    
+    # Find all [ColumnName] patterns
+    matches = list(re.finditer(r'\[([^\]]+)\]', python_expr))
+    
+    # Replace from right to left to avoid position shifts
+    for match in reversed(matches):
+        start_pos = match.start()
+        # Skip if this bracket is already inside df['...'] or df["..."]
+        # Check the 3 characters before this match
+        if start_pos >= 3:
+            before = python_expr[start_pos-3:start_pos]
+            if before in ["df'", 'df"']:
+                # This is already inside df['...'], skip it
+                print(f"⏭️ Skipping already processed pattern: {match.group(0)}")
+                continue
+        
+        # This is a new [ColumnName] pattern, replace it
+        replacement = replace_column_ref(match)
+        python_expr = python_expr[:match.start()] + replacement + python_expr[match.end():]
+        print(f"🔄 Replaced {match.group(0)} -> {replacement}")
+    
+    # Debug: print the final expression
+    print(f"✅ Final Python expression: {python_expr}")
     
     if errors:
         return {

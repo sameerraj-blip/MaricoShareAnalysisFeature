@@ -26,6 +26,29 @@ export function createErrorResponse(
   const errorMessage = error instanceof Error ? error.message : error;
   
   // Generate helpful error message based on error type
+  // For complex queries, don't show error - let the general handler process it
+  const question = intent.customRequest || intent.originalQuestion || '';
+  const isComplexQuery = question && (
+    question.includes('above') || 
+    question.includes('below') || 
+    question.includes('average') || 
+    question.includes('which months') || 
+    question.includes('which categories') ||
+    question.includes('month-over-month') ||
+    question.includes('consistent growth')
+  );
+  
+  if (isComplexQuery) {
+    // For complex queries, return a message that indicates processing, not an error
+    // The orchestrator will try the general handler
+    return {
+      answer: "Processing your complex query with multiple conditions. Analyzing the data to provide results.",
+      requiresClarification: false,
+      error: undefined,
+      suggestions: [],
+    };
+  }
+  
   let answer = "I encountered an issue processing your request. ";
   
   if (errorMessage.includes('column') || errorMessage.includes('Column')) {

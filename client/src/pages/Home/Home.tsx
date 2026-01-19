@@ -379,7 +379,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
 
     console.log('🔄 Starting polling for initial analysis messages...');
     let pollCount = 0;
-    const MAX_POLLS = 120; // Poll for up to 120 seconds (2 minutes) - analysis can take time
+    const MAX_POLLS = 500; // Poll for up to 500 attempts (~16.7 minutes at 2s interval) - analysis can take time on slower machines
     const POLL_INTERVAL = 2000; // Poll every 2 seconds to reduce server load
     let isCleared = false;
 

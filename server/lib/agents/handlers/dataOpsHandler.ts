@@ -76,6 +76,18 @@ export class DataOpsHandler extends BaseHandler {
       };
     }
 
+    // If operation is "unknown" and requiresClarification is false, this is a general analysis question
+    // Route it to the general analysis handler instead of executing as a data operation
+    if (dataOpsIntent.operation === 'unknown' && !dataOpsIntent.requiresClarification) {
+      console.log(`📊 Detected general analysis question, routing to general analysis handler: "${requestText}"`);
+      // Return a response that signals this should be handled by general analysis
+      // The orchestrator will try the next handler (GeneralHandler) if this handler returns null or a special signal
+      return {
+        answer: '', // Empty answer signals to try next handler
+        shouldTryNextHandler: true, // Signal to orchestrator
+      };
+    }
+
     try {
       // Get chat history from context or session document
       const chatHistory = context.chatHistory || sessionDoc?.messages || [];

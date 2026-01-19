@@ -147,7 +147,23 @@ CLASSIFICATION RULES:
    * These are correlation queries even if the target variable (X) is not immediately recognizable
    * Set confidence to 0.9+ for these patterns
    * IMPORTANT: Questions about "trends in X over time" or "X over time" should be classified as "chart", NOT "correlation"
-3. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area) WITHOUT correlation/impact language
+3. "custom" - Complex multi-condition analytical queries that require data filtering, aggregation, and comparison
+   * HIGH PRIORITY: Questions with multiple conditions like:
+     - "Which months/categories/SKUs had X above/below [average/mean/threshold], but only from [filter condition]"
+     - "Which [items] had [metric] in [time period] compared to [another time period], while also [additional condition]"
+     - "Which [items] had [metric] above [reference] but only from [filtered subset]"
+   * Examples: 
+     - "Which months had total revenue above the yearly monthly average, but only from orders with discounts below 10%"
+     - "Which SKUs had higher revenue in Q4 compared to Q3, while also selling more than 2,000 total units in the year"
+     - "Which categories had revenue growth in 2020 by value, but only for products with price above $50"
+   * These queries require:
+     - Multiple filters (time, value, exclusion)
+     - Aggregations (sum, mean, etc.)
+     - Comparisons (above average, between periods, etc.)
+     - Grouping (by month, category, SKU, etc.)
+   * Set confidence to 0.8+ for these patterns
+   * Set type to "custom" so GeneralHandler processes them
+4. "chart" - User explicitly requests a chart/visualization (line, bar, scatter, pie, area) WITHOUT correlation/impact language
    * HIGH PRIORITY: Questions about "trends in X over time", "X over time", "show trends for X", "trend line for X" should be classified as "chart" with chartType "line"
    * CRITICAL: Questions about "seasonal patterns", "seasonal trends", "seasonal variations" should be classified as "chart" with chartType "line"
    * Examples: "Are there seasonal patterns in X?", "seasonal trends in X", "seasonal patterns in X or Y", "monthly patterns", "yearly patterns", "patterns over time"

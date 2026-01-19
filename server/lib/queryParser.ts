@@ -73,6 +73,38 @@ function sanitiseTimeFilters(filters?: Nullable<TimeFilter>[]): TimeFilter[] | u
   return cleaned.length ? cleaned : undefined;
 }
 
+/**
+ * Converts Indian number units (crore, lakh) to actual numbers
+ */
+function convertIndianNumberUnits(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return value;
+  
+  const str = String(value).toLowerCase().trim();
+  
+  // Handle crore (10 million)
+  const croreMatch = str.match(/(\d+(?:\.\d+)?)\s*crore/i);
+  if (croreMatch) {
+    const num = parseFloat(croreMatch[1]);
+    if (!isNaN(num)) {
+      return num * 10000000; // 10 million
+    }
+  }
+  
+  // Handle lakh (100 thousand)
+  const lakhMatch = str.match(/(\d+(?:\.\d+)?)\s*lakh/i);
+  if (lakhMatch) {
+    const num = parseFloat(lakhMatch[1]);
+    if (!isNaN(num)) {
+      return num * 100000; // 100 thousand
+    }
+  }
+  
+  // Try to parse as regular number
+  const num = parseFloat(str);
+  return !isNaN(num) ? num : null;
+}
+
 function sanitiseValueFilters(filters?: Nullable<ValueFilter>[]): ValueFilter[] | undefined {
   if (!filters) return undefined;
   const cleaned: ValueFilter[] = [];
@@ -82,12 +114,18 @@ function sanitiseValueFilters(filters?: Nullable<ValueFilter>[]): ValueFilter[] 
       column: filter.column,
       operator: filter.operator,
     };
-    if (typeof filter.value === 'number' && !isNaN(filter.value)) {
-      entry.value = filter.value;
+    
+    // Convert Indian number units if present
+    const convertedValue = convertIndianNumberUnits(filter.value);
+    if (convertedValue !== null) {
+      entry.value = convertedValue;
     }
-    if (typeof filter.value2 === 'number' && !isNaN(filter.value2)) {
-      entry.value2 = filter.value2;
+    
+    const convertedValue2 = convertIndianNumberUnits(filter.value2);
+    if (convertedValue2 !== null) {
+      entry.value2 = convertedValue2;
     }
+    
     if (filter.reference) entry.reference = filter.reference;
     cleaned.push(entry);
   }
@@ -366,6 +404,13 @@ YOUR TASK:
 - CRITICAL: If the user asks about "seasonal patterns", "seasonal trends", "seasonal variations", or "patterns over time", 
   set "dateAggregationPeriod" to "month" (to show trends over time with month-year grouping). Also ensure the date column 
   is included in "groupBy" if not already specified.
+- CRITICAL: If the user asks about "month-over-month growth", "month over month growth", "consistent month-over-month growth", 
+  "month-over-month revenue growth", or similar time series growth patterns:
+  * Set "dateAggregationPeriod" to "month" (to group by month-year)
+  * Include the date column in "groupBy" 
+  * Include the category/grouping column in "groupBy" (e.g., "category", "Category", "product_category")
+  * Set aggregations to sum the revenue/total column
+  * These queries require time series analysis - extract all relevant filters and aggregations
 - IMPORTANT: Distinguish between:
   * "month" - groups by month-year (e.g., "Jan 2024", "Jan 2022" are separate)
   * "monthOnly" - groups by month name only, combining all years (e.g., all "Jan" values combined regardless of year)
@@ -375,6 +420,22 @@ YOUR TASK:
   (e.g., "Month", "Date", "Year" - whatever date column exists), NOT the period name like "year" or "month". 
   For example, if dateAggregationPeriod is "year" and the date column is "Month", set groupBy to ["Month"], not ["year"].
 - If the user specifies numeric conditions (>, <, between, etc.), capture in valueFilters.
+- CRITICAL: Handle Indian number units in value filters:
+  * "crore" = 10,000,000 (10 million) - convert "₹2 crore" to value: 20000000
+  * "lakh" = 100,000 (hundred thousand) - convert "₹5 lakh" to value: 500000
+  * Examples: "more than ₹2 crore" → operator: ">", value: 20000000
+  * Examples: "exceeding ₹5 crore" → operator: ">", value: 50000000
+  * Examples: "less than ₹10 lakh" → operator: "<", value: 1000000
+  * Extract the numeric value and multiply by the unit multiplier
+- CRITICAL: Handle "above average", "below average", "above the yearly monthly average", "above the monthly average", "above average", "below average" patterns:
+  * These are comparisons to calculated averages/means
+  * Extract the reference: "average", "mean", "yearly monthly average", "monthly average"
+  * Set reference: "mean" for average comparisons
+  * Extract the column being compared (e.g., "total revenue", "revenue", "total", "value")
+  * Example: "above the yearly monthly average" → operator: ">", reference: "mean", column: "total" (or revenue column)
+  * Example: "below average" → operator: "<", reference: "mean", column: (infer from context)
+  * Example: "Which months had total revenue above the yearly monthly average" → valueFilter: {column: "total", operator: ">", reference: "mean"}
+  * The column should be the metric being compared - match to available numeric columns
 - If the user wants to exclude categories, use exclusionFilters.
 - CRITICAL: If the user asks for aggregation with category filters, extract and handle immediately:
   * Patterns include:
