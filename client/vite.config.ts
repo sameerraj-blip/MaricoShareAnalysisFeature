@@ -23,5 +23,42 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-  }
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Vendor chunks
+          'react-vendor': ['react', 'react-dom', 'react-router'],
+          'ui-vendor': [
+            '@radix-ui/react-dialog',
+            '@radix-ui/react-dropdown-menu',
+            '@radix-ui/react-select',
+            '@radix-ui/react-tooltip',
+            '@radix-ui/react-toast',
+          ],
+          'chart-vendor': ['recharts'],
+          'query-vendor': ['@tanstack/react-query'],
+          'msal-vendor': ['@azure/msal-browser', '@azure/msal-react'],
+          'utils-vendor': ['axios', 'date-fns', 'zod'],
+          'grid-vendor': ['react-grid-layout', 'react-resizable'],
+        },
+        // Optimize chunk size
+        chunkSizeWarningLimit: 1000,
+      },
+    },
+    // Enable source maps for better debugging in production (optional)
+    sourcemap: false,
+    // Optimize chunk splitting
+    chunkSizeWarningLimit: 1000,
+  },
+  // Optimize dependencies
+  optimizeDeps: {
+    include: [
+      'react',
+      'react-dom',
+      '@tanstack/react-query',
+      'recharts',
+      '@azure/msal-browser',
+      '@azure/msal-react',
+    ],
+  },
 });

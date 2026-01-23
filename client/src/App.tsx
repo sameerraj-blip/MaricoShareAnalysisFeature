@@ -1,14 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense, lazy } from "react";
 import { Switch, Route, useLocation, Router as WouterRouter } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Layout } from "@/pages/Layout";
-import Home from "@/pages/Home/Home";
-import Dashboard from "@/pages/Dashboard/Dashboard";
-import Analysis from "@/pages/Analysis/Analysis";
-import NotFound from "@/pages/NotFound/not-found";
 import { DashboardProvider } from "@/pages/Dashboard/context/DashboardContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import ProtectedRoute from "@/components/ProtectedRoute";
@@ -16,6 +12,25 @@ import AuthCallback from "@/components/AuthCallback";
 import { PublicClientApplication } from '@azure/msal-browser';
 import { MsalProvider } from '@azure/msal-react';
 import { createMsalConfig } from '@/auth/msalConfig';
+import { logger } from "@/lib/logger";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+
+// Lazy load route components for code splitting
+const Home = lazy(() => import("@/pages/Home/Home"));
+const Dashboard = lazy(() => import("@/pages/Dashboard/Dashboard"));
+const Analysis = lazy(() => import("@/pages/Analysis/Analysis"));
+const NotFound = lazy(() => import("@/pages/NotFound/not-found"));
+
+// Loading fallback component
+const RouteLoadingFallback = () => (
+  <div className="h-[calc(100vh-80px)] bg-gradient-to-br from-slate-50 to-white flex items-center justify-center">
+    <div className="text-center space-y-4">
+      <Skeleton className="h-12 w-12 rounded-full mx-auto" />
+      <Skeleton className="h-4 w-48 mx-auto" />
+    </div>
+  </div>
+);
 
 type PageType = 'home' | 'dashboard' | 'analysis';
 type ModeType = 'analysis' | 'dataOps' | 'modeling';
@@ -65,7 +80,7 @@ function Router() {
   };
 
   const handleLoadSession = (sessionId: string, sessionData: any) => {
-    console.log('🔄 Loading session in App:', sessionId, sessionData);
+    logger.log('🔄 Loading session in App:', sessionId, sessionData);
     // Clear resetTrigger to prevent file dialog from opening when loading a session
     setResetTrigger(0);
     setLoadedSessionData(sessionData);
@@ -102,45 +117,47 @@ function Router() {
       sessionId={currentSessionId}
       fileName={currentFileName}
     >
-      <Switch>
-        <Route path="/history">
-          <Analysis onNavigate={handleNavigate} onNewChat={handleNewChat} onLoadSession={handleLoadSession} onUploadNew={handleUploadNew} />
-        </Route>
-        <Route path="/dashboard">
-          <Dashboard />
-        </Route>
-        <Route path="/analysis">
-          <Home 
-            resetTrigger={resetTrigger} 
-            loadedSessionData={loadedSessionData}
-            initialMode="general"
-            onModeChange={handleModeChange}
-            onSessionChange={handleSessionChange}
-          />
-        </Route>
-        {/* Old routes - will redirect to /analysis via useEffect above */}
-        <Route path="/data-ops">
-          <Home 
-            resetTrigger={resetTrigger} 
-            loadedSessionData={loadedSessionData}
-            initialMode="dataOps"
-            onModeChange={handleModeChange}
-            onSessionChange={handleSessionChange}
-          />
-        </Route>
-        <Route path="/modeling">
-          <Home 
-            resetTrigger={resetTrigger} 
-            loadedSessionData={loadedSessionData}
-            initialMode="modeling"
-            onModeChange={handleModeChange}
-            onSessionChange={handleSessionChange}
-          />
-        </Route>
-        <Route>
-          <NotFound />
-        </Route>
-      </Switch>
+      <Suspense fallback={<RouteLoadingFallback />}>
+        <Switch>
+          <Route path="/history">
+            <Analysis onNavigate={handleNavigate} onNewChat={handleNewChat} onLoadSession={handleLoadSession} onUploadNew={handleUploadNew} />
+          </Route>
+          <Route path="/dashboard">
+            <Dashboard />
+          </Route>
+          <Route path="/analysis">
+            <Home 
+              resetTrigger={resetTrigger} 
+              loadedSessionData={loadedSessionData}
+              initialMode="general"
+              onModeChange={handleModeChange}
+              onSessionChange={handleSessionChange}
+            />
+          </Route>
+          {/* Old routes - will redirect to /analysis via useEffect above */}
+          <Route path="/data-ops">
+            <Home 
+              resetTrigger={resetTrigger} 
+              loadedSessionData={loadedSessionData}
+              initialMode="dataOps"
+              onModeChange={handleModeChange}
+              onSessionChange={handleSessionChange}
+            />
+          </Route>
+          <Route path="/modeling">
+            <Home 
+              resetTrigger={resetTrigger} 
+              loadedSessionData={loadedSessionData}
+              initialMode="modeling"
+              onModeChange={handleModeChange}
+              onSessionChange={handleSessionChange}
+            />
+          </Route>
+          <Route>
+            <NotFound />
+          </Route>
+        </Switch>
+      </Suspense>
     </Layout>
   );
 }
@@ -179,20 +196,24 @@ const msalInstance = new PublicClientApplication(createMsalConfig());
 
 function App() {
   return (
-    <MsalProvider instance={msalInstance}>
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <AuthProvider>
-            <ProtectedRoute>
-              <DashboardProvider>
-                <Toaster />
-                <AuthRedirectHandler />
-              </DashboardProvider>
-            </ProtectedRoute>
-          </AuthProvider>
-        </TooltipProvider>
-      </QueryClientProvider>
-    </MsalProvider>
+    <ErrorBoundary>
+      <MsalProvider instance={msalInstance}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <AuthProvider>
+              <ProtectedRoute>
+                <DashboardProvider>
+                  <Toaster />
+                  <ErrorBoundary>
+                    <AuthRedirectHandler />
+                  </ErrorBoundary>
+                </DashboardProvider>
+              </ProtectedRoute>
+            </AuthProvider>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </MsalProvider>
+    </ErrorBoundary>
   );
 }
 

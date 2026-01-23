@@ -1,6 +1,7 @@
 import { API_BASE_URL } from "@/lib/config";
 import { getUserEmail } from "@/utils/userStorage";
 import { ChatResponse, ThinkingStep } from "@/shared/schema";
+import { logger } from "@/lib/logger";
 
 /**
  * Download modified dataset from data operations
@@ -18,7 +19,7 @@ export async function downloadModifiedDataset(
 
   try {
     const url = `${API_BASE_URL}/api/data-ops/download/${sessionId}?format=${format}`;
-    console.log("🌐 Downloading modified dataset from:", url);
+    logger.log("🌐 Downloading modified dataset from:", url);
     
     const response = await fetch(url, {
       method: "GET",
@@ -53,9 +54,9 @@ export async function downloadModifiedDataset(
     document.body.removeChild(link);
     window.URL.revokeObjectURL(downloadUrl);
 
-    console.log("✅ Dataset downloaded successfully:", filename);
+    logger.log("✅ Dataset downloaded successfully:", filename);
   } catch (error) {
-    console.error("❌ Failed to download dataset:", error);
+    logger.error("❌ Failed to download dataset:", error);
     throw error;
   }
 }
@@ -85,7 +86,7 @@ export async function streamChatRequest(
   }
 
   try {
-    console.log("🌐 Starting SSE stream to:", `${API_BASE_URL}/api/chat/stream`);
+    logger.log("🌐 Starting SSE stream to:", `${API_BASE_URL}/api/chat/stream`);
     const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
       method: "POST",
       headers,
@@ -99,7 +100,7 @@ export async function streamChatRequest(
       signal,
     });
 
-    console.log("📡 SSE response status:", response.status, response.statusText);
+    logger.log("📡 SSE response status:", response.status, response.statusText);
 
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
@@ -142,10 +143,10 @@ export async function streamChatRequest(
           if (data) {
             try {
               const parsed = JSON.parse(data);
-              console.log("📡 SSE event received:", eventType, parsed);
+              logger.log("📡 SSE event received:", eventType, parsed);
               dispatchEvent(eventType, parsed, callbacks);
             } catch (parseError) {
-              console.error("Error parsing SSE data:", parseError, data);
+              logger.error("Error parsing SSE data:", parseError, data);
             }
           }
         }
@@ -159,7 +160,7 @@ export async function streamChatRequest(
     }
   } catch (error: any) {
     if (error.name === "AbortError" || signal?.aborted) {
-      console.log("🚫 Stream request was cancelled");
+      logger.log("🚫 Stream request was cancelled");
       return;
     }
 
@@ -215,10 +216,10 @@ function handleTrailingBuffer(buffer: string, callbacks: StreamChatCallbacks) {
 
   try {
     const parsed = JSON.parse(data);
-    console.log("📡 Final SSE event:", eventType, parsed);
+    logger.log("📡 Final SSE event:", eventType, parsed);
     dispatchEvent(eventType, parsed, callbacks);
   } catch (parseError) {
-    console.error("Error parsing final SSE data:", parseError);
+    logger.error("Error parsing final SSE data:", parseError);
   }
 }
 
@@ -254,7 +255,7 @@ export async function streamDataOpsChatRequest(
   }
 
   try {
-    console.log("🌐 Starting Data Ops SSE stream to:", `${API_BASE_URL}/api/data-ops/chat/stream`);
+    logger.log("🌐 Starting Data Ops SSE stream to:", `${API_BASE_URL}/api/data-ops/chat/stream`);
     const response = await fetch(`${API_BASE_URL}/api/data-ops/chat/stream`, {
       method: "POST",
       headers,
@@ -268,7 +269,7 @@ export async function streamDataOpsChatRequest(
       signal,
     });
 
-    console.log("📡 Data Ops SSE response status:", response.status, response.statusText);
+    logger.log("📡 Data Ops SSE response status:", response.status, response.statusText);
 
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
@@ -311,10 +312,10 @@ export async function streamDataOpsChatRequest(
           if (data) {
             try {
               const parsed = JSON.parse(data);
-              console.log("📡 Data Ops SSE event received:", eventType, parsed);
+              logger.log("📡 Data Ops SSE event received:", eventType, parsed);
               dispatchDataOpsEvent(eventType, parsed, callbacks);
             } catch (parseError) {
-              console.error("Error parsing Data Ops SSE data:", parseError, data);
+              logger.error("Error parsing Data Ops SSE data:", parseError, data);
             }
           }
         }
@@ -328,7 +329,7 @@ export async function streamDataOpsChatRequest(
     }
   } catch (error: any) {
     if (error.name === "AbortError" || signal?.aborted) {
-      console.log("🚫 Data Ops stream request was cancelled");
+      logger.log("🚫 Data Ops stream request was cancelled");
       return;
     }
 
@@ -384,10 +385,10 @@ function handleDataOpsTrailingBuffer(buffer: string, callbacks: StreamDataOpsCal
 
   try {
     const parsed = JSON.parse(data);
-    console.log("📡 Final Data Ops SSE event:", eventType, parsed);
+    logger.log("📡 Final Data Ops SSE event:", eventType, parsed);
     dispatchDataOpsEvent(eventType, parsed, callbacks);
   } catch (parseError) {
-    console.error("Error parsing final Data Ops SSE data:", parseError);
+    logger.error("Error parsing final Data Ops SSE data:", parseError);
   }
 }
 

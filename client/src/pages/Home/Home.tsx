@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { FileUpload } from '@/pages/Home/Components/FileUpload';
 import { ChatInterface } from './Components/ChatInterface';
 import { ContextModal } from './Components/ContextModal';
@@ -8,6 +8,26 @@ import { sessionsApi } from '@/lib/api';
 import { useChatMessagesStream } from '@/hooks/useChatMessagesStream';
 import { Message } from '@/shared/schema';
 import { useToast } from '@/hooks/use-toast';
+import { logger } from '@/lib/logger';
+
+// Helper function to check if a message is initial analysis
+// Moved outside component to prevent recreation on each render
+const isInitialAnalysisMessage = (msg: Message): boolean => {
+  if (msg.role !== 'assistant') return false;
+  
+  // Check for initial analysis by:
+  // 1. Content containing "initial analysis for" OR "I've just finished analyzing"
+  // 2. Having charts
+  // 3. Having insights
+  const content = msg.content?.toLowerCase() || '';
+  return (
+    content.includes('initial analysis for') ||
+    content.includes("i've just finished analyzing") ||
+    content.includes("just finished analyzing") ||
+    (msg.charts && msg.charts.length > 0) ||
+    (msg.insights && msg.insights.length > 0)
+  );
+};
 
 interface HomeProps {
   resetTrigger?: number;
@@ -113,7 +133,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         }
       }
     } catch (e) {
-      console.error('Failed to load chat history', e);
+      logger.error('Failed to load chat history', e);
     } finally {
       setIsLoadingHistory(false);
     }
@@ -122,39 +142,21 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   // Track if initial analysis has been received
   const [initialAnalysisReceived, setInitialAnalysisReceived] = useState(false);
 
-  // Helper function to check if a message is initial analysis
-  const isInitialAnalysisMessage = (msg: Message): boolean => {
-    if (msg.role !== 'assistant') return false;
-    
-    // Check for initial analysis by:
-    // 1. Content containing "initial analysis for" OR "I've just finished analyzing"
-    // 2. Having charts
-    // 3. Having insights
-    const content = msg.content?.toLowerCase() || '';
-    return (
-      content.includes('initial analysis for') ||
-      content.includes("i've just finished analyzing") ||
-      content.includes("just finished analyzing") ||
-      (msg.charts && msg.charts.length > 0) ||
-      (msg.insights && msg.insights.length > 0)
-    );
-  };
-
   // Fallback: Fetch messages from session API when SSE completes but no messages received
-  const fetchMessagesFromSession = async (retryCount = 0): Promise<boolean> => {
+  const fetchMessagesFromSession = useCallback(async (retryCount = 0): Promise<boolean> => {
     if (!sessionId || initialAnalysisReceived) {
-      console.log('⏭️ Skipping fetch - no sessionId or already received initial analysis');
+      logger.log('⏭️ Skipping fetch - no sessionId or already received initial analysis');
       return false;
     }
     
-    const MAX_RETRIES = 60; // Try up to 60 times (60 seconds total) - analysis can take time
+    const MAX_RETRIES = 24; // Reduced to 24 retries (2 minutes max with exponential backoff)
     
     try {
-      console.log(`📥 Fetching messages from session API (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+      logger.log(`📥 Fetching messages from session API (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
       const data = await sessionsApi.getSessionDetails(sessionId);
       const session = data.session || data;
       
-      console.log('📋 Session data:', {
+      logger.log('📋 Session data:', {
         hasSession: !!session,
         hasMessages: !!(session?.messages),
         messagesLength: session?.messages?.length || 0,
@@ -168,13 +170,13 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       const hasInsights = session?.insights && Array.isArray(session.insights) && session.insights.length > 0;
       
       if (hasCharts || hasInsights) {
-        console.log('✅ Analysis ready - charts/insights found');
+        logger.log('✅ Analysis ready - charts/insights found');
         
         // If we have messages with charts/insights, use them
         if (session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
           const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
           if (hasInitialAnalysis) {
-            console.log('✅ Initial analysis found in messages - setting messages and clearing loading state');
+            logger.log('✅ Initial analysis found in messages - setting messages and clearing loading state');
             setMessages(session.messages);
             setIsLargeFileLoading(false);
             setInitialAnalysisReceived(true);
@@ -197,7 +199,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         }
         
         // Create initial message from charts/insights if no messages yet
-        console.log('✅ Creating initial message from charts/insights');
+        logger.log('✅ Creating initial message from charts/insights');
         const initialMessage: Message = {
           role: 'assistant',
           content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
@@ -227,8 +229,8 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       
       // Check messages only if charts/insights aren't ready yet
       if (session && session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
-        console.log(`✅ Fetched ${session.messages.length} messages from session API`);
-        console.log('📝 Messages:', session.messages.map((m: Message) => ({
+        logger.log(`✅ Fetched ${session.messages.length} messages from session API`);
+        logger.log('📝 Messages:', session.messages.map((m: Message) => ({
           role: m.role,
           hasContent: !!m.content,
           contentPreview: m.content?.substring(0, 50),
@@ -240,7 +242,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
         
         if (hasInitialAnalysis) {
-          console.log('✅ Initial analysis found in session - setting messages and clearing loading state');
+          logger.log('✅ Initial analysis found in session - setting messages and clearing loading state');
           setMessages(session.messages);
           setIsLargeFileLoading(false);
           setInitialAnalysisReceived(true);
@@ -260,26 +262,64 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
           if (session.insights) setInitialInsights(session.insights);
           return true; // Success
         } else {
-          console.log('⚠️ Messages found but no initial analysis detected - waiting for charts/insights');
+          logger.log('⚠️ Messages found but no initial analysis detected - waiting for charts/insights');
         }
       } else {
-        console.log('⚠️ No messages found in session yet - waiting for analysis to complete');
+        logger.log('⚠️ No messages found in session yet - waiting for analysis to complete');
       }
     } catch (error) {
-      console.error('⚠️ Failed to fetch messages from session API:', error);
+      logger.error('⚠️ Failed to fetch messages from session API:', error);
     }
     
     // Retry if we haven't found messages yet and haven't exceeded max retries
+    // Use exponential backoff: start with 2s, increase to 5s after 10 attempts
     if (retryCount < MAX_RETRIES - 1) {
+      const baseInterval = retryCount < 10 ? 2000 : 5000;
+      const backoffInterval = Math.min(baseInterval * Math.pow(1.1, Math.max(0, retryCount - 10)), 10000);
       setTimeout(() => {
         fetchMessagesFromSession(retryCount + 1);
-      }, 1000); // Retry every 1 second
+      }, backoffInterval);
     } else {
-      console.warn('⚠️ Max retries reached - giving up on fetching messages');
+      logger.warn('⚠️ Max retries reached - giving up on fetching messages');
     }
     
     return false;
-  };
+  }, [sessionId, initialAnalysisReceived, setMessages, setIsLargeFileLoading, setInitialAnalysisReceived, setSampleRows, setColumns, setNumericColumns, setDateColumns, setTotalRows, setTotalColumns, setInitialCharts, setInitialInsights]);
+
+  // Memoize callbacks for useChatMessagesStream to prevent hook count issues
+  const handleNewMessages = useCallback((newMessages: Message[]) => {
+    // Simply append all new messages - no cleaning, no deduplication
+    setMessages((prev) => {
+      if (!newMessages || newMessages.length === 0) {
+        return prev;
+      }
+
+      logger.log(`📥 SSE: Received ${newMessages.length} messages`);
+      
+      // Check if initial analysis arrived to clear loading state and disable SSE
+      const hasInitialAnalysis = newMessages.some(msg => isInitialAnalysisMessage(msg));
+      
+      if (hasInitialAnalysis && !initialAnalysisReceived) {
+        logger.log('✅ Initial analysis received via SSE - disabling polling');
+        setIsLargeFileLoading(false);
+        setInitialAnalysisReceived(true); // Disable SSE polling after initial analysis
+      }
+      
+      // Simply append all messages - no filtering
+      return [...prev, ...newMessages];
+    });
+  }, [initialAnalysisReceived, setMessages, setIsLargeFileLoading, setInitialAnalysisReceived]);
+
+  const handleSSEComplete = useCallback(() => {
+    // When SSE completes, fetch messages from session API as fallback
+    // This ensures we get the initial analysis even if SSE didn't deliver it
+    logger.log('✅ SSE complete event received - checking for initial analysis');
+    
+    // Start fetching with retries - will keep trying until messages are found
+    setTimeout(() => {
+      fetchMessagesFromSession(0);
+    }, 500); // Small delay to ensure backend has saved
+  }, [fetchMessagesFromSession]);
 
   // SSE for initial analysis only - polls for existing messages when session first loads
   // Disabled after initial analysis is received to prevent continuous polling
@@ -287,38 +327,8 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   useChatMessagesStream({
     sessionId,
     enabled: !!sessionId && !initialAnalysisReceived, // Only enabled until initial analysis is received
-    onNewMessages: (newMessages) => {
-      // Simply append all new messages - no cleaning, no deduplication
-      setMessages((prev) => {
-        if (!newMessages || newMessages.length === 0) {
-          return prev;
-        }
-
-        console.log(`📥 SSE: Received ${newMessages.length} messages`);
-        
-        // Check if initial analysis arrived to clear loading state and disable SSE
-        const hasInitialAnalysis = newMessages.some(msg => isInitialAnalysisMessage(msg));
-        
-        if (hasInitialAnalysis && !initialAnalysisReceived) {
-          console.log('✅ Initial analysis received via SSE - disabling polling');
-          setIsLargeFileLoading(false);
-          setInitialAnalysisReceived(true); // Disable SSE polling after initial analysis
-        }
-        
-        // Simply append all messages - no filtering
-        return [...prev, ...newMessages];
-      });
-    },
-    onComplete: () => {
-      // When SSE completes, fetch messages from session API as fallback
-      // This ensures we get the initial analysis even if SSE didn't deliver it
-      console.log('✅ SSE complete event received - checking for initial analysis');
-      
-      // Start fetching with retries - will keep trying until messages are found
-      setTimeout(() => {
-        fetchMessagesFromSession(0);
-      }, 500); // Small delay to ensure backend has saved
-    },
+    onNewMessages: handleNewMessages,
+    onComplete: handleSSEComplete,
   });
 
   // Sync mode with initialMode prop (from URL) - only when initialMode changes
@@ -360,7 +370,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
     const hasInitialAnalysis = messages.some(msg => isInitialAnalysisMessage(msg));
 
     if (hasInitialAnalysis) {
-      console.log('✅ Initial analysis found in current messages - clearing loading state');
+      logger.log('✅ Initial analysis found in current messages - clearing loading state');
       setIsLargeFileLoading(false);
       setInitialAnalysisReceived(true);
     }
@@ -377,105 +387,149 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
       return;
     }
 
-    console.log('🔄 Starting polling for initial analysis messages...');
+    logger.log('🔄 Starting polling for initial analysis messages...');
     let pollCount = 0;
-    const MAX_POLLS = 500; // Poll for up to 500 attempts (~16.7 minutes at 2s interval) - analysis can take time on slower machines
-    const POLL_INTERVAL = 2000; // Poll every 2 seconds to reduce server load
+    const MAX_POLLS = 60; // Reduced from 500 to 60 (2 minutes max with exponential backoff)
+    const INITIAL_POLL_INTERVAL = 2000; // Start with 2 seconds for first 10 attempts
+    const BASE_POLL_INTERVAL = 5000; // Then switch to 5 seconds
+    const EXPONENTIAL_BACKOFF_MAX = 10000; // Max 10 seconds between polls
     let isCleared = false;
+    let consecutiveErrors = 0;
+    let timeoutId: NodeJS.Timeout | null = null;
 
-    const pollInterval = setInterval(async () => {
+    const scheduleNextPoll = (attemptNumber: number) => {
       if (isCleared) return;
       
-      pollCount++;
-      console.log(`🔄 Polling attempt ${pollCount}/${MAX_POLLS} for initial analysis...`);
+      // Calculate interval with exponential backoff
+      let interval: number;
+      if (attemptNumber <= 10) {
+        // First 10 attempts: use initial interval (2s)
+        interval = INITIAL_POLL_INTERVAL;
+      } else {
+        // After 10 attempts: use base interval (5s) with exponential backoff for errors
+        const backoffMultiplier = Math.min(Math.pow(1.2, consecutiveErrors), 2); // Max 2x multiplier
+        interval = Math.min(BASE_POLL_INTERVAL * backoffMultiplier, EXPONENTIAL_BACKOFF_MAX);
+      }
       
-      try {
-        const data = await sessionsApi.getSessionDetails(sessionId);
-        const session = data.session || data;
+      timeoutId = setTimeout(async () => {
+        if (isCleared) return;
         
-        // Check for charts/insights FIRST - this indicates analysis is ready
-        const hasCharts = session?.charts && Array.isArray(session.charts) && session.charts.length > 0;
-        const hasInsights = session?.insights && Array.isArray(session.insights) && session.insights.length > 0;
+        pollCount++;
+        logger.log(`🔄 Polling attempt ${pollCount}/${MAX_POLLS} (interval: ${interval}ms)...`);
         
-        if (hasCharts || hasInsights) {
-          console.log('✅ Analysis ready via polling - charts/insights found');
+        try {
+          const data = await sessionsApi.getSessionDetails(sessionId);
+          consecutiveErrors = 0; // Reset error count on success
+          const session = data.session || data;
           
-          // If we have messages with charts/insights, use them
-          if (session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
-            const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
-            if (hasInitialAnalysis) {
-              console.log('✅ Initial analysis found in messages - setting messages and clearing loading state');
-              setMessages(session.messages);
-              setIsLargeFileLoading(false);
-              setInitialAnalysisReceived(true);
-              
-              // Set metadata
-              if (session.dataSummary) {
-                if (session.sampleRows && session.sampleRows.length > 0) {
-                  setSampleRows(session.sampleRows);
+          // Check for charts/insights FIRST - this indicates analysis is ready
+          const hasCharts = session?.charts && Array.isArray(session.charts) && session.charts.length > 0;
+          const hasInsights = session?.insights && Array.isArray(session.insights) && session.insights.length > 0;
+          
+          if (hasCharts || hasInsights) {
+            logger.log('✅ Analysis ready via polling - charts/insights found');
+            
+            // If we have messages with charts/insights, use them
+            if (session.messages && Array.isArray(session.messages) && session.messages.length > 0) {
+              const hasInitialAnalysis = session.messages.some((msg: Message) => isInitialAnalysisMessage(msg));
+              if (hasInitialAnalysis) {
+                logger.log('✅ Initial analysis found in messages - setting messages and clearing loading state');
+                setMessages(session.messages);
+                setIsLargeFileLoading(false);
+                setInitialAnalysisReceived(true);
+                
+                // Set metadata
+                if (session.dataSummary) {
+                  if (session.sampleRows && session.sampleRows.length > 0) {
+                    setSampleRows(session.sampleRows);
+                  }
+                  setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+                  setNumericColumns(session.dataSummary.numericColumns || []);
+                  setDateColumns(session.dataSummary.dateColumns || []);
+                  setTotalRows(session.dataSummary.rowCount);
+                  setTotalColumns(session.dataSummary.columnCount);
                 }
-                setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
-                setNumericColumns(session.dataSummary.numericColumns || []);
-                setDateColumns(session.dataSummary.dateColumns || []);
-                setTotalRows(session.dataSummary.rowCount);
-                setTotalColumns(session.dataSummary.columnCount);
+                if (session.charts) setInitialCharts(session.charts);
+                if (session.insights) setInitialInsights(session.insights);
+                
+                isCleared = true;
+                if (timeoutId) clearTimeout(timeoutId);
+                return;
               }
-              if (session.charts) setInitialCharts(session.charts);
-              if (session.insights) setInitialInsights(session.insights);
-              
-              clearInterval(pollInterval);
-              isCleared = true;
-              return;
             }
-          }
-          
-          // Create initial message from charts/insights
-          console.log('✅ Creating initial message from charts/insights');
-          const initialMessage: Message = {
-            role: 'assistant',
-            content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
-            charts: session.charts || [],
-            insights: session.insights || [],
-            timestamp: Date.now(),
-          };
-          setMessages([initialMessage]);
-          setIsLargeFileLoading(false);
-          setInitialAnalysisReceived(true);
-          
-          // Set metadata
-          if (session.dataSummary) {
-            if (session.sampleRows && session.sampleRows.length > 0) {
-              setSampleRows(session.sampleRows);
+            
+            // Create initial message from charts/insights
+            logger.log('✅ Creating initial message from charts/insights');
+            const initialMessage: Message = {
+              role: 'assistant',
+              content: `Hi! 👋 I've just finished analyzing your data. Here's what I found:\n\n📊 Your dataset has ${session.dataSummary?.rowCount || 0} rows and ${session.dataSummary?.columnCount || 0} columns\n\nI've created ${session.charts?.length || 0} visualizations and ${session.insights?.length || 0} key insights to get you started. Feel free to ask me anything about your data - I'm here to help! What would you like to explore first?`,
+              charts: session.charts || [],
+              insights: session.insights || [],
+              timestamp: Date.now(),
+            };
+            setMessages([initialMessage]);
+            setIsLargeFileLoading(false);
+            setInitialAnalysisReceived(true);
+            
+            // Set metadata
+            if (session.dataSummary) {
+              if (session.sampleRows && session.sampleRows.length > 0) {
+                setSampleRows(session.sampleRows);
+              }
+              setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
+              setNumericColumns(session.dataSummary.numericColumns || []);
+              setDateColumns(session.dataSummary.dateColumns || []);
+              setTotalRows(session.dataSummary.rowCount);
+              setTotalColumns(session.dataSummary.columnCount);
             }
-            setColumns(session.dataSummary.columns?.map((c: any) => c.name) || []);
-            setNumericColumns(session.dataSummary.numericColumns || []);
-            setDateColumns(session.dataSummary.dateColumns || []);
-            setTotalRows(session.dataSummary.rowCount);
-            setTotalColumns(session.dataSummary.columnCount);
+            if (session.charts) setInitialCharts(session.charts);
+            if (session.insights) setInitialInsights(session.insights);
+            
+            isCleared = true;
+            if (timeoutId) clearTimeout(timeoutId);
+            return;
+          } else {
+            logger.log(`⏳ Analysis not ready yet - no charts/insights (attempt ${pollCount}/${MAX_POLLS})`);
           }
-          if (session.charts) setInitialCharts(session.charts);
-          if (session.insights) setInitialInsights(session.insights);
+        } catch (error) {
+          consecutiveErrors++;
+          logger.error('⚠️ Error polling for messages:', error);
           
-          clearInterval(pollInterval);
-          isCleared = true;
-          return;
-        } else {
-          console.log(`⏳ Analysis not ready yet - no charts/insights (attempt ${pollCount}/${MAX_POLLS})`);
+          // If we have too many consecutive errors, show user feedback
+          if (consecutiveErrors >= 5) {
+            toast({
+              title: 'Connection Issue',
+              description: 'Having trouble connecting to the server. Retrying with longer intervals...',
+              variant: 'destructive',
+            });
+          }
         }
-      } catch (error) {
-        console.error('⚠️ Error polling for messages:', error);
-      }
-      
-      if (pollCount >= MAX_POLLS) {
-        console.warn('⚠️ Polling timeout - giving up on fetching initial analysis');
-        clearInterval(pollInterval);
-        isCleared = true;
-      }
-    }, POLL_INTERVAL);
+        
+        // Continue polling if we haven't exceeded max attempts
+        if (pollCount < MAX_POLLS && !isCleared) {
+          scheduleNextPoll(pollCount + 1);
+        } else if (pollCount >= MAX_POLLS) {
+          logger.warn('⚠️ Polling timeout - giving up on fetching initial analysis');
+          toast({
+            title: 'Analysis Timeout',
+            description: 'The analysis is taking longer than expected. Please refresh the page or try uploading again.',
+            variant: 'destructive',
+          });
+          setIsLargeFileLoading(false);
+          isCleared = true;
+        }
+      }, interval);
+    };
+
+    // Start polling
+    scheduleNextPoll(1);
 
     return () => {
       isCleared = true;
-      clearInterval(pollInterval);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLargeFileLoading, sessionId, initialAnalysisReceived, messages.length]);
@@ -517,7 +571,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
           }
         }
       } catch (e) {
-        console.error('Failed to fetch collaborators', e);
+        logger.error('Failed to fetch collaborators', e);
       }
     };
     fetchCollaborators();
@@ -538,7 +592,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
             contextModalShownRef.current.add(sessionId);
           }
         } catch (e) {
-          console.error('Failed to check session context:', e);
+          logger.error('Failed to check session context:', e);
           // Show modal anyway if we can't check
           setContextModalSessionId(sessionId);
           setShowContextModal(true);
@@ -563,7 +617,7 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
         description: 'Your context has been saved and will be included with each message.',
       });
     } catch (error) {
-      console.error('Failed to save context:', error);
+      logger.error('Failed to save context:', error);
       toast({
         title: 'Error',
         description: 'Failed to save context. Please try again.',
@@ -597,9 +651,13 @@ export default function Home({ resetTrigger = 0, loadedSessionData, initialMode,
   if (!sessionId && loadedSessionData) {
     return (
       <div className="h-[calc(100vh-80px)] bg-gradient-to-br from-slate-50 to-white flex items-center justify-center">
-        <div className="text-center">
+        <div className="text-center max-w-md px-6">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading analysis...</p>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">Loading analysis</h3>
+          <p className="text-sm text-gray-600 mb-4">Preparing your data and insights...</p>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div className="bg-primary h-2 rounded-full animate-pulse" style={{ width: '40%' }}></div>
+          </div>
         </div>
       </div>
     );

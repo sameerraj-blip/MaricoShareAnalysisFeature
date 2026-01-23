@@ -16,6 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useIntersectionObserver } from '@/hooks/useIntersectionObserver';
 import {
   ResponsiveContainer,
   LineChart,
@@ -166,6 +167,14 @@ export function ChartRenderer({
   const [pointDensity, setPointDensity] = useState<'low' | 'medium' | 'high' | 'all'>('medium');
   const { type, title, data: chartDataSource = [], x, y, xDomain, yDomain, trendLine, xLabel, yLabel } = chart;
   const chartColor = COLORS[index % COLORS.length];
+
+  // Use IntersectionObserver to lazy load charts (only render when visible)
+  // Disable lazy loading for single charts or when fillParent is true (dashboard tiles)
+  const [containerRef, isVisible] = useIntersectionObserver({
+    threshold: 0.1,
+    rootMargin: '100px', // Start loading 100px before chart enters viewport
+    enabled: !isSingleChart && !fillParent, // Always load single charts and dashboard tiles immediately
+  });
 
   const originalData = useMemo(() => {
     if (!Array.isArray(chartDataSource)) {
@@ -348,6 +357,34 @@ export function ChartRenderer({
     // Always show all data points - no sampling
     return displayData;
   }, [type, chartData, hideOutliers, x, y]);
+
+  // Optimize scatter data for rendering performance based on point density preference
+  // This must be at the top level to follow Rules of Hooks
+  const optimizedScatterData = useMemo(() => {
+    if (type !== 'scatter') return processedScatterData;
+    
+    // Calculate max render points based on user preference
+    const getMaxRenderPoints = () => {
+      switch (pointDensity) {
+        case 'low': return 2000;
+        case 'medium': return 10000;
+        case 'high': return 20000;
+        case 'all': return processedScatterData.length; // Show all, but warn if too many
+        default: return 10000;
+      }
+    };
+    
+    const MAX_RENDER_POINTS = getMaxRenderPoints();
+    
+    if (processedScatterData.length <= MAX_RENDER_POINTS) {
+      return processedScatterData;
+    }
+    
+    // Stratified sampling to preserve distribution
+    const step = Math.ceil(processedScatterData.length / MAX_RENDER_POINTS);
+    return processedScatterData.filter((_, idx) => idx % step === 0).slice(0, MAX_RENDER_POINTS);
+  }, [type, processedScatterData, pointDensity]);
+
   const shouldCompactView = type === 'bar' && !fillParent && !isSingleChart && chartData.length > MAX_COMPACT_X_TICKS;
   const compactBarData = useMemo(() => {
     if (!shouldCompactView) return chartData;
@@ -773,29 +810,7 @@ export function ChartRenderer({
           return 6;
         };
 
-        // Optimize scatter data for rendering performance (keep trend line accurate)
-        // Adjust max points based on user preference
-        const getMaxRenderPoints = () => {
-          switch (pointDensity) {
-            case 'low': return 2000;
-            case 'medium': return 10000;
-            case 'high': return 20000;
-            case 'all': return processedScatterData.length; // Show all, but warn if too many
-            default: return 10000;
-          }
-        };
-        
-        const MAX_RENDER_POINTS = getMaxRenderPoints();
-        const optimizedScatterData = useMemo(() => {
-          if (processedScatterData.length <= MAX_RENDER_POINTS) {
-            return processedScatterData;
-          }
-          
-          // Stratified sampling to preserve distribution
-          const step = Math.ceil(processedScatterData.length / MAX_RENDER_POINTS);
-          return processedScatterData.filter((_, idx) => idx % step === 0).slice(0, MAX_RENDER_POINTS);
-        }, [processedScatterData, MAX_RENDER_POINTS]);
-        
+        // Use pre-computed optimizedScatterData (computed at top level to follow Rules of Hooks)
         const isLargeDataset = optimizedScatterData.length > 5000;
         
         // Calculate point size and opacity based on user preferences
@@ -1022,9 +1037,15 @@ export function ChartRenderer({
     }
   };
 
+  // Determine if chart should be rendered (always render if visible, single chart, or fillParent)
+  const shouldRenderChart = isVisible || isSingleChart || fillParent || isLoading;
+
   return (
     <>
-      <div className="group relative flex h-full flex-col rounded-lg border border-border bg-card p-4 shadow-sm transition-shadow hover:shadow-md">
+      <div 
+        ref={containerRef}
+        className="group relative flex h-full flex-col rounded-lg border border-border bg-card p-4 shadow-sm transition-shadow hover:shadow-md"
+      >
         <div
           className={`cursor-pointer flex flex-col gap-3 ${fillParent ? 'h-full' : ''}`}
           onClick={handleCardClick}
@@ -1196,8 +1217,12 @@ export function ChartRenderer({
                 </div>
               )}
             </div>
-          ) : (
+          ) : shouldRenderChart ? (
             <div className={`w-full flex-1 ${fillParent ? 'min-h-0' : ''}`}>{renderChart()}</div>
+          ) : (
+            <div className={`w-full flex-1 flex items-center justify-center ${fillParent ? 'min-h-0' : 'min-h-[250px]'}`}>
+              <Skeleton className="h-full w-full" />
+            </div>
           )}
         </div>
         {showAddButton && (

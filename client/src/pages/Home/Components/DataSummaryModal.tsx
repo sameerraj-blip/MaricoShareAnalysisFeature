@@ -172,8 +172,8 @@ export function DataSummaryModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-5xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="max-w-[95vw] w-[95vw] max-h-[95vh] h-[95vh] p-6 flex flex-col">
+        <DialogHeader className="flex-shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <Database className="h-5 w-5" />
             Data Summary
@@ -183,21 +183,22 @@ export function DataSummaryModal({
           </DialogDescription>
         </DialogHeader>
 
-        {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          </div>
-        ) : dataSummary ? (
-          <Tabs defaultValue="summary" className="w-full">
-            <TabsList className="grid w-full grid-cols-3">
-              <TabsTrigger value="summary">Summary</TabsTrigger>
-              <TabsTrigger value="operations">Data Operations</TabsTrigger>
-              <TabsTrigger value="questions">Recommended Questions</TabsTrigger>
-            </TabsList>
+        <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            </div>
+          ) : dataSummary ? (
+            <Tabs defaultValue="summary" className="w-full h-full flex flex-col min-h-0">
+              <TabsList className="grid w-full grid-cols-3 flex-shrink-0">
+                <TabsTrigger value="summary">Summary</TabsTrigger>
+                <TabsTrigger value="operations">Data Operations</TabsTrigger>
+                <TabsTrigger value="questions">Recommended Questions</TabsTrigger>
+              </TabsList>
 
-            <TabsContent value="summary" className="space-y-4 mt-4">
+            <TabsContent value="summary" className="space-y-4 mt-4 flex-1 overflow-hidden flex flex-col min-h-0">
               {/* Quality Score Card */}
-              <Card>
+              <Card className="flex-shrink-0">
                 <CardHeader>
                   <CardTitle className="flex items-center justify-between">
                     <span>Data Quality Score</span>
@@ -227,64 +228,66 @@ export function DataSummaryModal({
               </Card>
 
               {/* Summary Table */}
-              <Card>
-                <CardHeader>
+              <Card className="flex-1 overflow-hidden flex flex-col min-h-0">
+                <CardHeader className="flex-shrink-0">
                   <CardTitle>Column Statistics</CardTitle>
                   <CardDescription>
                     Detailed statistics for each column in your dataset
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Column</TableHead>
-                          <TableHead>Type</TableHead>
-                          <TableHead>Null Values</TableHead>
-                          <TableHead>Mean</TableHead>
-                          <TableHead>Median</TableHead>
-                          <TableHead>Mode</TableHead>
-                          <TableHead>Std Dev</TableHead>
-                          <TableHead>Min</TableHead>
-                          <TableHead>Max</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {dataSummary.summary.map((col, idx) => (
-                          <TableRow key={idx}>
-                            <TableCell className="font-medium">{col.variable}</TableCell>
-                            <TableCell>
-                              <Badge variant="outline">{col.datatype}</Badge>
-                            </TableCell>
-                            <TableCell>
-                              <div className="flex items-center gap-2">
-                                {col.null_values > 0 ? (
-                                  <AlertCircle className="h-4 w-4 text-yellow-600" />
-                                ) : (
-                                  <CheckCircle2 className="h-4 w-4 text-green-600" />
-                                )}
-                                <span>{col.null_values}</span>
-                              </div>
-                            </TableCell>
-                            <TableCell>{formatValue(col.mean)}</TableCell>
-                            <TableCell>{formatValue(col.median)}</TableCell>
-                            <TableCell className="max-w-[150px] truncate">
-                              {formatValue(col.mode)}
-                            </TableCell>
-                            <TableCell>{formatValue(col.std_dev)}</TableCell>
-                            <TableCell>{formatValue(col.min)}</TableCell>
-                            <TableCell>{formatValue(col.max)}</TableCell>
+                <CardContent className="flex-1 overflow-hidden min-h-0 p-0">
+                  <div className="h-full overflow-auto border-t">
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader className="sticky top-0 bg-background z-10">
+                          <TableRow>
+                            <TableHead className="bg-muted/50">Column</TableHead>
+                            <TableHead className="bg-muted/50">Type</TableHead>
+                            <TableHead className="bg-muted/50">Null Values</TableHead>
+                            <TableHead className="bg-muted/50">Mean</TableHead>
+                            <TableHead className="bg-muted/50">Median</TableHead>
+                            <TableHead className="bg-muted/50">Mode</TableHead>
+                            <TableHead className="bg-muted/50">Std Dev</TableHead>
+                            <TableHead className="bg-muted/50">Min</TableHead>
+                            <TableHead className="bg-muted/50">Max</TableHead>
                           </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
+                        </TableHeader>
+                        <TableBody>
+                          {dataSummary.summary.map((col, idx) => (
+                            <TableRow key={idx}>
+                              <TableCell className="font-medium">{col.variable}</TableCell>
+                              <TableCell>
+                                <Badge variant="outline">{col.datatype}</Badge>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-2">
+                                  {col.null_values > 0 ? (
+                                    <AlertCircle className="h-4 w-4 text-yellow-600" />
+                                  ) : (
+                                    <CheckCircle2 className="h-4 w-4 text-green-600" />
+                                  )}
+                                  <span>{col.null_values}</span>
+                                </div>
+                              </TableCell>
+                              <TableCell>{formatValue(col.mean)}</TableCell>
+                              <TableCell>{formatValue(col.median)}</TableCell>
+                              <TableCell className="max-w-[150px] truncate">
+                                {formatValue(col.mode)}
+                              </TableCell>
+                              <TableCell>{formatValue(col.std_dev)}</TableCell>
+                              <TableCell>{formatValue(col.min)}</TableCell>
+                              <TableCell>{formatValue(col.max)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
             </TabsContent>
 
-            <TabsContent value="operations" className="space-y-4 mt-4">
+            <TabsContent value="operations" className="space-y-4 mt-4 flex-1 overflow-auto">
               <Card>
                 <CardHeader>
                   <CardTitle>Fix Data Issues</CardTitle>
@@ -326,7 +329,7 @@ export function DataSummaryModal({
               </Card>
             </TabsContent>
 
-            <TabsContent value="questions" className="space-y-4 mt-4">
+            <TabsContent value="questions" className="space-y-4 mt-4 flex-1 overflow-auto">
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -355,12 +358,13 @@ export function DataSummaryModal({
                 </CardContent>
               </Card>
             </TabsContent>
-          </Tabs>
-        ) : (
-          <div className="text-center py-8 text-muted-foreground">
-            No data summary available
-          </div>
-        )}
+            </Tabs>
+          ) : (
+            <div className="text-center py-8 text-muted-foreground">
+              No data summary available
+            </div>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );

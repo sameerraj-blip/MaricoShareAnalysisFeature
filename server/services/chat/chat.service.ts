@@ -104,9 +104,16 @@ export async function processChatMessage(params: ProcessChatMessageParams): Prom
   
   // Load the latest data (including any modifications from data operations)
   // Use column-specific loading for large datasets
+  // Pass query filters for intelligent chunk loading
+  const queryFilters = parsedQuery ? {
+    timeFilters: parsedQuery.timeFilters || undefined,
+    valueFilters: parsedQuery.valueFilters || undefined,
+    exclusionFilters: parsedQuery.exclusionFilters || undefined,
+  } : undefined;
+  
   const latestData = requiredColumns.length > 0
-    ? await loadDataForColumns(chatDocument, requiredColumns)
-    : await loadLatestData(chatDocument);
+    ? await loadDataForColumns(chatDocument, requiredColumns, queryFilters)
+    : await loadLatestData(chatDocument, undefined, queryFilters);
   console.log(`✅ Loaded ${latestData.length} rows of data for analysis`);
   
   // Get chat-level insights from the document

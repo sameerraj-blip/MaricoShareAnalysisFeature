@@ -5,6 +5,7 @@ import { sessionsApi } from '@/lib/api/sessions';
 import { useToast } from '@/hooks/use-toast';
 import { getUserEmail } from '@/utils/userStorage';
 import { useRef, useEffect, useState } from 'react';
+import { logger } from '@/lib/logger';
 
 interface UseHomeMutationsProps {
   sessionId: string | null;
@@ -67,7 +68,7 @@ export const useHomeMutations = ({
       return await uploadFile<any>('/api/upload', file);
     },
     onSuccess: async (data, variables) => {
-      console.log("upload response from the backend", data);
+      logger.log("upload response from the backend", data);
       
       // Handle new async format (202 response with jobId and sessionId)
       if (data.jobId && data.sessionId && data.status === 'processing') {
@@ -105,7 +106,7 @@ export const useHomeMutations = ({
             // Don't set the initial message here - let SSE handle it to avoid duplicates
           }
         } catch (sessionError) {
-          console.error('Failed to fetch session details:', sessionError);
+          logger.error('Failed to fetch session details:', sessionError);
           // Processing message is already shown above, so user still sees feedback
           // The SSE stream will pick up the final message when processing completes
         }
@@ -153,7 +154,7 @@ export const useHomeMutations = ({
       // Invalidate sessions query to refresh the analysis list
       if (userEmail) {
         queryClient.invalidateQueries({ queryKey: ['sessions', userEmail] });
-        console.log('🔄 Invalidated sessions query for user:', userEmail);
+        logger.log('🔄 Invalidated sessions query for user:', userEmail);
       }
     },
     onError: (error) => {
@@ -209,14 +210,39 @@ export const useHomeMutations = ({
         timestamp: actualMessage?.timestamp || currentTimestamp 
       };
       
-      console.log('📌 Tracking pending message:', pendingUserMessageRef.current);
+      logger.log('📌 Tracking pending message:', pendingUserMessageRef.current);
+      
+      // Optimistic update: Add user message immediately before server confirmation
+      const optimisticUserMessage: Message = {
+        role: 'user',
+        content: message,
+        timestamp: actualMessage?.timestamp || currentTimestamp,
+        userEmail: getUserEmail() || undefined,
+      };
+      
+      // Add optimistic message to state immediately
+      setMessages((prev) => {
+        // Check if message already exists (for edit scenarios)
+        const existingIndex = prev.findIndex(
+          m => m.role === 'user' && 
+          m.timestamp === optimisticUserMessage.timestamp
+        );
+        if (existingIndex >= 0) {
+          // Replace existing message
+          const updated = [...prev];
+          updated[existingIndex] = optimisticUserMessage;
+          return updated;
+        }
+        // Append new message
+        return [...prev, optimisticUserMessage];
+      });
       
       // Clear previous thinking steps
       setThinkingSteps([]);
       setThinkingTargetTimestamp(null);
       
-      console.log('📤 Sending chat message:', message);
-      console.log('📋 SessionId:', sessionId);
+      logger.log('📤 Sending chat message:', message);
+      logger.log('📋 SessionId:', sessionId);
       
       if (!sessionId) {
         throw new Error('Session ID is required');
@@ -224,7 +250,7 @@ export const useHomeMutations = ({
       
       // Use ref to get latest messages (important for edit functionality)
       const currentMessages = messagesRef.current;
-      console.log('💬 Chat history length:', currentMessages.length);
+      logger.log('💬 Chat history length:', currentMessages.length);
       
       const lastUserMessage = targetTimestamp
         ? { timestamp: targetTimestamp }
@@ -236,7 +262,7 @@ export const useHomeMutations = ({
       }
       
       // Backend will fetch last 15 messages from Cosmos DB
-      console.log('📤 Request payload:', {
+      logger.log('📤 Request payload:', {
         sessionId,
         message,
       });
@@ -251,7 +277,7 @@ export const useHomeMutations = ({
             message,
             {
               onThinkingStep: (step: ThinkingStep) => {
-                console.log('🧠 Data Ops thinking step received:', step);
+                logger.log('🧠 Data Ops thinking step received:', step);
                 setThinkingSteps((prev) => {
                   const existingIndex = prev.findIndex(s => s.step === step.step);
                   if (existingIndex >= 0) {
@@ -263,7 +289,7 @@ export const useHomeMutations = ({
                 });
               },
               onResponse: (response: DataOpsResponse) => {
-                console.log('✅ Data Ops API response received:', response);
+                logger.log('✅ Data Ops API response received:', response);
                 responseData = response;
                 // Store preview/summary in a way that can be accessed by MessageBubble
                 // We'll add these as custom properties to the response
@@ -271,13 +297,13 @@ export const useHomeMutations = ({
                 (responseData as any).summary = response.summary;
               },
               onError: (error: Error) => {
-                console.error('❌ Data Ops API request failed:', error);
+                logger.error('❌ Data Ops API request failed:', error);
                 setThinkingSteps([]);
                 setThinkingTargetTimestamp(null);
                 reject(error);
               },
               onDone: () => {
-                console.log('✅ Data Ops stream completed');
+                logger.log('✅ Data Ops stream completed');
                 setThinkingSteps([]);
                 setThinkingTargetTimestamp(null);
                 if (responseData) {
@@ -301,7 +327,7 @@ export const useHomeMutations = ({
             true // dataOpsMode flag for backward compatibility
           ).catch((error: any) => {
             if (error?.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
-              console.log('🚫 Data Ops request was cancelled by user');
+              logger.log('🚫 Data Ops request was cancelled by user');
               setThinkingSteps([]);
               setThinkingTargetTimestamp(null);
               reject(new Error('Request cancelled'));
@@ -326,32 +352,32 @@ export const useHomeMutations = ({
           message,
           {
             onThinkingStep: (step: ThinkingStep) => {
-              console.log('🧠 Thinking step received:', step);
+              logger.log('🧠 Thinking step received:', step);
               setThinkingSteps((prev) => {
                 const existingIndex = prev.findIndex(s => s.step === step.step);
                 if (existingIndex >= 0) {
                   const updated = [...prev];
                   updated[existingIndex] = step;
-                  console.log('🔄 Updated thinking steps:', updated);
+                  logger.log('🔄 Updated thinking steps:', updated);
                   return updated;
                 }
                 const newSteps = [...prev, step];
-                console.log('➕ Added thinking step. Total steps:', newSteps.length);
+                logger.log('➕ Added thinking step. Total steps:', newSteps.length);
                 return newSteps;
               });
             },
             onResponse: (response: ChatResponse) => {
-              console.log('✅ API response received:', response);
+              logger.log('✅ API response received:', response);
               responseData = response;
             },
             onError: (error: Error) => {
-              console.error('❌ API request failed:', error);
+              logger.error('❌ API request failed:', error);
               setThinkingSteps([]);
               setThinkingTargetTimestamp(null);
               reject(error);
             },
             onDone: () => {
-              console.log('✅ Stream completed');
+              logger.log('✅ Stream completed');
               setThinkingSteps([]);
               setThinkingTargetTimestamp(null);
               if (responseData) {
@@ -366,7 +392,7 @@ export const useHomeMutations = ({
           modeToSend
         ).catch((error: any) => {
             if (error?.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
-            console.log('🚫 Request was cancelled by user');
+            logger.log('🚫 Request was cancelled by user');
               setThinkingSteps([]);
               setThinkingTargetTimestamp(null);
             reject(new Error('Request cancelled'));
@@ -380,17 +406,17 @@ export const useHomeMutations = ({
       }
     },
     onSuccess: (data, variables) => {
-      console.log('✅ Chat response received:', data);
-      console.log('📝 Answer:', data.answer);
-      console.log('📊 Charts:', data.charts?.length || 0);
-      console.log('💡 Insights:', data.insights?.length || 0);
-      console.log('💬 Suggestions:', data.suggestions?.length || 0);
+      logger.log('✅ Chat response received:', data);
+      logger.log('📝 Answer:', data.answer);
+      logger.log('📊 Charts:', data.charts?.length || 0);
+      logger.log('💡 Insights:', data.insights?.length || 0);
+      logger.log('💬 Suggestions:', data.suggestions?.length || 0);
       
       // Clear pending message ref since request completed successfully
       pendingUserMessageRef.current = null;
       
       if (!data.answer || data.answer.trim().length === 0) {
-        console.error('❌ Empty answer received from server!');
+        logger.error('❌ Empty answer received from server!');
         toast({
           title: 'Error',
           description: 'Received empty response from server. Please try again.',

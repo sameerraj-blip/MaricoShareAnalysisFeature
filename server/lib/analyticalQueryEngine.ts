@@ -464,6 +464,9 @@ CRITICAL: Use ONLY the columns listed above. Use the EXACT column names from the
 4. DO NOT use column names that are NOT in the relevant columns list
 5. DO NOT substitute "region" for "category" or vice versa - use the EXACT mapping
 6. If calculating "average order size", use the columns identified for order size calculations
+7. CRITICAL: DO NOT add "aggregate" or "group_by" steps UNLESS the user explicitly requests aggregation using words like:
+   "aggregate", "sum", "total", "group by", "pivot", "aggregated", etc.
+8. DEFAULT BEHAVIOR: Return raw, unaggregated data. Only apply filters unless aggregation is explicitly requested.
 
 YOUR TASK:
 Create a detailed execution plan as a JSON object with steps that can be executed using Python/Pandas/DuckDB.
@@ -558,13 +561,14 @@ IMPORTANT RULES:
 5. Chain steps logically - each step uses output from previous step
 6. The final step's output_alias will contain the answer
 7. Be specific with parameters - include all necessary details
-8. For aggregations after group_by, reference the grouped data
-9. Handle time filters properly (before 2020, during 2020, etc.)
-10. If the question asks about "categories", use the column mapped to "categories" in the column mapping
-11. If the question asks about "revenue", use the column mapped to "revenue" in the column mapping
-12. If the question asks about "SKUs", use the column mapped to "SKUs" in the column mapping
-13. If the question asks about "average order size", calculate it from the mapped columns
-14. If the question asks about "single month", group by month and filter to find months where the condition is met
+8. ONLY add aggregations or group_by steps when the user explicitly requests them (e.g., "aggregate", "sum", "group by", "pivot")
+9. For questions about trends, growth, patterns, etc. WITHOUT explicit aggregation requests, only apply filters and return raw data
+10. Handle time filters properly (before 2020, during 2020, etc.)
+11. If the question asks about "categories", use the column mapped to "categories" in the column mapping
+12. If the question asks about "revenue", use the column mapped to "revenue" in the column mapping
+13. If the question asks about "SKUs", use the column mapped to "SKUs" in the column mapping
+14. If the question asks about "average order size", calculate it from the mapped columns
+15. If the question asks about "single month" WITH explicit aggregation, group by month and aggregate. Otherwise, just filter by month.
 
 Output ONLY valid JSON, no markdown, no explanations:
 `;

@@ -1037,7 +1037,21 @@ export async function parseDataOpsIntent(
     };
   }
   
-  // Preview intent - handle first, last, specific rows, and ranges
+  // Preview intent - handle first, last, specific rows, ranges, and preview with conditions
+  // CRITICAL: Check for preview with conditions BEFORE checking for filter operation
+  // Patterns like "give me 50 rows where X is Y" should be preview, not filter
+  const previewWithConditionPattern = lowerMessage.match(/(?:give\s+me|show\s+me|show|display|get)\s+(\d+)\s+rows?\s+where/i) ||
+                                      lowerMessage.match(/(?:give\s+me|show\s+me|show|display|get)\s+(\d+)\s+rows?\s+with/i);
+  if (previewWithConditionPattern && !lowerMessage.includes('filter')) {
+    // This is a preview request with conditions - let AI handle extracting conditions
+    // But mark it as preview operation, not filter
+    const limit = parseInt(previewWithConditionPattern[1], 10);
+    if (limit > 0) {
+      // Return preview operation - AI will extract filterConditions but operation stays 'preview'
+      // The AI prompt will be updated to handle this case
+    }
+  }
+  
   if (lowerMessage.includes('show') && (lowerMessage.includes('data') || lowerMessage.includes('rows') || lowerMessage.includes('row'))) {
     // Pattern 1: Range - handle multiple phrasings
     // "show rows 12 to 28" or "show rows 12-28" or "show rows 12 through 28"
@@ -1862,12 +1876,14 @@ Operations:
   * Extract newValue: the value to replace with (e.g., 0, 134.2, null, "N/A")
   * Extract column: if a specific column is mentioned
 - "describe": User wants general info about data (e.g., "how many rows", "describe the data", "what's in the dataset")
-- "preview": User wants to see data. Handle various modes:
+- "preview": User wants to see data WITHOUT modifying the dataset. Handle various modes:
   * "first" mode: "show first 10 rows", "show me only first 5 rows", "display top 20 rows" -> previewMode: "first", limit: 10/5/20
   * "last" mode: "show last 5 rows", "show me the last 10 rows" -> previewMode: "last", limit: 5/10
   * "specific" mode: "show row 12", "show the 12th row", "show row number 28" -> previewMode: "specific", previewStartRow: 12/28
   * "range" mode: "show rows 12 to 28", "show rows 12-28", "show rows 12 through 28", "show me row from range 3 to 10 rows", "rows from range 3 to 10", "range 3 to 10 rows", "show me rows from range 5 to 15", "display rows from range 1 to 20" -> previewMode: "range", previewStartRow: 12/3/5/1, previewEndRow: 28/10/15/20
   * IMPORTANT: When user says "show me row from range 3 to 10 rows", this means rows 3 through 10 (inclusive), so previewMode: "range", previewStartRow: 3, previewEndRow: 10
+  * PREVIEW WITH CONDITIONS: "give me 50 rows where X is Y", "show me 100 rows where column = value", "display 20 rows where status is high" -> operation: "preview", limit: 50/100/20, filterConditions: [extracted conditions]
+  * CRITICAL: Preview with conditions does NOT modify the dataset - it only shows a preview of matching rows
   * If no specific mode is mentioned, default to "first" mode with limit: 50
 - "summary": User wants statistics summary
 - "remove_nulls": User wants to remove/handle nulls. CRITICAL: This is the CORRECT operation for ANY request involving null values, including:
@@ -1952,18 +1968,21 @@ Operations:
     - "impute outliers with mode" -> treatmentMethod: "impute", treatmentValue: "mode", outlierMethod: "iqr", column: null, requiresClarification: false
     - "winsorize outliers" -> treatmentMethod: "winsorize"
     - "remove outliers using z-score > 3" -> treatmentMethod: "remove", outlierMethod: "zscore", outlierThreshold: 3
-- "filter": User wants to filter/keep only rows that match certain conditions
+- "filter": User wants to filter/keep only rows that match certain conditions AND PERMANENTLY MODIFY THE DATASET
   * CRITICAL: This is a DATA MODIFICATION operation that changes the working dataset
   * After filtering, the filtered dataset becomes the new working dataset for all subsequent queries
-  * Examples: 
+  * CRITICAL DISTINCTION: Only use "filter" operation when user EXPLICITLY says "filter" or "filter data" or "filter dataset"
+  * DO NOT use "filter" for "give me/show me N rows where X is Y" - that should be "preview" with filterConditions
+  * Examples of FILTER operation (permanently modifies dataset):
     - "filter data where category is men's fashion"
-    - "show only rows where revenue > 1000000"
     - "filter by category = X"
-    - "keep only data where column X > Y"
     - "filter rows where date is between 2020 and 2021"
-    - "show me data where category is in [A, B, C]"
     - "filter data where category equals men's fashion"
-    - "keep rows where revenue greater than 1000000"
+    - "filter dataset where status is high"
+  * Examples that should be PREVIEW (not filter):
+    - "give me 50 rows where NewStatus is high" -> operation: "preview", limit: 50, filterConditions: [...]
+    - "show me 100 rows where category is X" -> operation: "preview", limit: 100, filterConditions: [...]
+    - "display 20 rows where status is high" -> operation: "preview", limit: 20, filterConditions: [...]
   * Extract filterConditions: array of filter conditions, each with:
     - column: the column to filter on (MUST match exactly from available columns)
     - operator: "=", "!=", ">", ">=", "<", "<=", "contains", "startsWith", "endsWith", "between", "in"
@@ -3415,45 +3434,134 @@ export async function executeDataOperation(
     case 'preview': {
       let previewData: Record<string, any>[];
       let answer: string;
+      let workingData = data; // Start with original data
+      let filteredCount = 0;
       
-      // Check for range first (even if previewMode is not explicitly set to 'range')
-      // This handles cases where AI might return previewStartRow and previewEndRow but miss previewMode
+      // CRITICAL: If filterConditions are present, apply them for preview ONLY
+      // This is a preview with conditions - filter the data but DON'T save as working dataset
+      if (intent.filterConditions && intent.filterConditions.length > 0) {
+        const rowsBefore = workingData.length;
+        workingData = workingData.filter(row => {
+          const results = intent.filterConditions!.map(condition => {
+            const { column, operator, value, value2, values } = condition;
+            const cellValue = row[column];
+            
+            if (cellValue === null || cellValue === undefined) {
+              return false; // Exclude null/undefined values from preview
+            }
+            
+            switch (operator) {
+              case '=':
+                if (typeof cellValue === 'number' && typeof value === 'number') {
+                  return cellValue === value;
+                }
+                return String(cellValue).toLowerCase().trim() === String(value).toLowerCase().trim();
+              case '!=':
+                if (typeof cellValue === 'number' && typeof value === 'number') {
+                  return cellValue !== value;
+                }
+                return String(cellValue).toLowerCase().trim() !== String(value).toLowerCase().trim();
+              case '>':
+                return Number(cellValue) > Number(value);
+              case '>=':
+                return Number(cellValue) >= Number(value);
+              case '<':
+                return Number(cellValue) < Number(value);
+              case '<=':
+                return Number(cellValue) <= Number(value);
+              case 'contains':
+                return String(cellValue).toLowerCase().includes(String(value).toLowerCase());
+              case 'startsWith':
+                return String(cellValue).toLowerCase().startsWith(String(value).toLowerCase());
+              case 'endsWith':
+                return String(cellValue).toLowerCase().endsWith(String(value).toLowerCase());
+              case 'between':
+                if (value2 === undefined || value2 === null) return false;
+                const numValue = Number(cellValue);
+                return numValue >= Number(value) && numValue <= Number(value2);
+              case 'in':
+                if (!values || !Array.isArray(values)) return false;
+                return values.some(v => {
+                  if (typeof cellValue === 'number' && typeof v === 'number') {
+                    return cellValue === v;
+                  }
+                  return String(cellValue).toLowerCase().trim() === String(v).toLowerCase().trim();
+                });
+              default:
+                return true;
+            }
+          });
+          
+          const logicalOp = intent.logicalOperator || 'AND';
+          return logicalOp === 'AND' 
+            ? results.every(r => r) 
+            : results.some(r => r);
+        });
+        
+        filteredCount = workingData.length;
+        const rowsRemoved = rowsBefore - filteredCount;
+        
+        if (filteredCount === 0) {
+          return {
+            answer: `⚠️ No rows match the specified conditions. The dataset has ${rowsBefore} total rows, but none match your filter criteria.`
+          };
+        }
+      }
+      
+      // Now apply preview mode on the (possibly filtered) data
       if ((intent.previewMode === 'range' || (!intent.previewMode && intent.previewStartRow && intent.previewEndRow)) 
           && intent.previewStartRow && intent.previewEndRow) {
         // Show range of rows (1-based indices)
         const startIndex = intent.previewStartRow - 1;
         const endIndex = intent.previewEndRow; // slice is exclusive, so use endIndex directly
-        if (startIndex >= 0 && startIndex < data.length && endIndex > startIndex && endIndex <= data.length) {
-          previewData = data.slice(startIndex, endIndex);
-          answer = `Showing rows ${intent.previewStartRow} to ${intent.previewEndRow} (${previewData.length} rows) of ${data.length} total rows:`;
+        if (startIndex >= 0 && startIndex < workingData.length && endIndex > startIndex && endIndex <= workingData.length) {
+          previewData = workingData.slice(startIndex, endIndex);
+          answer = `Showing rows ${intent.previewStartRow} to ${intent.previewEndRow} (${previewData.length} rows)${intent.filterConditions ? ` from ${filteredCount} matching rows` : ` of ${data.length} total rows`}:`;
         } else {
           return {
-            answer: `Invalid range. Rows ${intent.previewStartRow} to ${intent.previewEndRow} are out of range. The dataset has ${data.length} rows.`
+            answer: `Invalid range. Rows ${intent.previewStartRow} to ${intent.previewEndRow} are out of range. ${intent.filterConditions ? `There are ${filteredCount} matching rows.` : `The dataset has ${data.length} rows.`}`
           };
         }
       } else if (intent.previewMode === 'last') {
         // Show last N rows
         const limit = intent.limit || 50;
-        const startIndex = Math.max(0, data.length - limit);
-        previewData = data.slice(startIndex);
-        answer = `Showing last ${previewData.length} of ${data.length} rows:`;
+        const startIndex = Math.max(0, workingData.length - limit);
+        previewData = workingData.slice(startIndex);
+        answer = `Showing last ${previewData.length}${intent.filterConditions ? ` of ${filteredCount} matching rows` : ` of ${data.length} rows`}:`;
       } else if (intent.previewMode === 'specific' && intent.previewStartRow) {
         // Show specific row (1-based index)
         const rowIndex = intent.previewStartRow - 1;
-        if (rowIndex >= 0 && rowIndex < data.length) {
-          previewData = [data[rowIndex]];
-          answer = `Showing row ${intent.previewStartRow} of ${data.length} rows:`;
+        if (rowIndex >= 0 && rowIndex < workingData.length) {
+          previewData = [workingData[rowIndex]];
+          answer = `Showing row ${intent.previewStartRow}${intent.filterConditions ? ` of ${filteredCount} matching rows` : ` of ${data.length} rows`}:`;
         } else {
           return {
-            answer: `Row ${intent.previewStartRow} is out of range. The dataset has ${data.length} rows.`
+            answer: `Row ${intent.previewStartRow} is out of range. ${intent.filterConditions ? `There are ${filteredCount} matching rows.` : `The dataset has ${data.length} rows.`}`
           };
         }
       } else {
-        // Default: first N rows (or use Python service for consistency)
+        // Default: first N rows from (possibly filtered) data
         const limit = intent.limit || 50;
-        const result = await getDataPreview(data, limit);
+        const result = await getDataPreview(workingData, limit);
         previewData = result.data;
-        answer = `Showing ${result.returned_rows} of ${result.total_rows} rows:`;
+        const totalRows = intent.filterConditions ? filteredCount : result.total_rows;
+        answer = `Showing ${result.returned_rows} of ${totalRows} rows${intent.filterConditions ? ' (filtered)' : ''}:`;
+      }
+      
+      // Add note if conditions were applied (this is preview, not filter)
+      if (intent.filterConditions && intent.filterConditions.length > 0) {
+        const conditionDesc = intent.filterConditions.map(c => {
+          const { column, operator, value, value2, values } = c;
+          if (operator === 'between') {
+            return `${column} between ${value} and ${value2}`;
+          } else if (operator === 'in') {
+            return `${column} in [${values?.join(', ')}]`;
+          } else {
+            return `${column} ${operator} ${value}`;
+          }
+        }).join(` ${intent.logicalOperator || 'AND'} `);
+        answer += `\n\n📋 Filter conditions: ${conditionDesc}`;
+        answer += `\n💡 This is a preview only. The dataset has not been filtered. To filter the dataset, use "filter data where..."`;
       }
       
       return {

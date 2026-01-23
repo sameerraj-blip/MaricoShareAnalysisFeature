@@ -207,19 +207,39 @@ export const createSharedAnalysisInvite = async ({
  * List shared analyses for a user (incoming invites)
  */
 export const listSharedAnalysesForUser = async (targetEmail: string): Promise<SharedAnalysisInvite[]> => {
-  const sharedContainer = await waitForSharedAnalysesContainer();
-  const normalizedTarget = normalizeEmail(targetEmail) || targetEmail;
-  
-  return retryOnConnectionError(async () => {
-    // Use partition key directly - no need for cross-partition query
-    // Since partition key is /targetEmail, query within partition
-    const { resources } = await sharedContainer.items.query({
-      query: "SELECT * FROM c WHERE c.targetEmail = @targetEmail ORDER BY c.createdAt DESC",
-      parameters: [{ name: "@targetEmail", value: normalizedTarget }],
-    }).fetchAll(); // Remove enableCrossPartitionQuery for better performance
+  try {
+    const sharedContainer = await waitForSharedAnalysesContainer();
+    const normalizedTarget = normalizeEmail(targetEmail) || targetEmail;
+    
+    return retryOnConnectionError(async () => {
+      // Use partition key directly - no need for cross-partition query
+      // Since partition key is /targetEmail, query within partition
+      const { resources } = await sharedContainer.items.query({
+        query: "SELECT * FROM c WHERE c.targetEmail = @targetEmail ORDER BY c.createdAt DESC",
+        parameters: [{ name: "@targetEmail", value: normalizedTarget }],
+      }).fetchAll(); // Remove enableCrossPartitionQuery for better performance
 
-    return resources as SharedAnalysisInvite[];
-  }, 3, "listSharedAnalysesForUser");
+      return resources as SharedAnalysisInvite[];
+    }, 3, "listSharedAnalysesForUser");
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // If it's a connection error, return empty array instead of throwing
+    // This allows the app to continue functioning even when CosmosDB is unavailable
+    if (
+      errorMessage.includes("ECONNREFUSED") ||
+      errorMessage.includes("ETIMEDOUT") ||
+      errorMessage.includes("ENOTFOUND") ||
+      errorMessage.includes("not initialized") ||
+      (error as any)?.code === "ECONNREFUSED" ||
+      (error as any)?.code === "ETIMEDOUT" ||
+      (error as any)?.code === "ENOTFOUND"
+    ) {
+      console.warn(`⚠️ CosmosDB unavailable for listSharedAnalysesForUser, returning empty array. Error: ${errorMessage}`);
+      return [];
+    }
+    // Re-throw other errors
+    throw error;
+  }
 };
 
 /**

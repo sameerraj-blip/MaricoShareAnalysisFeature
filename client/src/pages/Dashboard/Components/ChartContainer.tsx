@@ -1,6 +1,5 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, lazy, Suspense } from 'react';
 import { ChartSpec } from '@/shared/schema';
-import { ChartRenderer } from '@/pages/Home/Components/ChartRenderer';
 import { InsightRecommendationTile } from './InsightRecommendationTile';
 import { EditInsightModal } from './EditInsightModal';
 import { Button } from '@/components/ui/button';
@@ -8,6 +7,10 @@ import { Trash2, GripVertical } from 'lucide-react';
 import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
 import { useToast } from '@/hooks/use-toast';
 import { useDashboardContext } from '../context/DashboardContext';
+import { Skeleton } from '@/components/ui/skeleton';
+
+// Lazy load ChartRenderer to reduce initial bundle size
+const ChartRenderer = lazy(() => import('@/pages/Home/Components/ChartRenderer').then(module => ({ default: module.ChartRenderer })));
 
 interface ChartContainerProps {
   chart: ChartSpec;
@@ -184,15 +187,17 @@ export function ChartContainer({ chart, index, dashboardId, sheetId, onDelete, o
               data-chart-index={index}
             >
               <div className="h-full w-full">
-                <ChartRenderer
-                  chart={chart}
-                  index={index}
-                  isSingleChart={false}
-                  showAddButton={false}
-                  useChartOnlyModal
-                  fillParent
-                  enableFilters
-                />
+                <Suspense fallback={<Skeleton className="h-full w-full" />}>
+                  <ChartRenderer
+                    chart={chart}
+                    index={index}
+                    isSingleChart={false}
+                    showAddButton={false}
+                    useChartOnlyModal
+                    fillParent
+                    enableFilters
+                  />
+                </Suspense>
               </div>
             </div>
 

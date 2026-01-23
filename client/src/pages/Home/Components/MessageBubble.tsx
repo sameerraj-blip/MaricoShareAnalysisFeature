@@ -1,7 +1,6 @@
-import { forwardRef, useState, useMemo, memo } from 'react';
+import { forwardRef, useState, useMemo, memo, lazy, Suspense } from 'react';
 import { Message, ThinkingStep, ChartSpec } from '@/shared/schema';
 import { User, Bot, Edit2, Check, X as XIcon } from 'lucide-react';
-import { ChartRenderer } from './ChartRenderer';
 import { InsightCard } from './InsightCard';
 import { DataPreview } from './DataPreview';
 import { DataPreviewTable, DataSummaryTable } from './DataPreviewTable';
@@ -12,6 +11,10 @@ import { getUserEmail } from '@/utils/userStorage';
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 import { FilterAppliedMessage } from '@/components/FilterAppliedMessage';
 import { FilterCondition } from '@/components/ColumnFilterDialog';
+import { Skeleton } from '@/components/ui/skeleton';
+
+// Lazy load ChartRenderer to reduce initial bundle size (includes heavy recharts dependency)
+const ChartRenderer = lazy(() => import('./ChartRenderer').then(module => ({ default: module.ChartRenderer })));
 
 /**
  * Extract loading state for a correlation chart from thinking steps
@@ -371,15 +374,23 @@ const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
                     : { isLoading: false };
                   
                   return (
-                    <ChartRenderer 
-                      key={idx} 
-                      chart={chart} 
-                      index={idx}
-                      isSingleChart={message.charts!.length === 1}
-                      enableFilters
-                      isLoading={chartLoadingState.isLoading}
-                      loadingProgress={chartLoadingState.progress}
-                    />
+                    <Suspense 
+                      key={idx}
+                      fallback={
+                        <div className="w-full h-[250px] flex items-center justify-center border rounded-lg bg-gray-50">
+                          <Skeleton className="h-full w-full" />
+                        </div>
+                      }
+                    >
+                      <ChartRenderer 
+                        chart={chart} 
+                        index={idx}
+                        isSingleChart={message.charts!.length === 1}
+                        enableFilters
+                        isLoading={chartLoadingState.isLoading}
+                        loadingProgress={chartLoadingState.progress}
+                      />
+                    </Suspense>
                   );
                 })}
               </div>
@@ -427,14 +438,22 @@ const MessageBubbleComponent = forwardRef<HTMLDivElement, MessageBubbleProps>(({
                   };
                   
                   return (
-                    <ChartRenderer 
+                    <Suspense 
                       key={`loading-${idx}`}
-                      chart={placeholderChart}
-                      index={idx}
-                      enableFilters={false}
-                      isLoading={true}
-                      loadingProgress={progress || { processed: 0, total: 0, message: activeStep?.step }}
-                    />
+                      fallback={
+                        <div className="w-full h-[250px] flex items-center justify-center border rounded-lg bg-gray-50">
+                          <Skeleton className="h-full w-full" />
+                        </div>
+                      }
+                    >
+                      <ChartRenderer 
+                        chart={placeholderChart}
+                        index={idx}
+                        enableFilters={false}
+                        isLoading={true}
+                        loadingProgress={progress || { processed: 0, total: 0, message: activeStep?.step }}
+                      />
+                    </Suspense>
                   );
                 })}
               </div>

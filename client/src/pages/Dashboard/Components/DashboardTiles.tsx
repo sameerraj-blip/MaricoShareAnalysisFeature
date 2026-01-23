@@ -1,16 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import { DashboardTile } from '@/pages/Dashboard/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Trash2, Edit2, Loader2 } from 'lucide-react';
-import { ChartRenderer } from '@/pages/Home/Components/ChartRenderer';
 import { Responsive, WidthProvider, Layout, Layouts } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 import { EditInsightModal } from './EditInsightModal';
 import { useToast } from '@/hooks/use-toast';
 import { useDashboardContext } from '../context/DashboardContext';
+import { Skeleton } from '@/components/ui/skeleton';
+
+// Lazy load ChartRenderer to reduce initial bundle size
+const ChartRenderer = lazy(() => import('@/pages/Home/Components/ChartRenderer').then(module => ({ default: module.ChartRenderer })));
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
@@ -359,17 +362,19 @@ export const DashboardTiles: React.FC<DashboardTilesProps> = ({
             </CardHeader>
             <CardContent className="flex min-h-0 flex-1 flex-col gap-3 pt-0 px-4">
               <div className="flex-1 min-h-[120px] min-w-0" data-dashboard-chart-node>
-                <ChartRenderer
-                  chart={tile.chart}
-                  index={tile.index}
-                  isSingleChart={false}
-                  showAddButton={false}
-                  useChartOnlyModal
-                  fillParent
-                  enableFilters
-                  filters={filtersByTile[tile.id]}
-                  onFiltersChange={(next) => onTileFiltersChange(tile.id, next)}
-                />
+                <Suspense fallback={<Skeleton className="h-full w-full" />}>
+                  <ChartRenderer
+                    chart={tile.chart}
+                    index={tile.index}
+                    isSingleChart={false}
+                    showAddButton={false}
+                    useChartOnlyModal
+                    fillParent
+                    enableFilters
+                    filters={filtersByTile[tile.id]}
+                    onFiltersChange={(next) => onTileFiltersChange(tile.id, next)}
+                  />
+                </Suspense>
               </div>
             </CardContent>
           </Card>

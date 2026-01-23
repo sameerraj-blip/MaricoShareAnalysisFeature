@@ -272,13 +272,14 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
         }
 
         // Cache miss - fetch from database
+        // This will return empty array if database is unavailable
         const invitations = await listSharedAnalysesForUser(userEmail);
         const responsePayload = {
           pending: invitations.filter((invite) => invite.status === "pending"),
           accepted: invitations.filter((invite) => invite.status === "accepted"),
         };
 
-        // Cache the result
+        // Cache the result (even if empty, to avoid repeated DB calls)
         sharedInviteCache.set(userEmail, responsePayload.pending, responsePayload.accepted);
 
         // Validate payload before sending
@@ -290,7 +291,32 @@ export const streamIncomingSharedAnalysesController = async (req: Request, res: 
         }
         return true;
       } catch (error) {
-        // Only try to send error if connection is still open
+        // If database is unavailable, return empty arrays instead of error
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (
+          errorMessage.includes("ECONNREFUSED") ||
+          errorMessage.includes("ETIMEDOUT") ||
+          errorMessage.includes("ENOTFOUND") ||
+          errorMessage.includes("not initialized") ||
+          (error as any)?.code === "ECONNREFUSED" ||
+          (error as any)?.code === "ETIMEDOUT" ||
+          (error as any)?.code === "ENOTFOUND"
+        ) {
+          console.warn('⚠️ Database unavailable for shared analyses, sending empty arrays');
+          // Check cache for fallback
+          const cached = sharedInviteCache.get(userEmail);
+          const fallbackPayload = cached 
+            ? { pending: cached.pending, accepted: cached.accepted }
+            : { pending: [], accepted: [] };
+          
+          if (!res.writableEnded && !res.destroyed && res.writable) {
+            const sent = sendSSE(res, 'update', fallbackPayload);
+            return sent;
+          }
+          return false;
+        }
+        
+        // Only try to send error if connection is still open and it's not a connection error
         if (!res.writableEnded && !res.destroyed && res.writable) {
           console.error('Error fetching shared analyses for SSE:', error);
           sendSSE(res, 'error', { 

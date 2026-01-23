@@ -24,6 +24,7 @@ import { useToast } from '@/hooks/use-toast';
 import { AvailableModelsDialog } from '@/components/AvailableModelsDialog';
 import { FilterDataModal } from '@/components/FilterDataModal';
 import { FilterCondition } from '@/components/ColumnFilterDialog';
+import { debounce } from '@/lib/debounce';
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -318,76 +319,63 @@ export function ChatInterface({
     onSendMessage(filterMessage);
   }, [onSendMessage]);
 
-  // Debounce timer ref for mention state updates
-  const mentionUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const updateMentionState = useCallback(
+  // Debounced mention state update function
+  const updateMentionStateInternal = useCallback(
     (value: string, selectionStart: number | null) => {
-      // Clear any pending updates
-      if (mentionUpdateTimerRef.current) {
-        clearTimeout(mentionUpdateTimerRef.current);
+      if (selectionStart === null) {
+        setMentionState(prev => ({
+          ...prev,
+          active: false,
+          query: '',
+          start: null,
+          options: [],
+          selectedIndex: 0
+        }));
+        return;
       }
 
-      // Debounce the update to avoid processing on every keystroke
-      mentionUpdateTimerRef.current = setTimeout(() => {
-        if (selectionStart === null) {
-          setMentionState(prev => ({
-            ...prev,
-            active: false,
-            query: '',
-            start: null,
-            options: [],
-            selectedIndex: 0
-          }));
-          return;
-        }
+      const textUntilCaret = value.slice(0, selectionStart);
+      const mentionMatch = textUntilCaret.match(/@([A-Za-z0-9 _-]*)$/);
+      const availableColumns = columns ?? [];
 
-        const textUntilCaret = value.slice(0, selectionStart);
-        const mentionMatch = textUntilCaret.match(/@([A-Za-z0-9 _-]*)$/);
-        const availableColumns = columns ?? [];
+      if (mentionMatch && availableColumns.length > 0) {
+        const query = mentionMatch[1];
+        const start = selectionStart - mentionMatch[0].length;
+        const normalizedQuery = query.trim().toLowerCase();
+        
+        // Use a more efficient filter - only filter if query is not empty
+        const options = normalizedQuery === '' 
+          ? availableColumns 
+          : availableColumns.filter(column =>
+              column.toLowerCase().includes(normalizedQuery)
+            );
 
-        if (mentionMatch && availableColumns.length > 0) {
-          const query = mentionMatch[1];
-          const start = selectionStart - mentionMatch[0].length;
-          const normalizedQuery = query.trim().toLowerCase();
-          
-          // Use a more efficient filter - only filter if query is not empty
-          const options = normalizedQuery === '' 
-            ? availableColumns 
-            : availableColumns.filter(column =>
-                column.toLowerCase().includes(normalizedQuery)
-              );
-
-          setMentionState(prev => ({
-            active: options.length > 0,
-            query,
-            start,
-            options,
-            selectedIndex: options.length > 0 ? Math.min(prev.selectedIndex, options.length - 1) : 0
-          }));
-        } else {
-          setMentionState(prev => ({
-            ...prev,
-            active: false,
-            query: '',
-            start: null,
-            options: [],
-            selectedIndex: 0
-          }));
-        }
-      }, 50); // Small debounce delay for better performance
+        setMentionState(prev => ({
+          active: options.length > 0,
+          query,
+          start,
+          options,
+          selectedIndex: options.length > 0 ? Math.min(prev.selectedIndex, options.length - 1) : 0
+        }));
+      } else {
+        setMentionState(prev => ({
+          ...prev,
+          active: false,
+          query: '',
+          start: null,
+          options: [],
+          selectedIndex: 0
+        }));
+      }
     },
     [columns]
   );
 
-  // Cleanup debounce timer on unmount
-  useEffect(() => {
-    return () => {
-      if (mentionUpdateTimerRef.current) {
-        clearTimeout(mentionUpdateTimerRef.current);
-      }
-    };
-  }, []);
+  // Create debounced version (50ms delay for better performance)
+  const updateMentionState = useMemo(
+    () => debounce(updateMentionStateInternal, 50),
+    [updateMentionStateInternal]
+  );
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const { value, selectionStart } = e.target;
@@ -573,14 +561,18 @@ export function ChatInterface({
       {/* Loading Overlay for large files */}
       {isLargeFileLoading && (
         <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="text-center">
+          <div className="text-center max-w-md px-6">
             <div className="relative mb-4">
               <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
                 <Loader2 className="w-8 h-8 text-primary animate-spin" />
               </div>
             </div>
-            <h3 className="text-lg font-semibold text-gray-900 mb-1">Large file loading</h3>
-            <p className="text-sm text-gray-500">Processing your file, this may take a few moments</p>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Processing your file</h3>
+            <p className="text-sm text-gray-500 mb-4">Analyzing your data, this may take a moment...</p>
+            <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+              <div className="bg-primary h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
+            </div>
+            <p className="text-xs text-gray-400">Estimated time: 30-60 seconds</p>
           </div>
         </div>
       )}

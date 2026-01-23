@@ -121,17 +121,39 @@ function filterColumns(
  * Load the latest data for a chat document
  * This function ensures that data operations performed by any user are reflected in analysis
  * Priority:
- * 1. currentDataBlob (modified data from data operations)
- * 2. rawData from document (if no blob exists)
- * 3. original blob (if rawData is not available)
- * 4. sampleRows (fallback)
+ * 1. Chunked storage (if available, with intelligent chunk filtering)
+ * 2. currentDataBlob (modified data from data operations)
+ * 3. rawData from document (if no blob exists)
+ * 4. original blob (if rawData is not available)
+ * 5. sampleRows (fallback)
  * 
  * @param chatDocument - The chat document to load data from
  * @param requiredColumns - Optional array of column names to filter. If provided and dataset is large (>10k rows), only these columns will be returned.
+ * @param queryFilters - Optional query filters to intelligently load only relevant chunks
  */
 export async function loadLatestData(
   chatDocument: ChatDocument,
-  requiredColumns?: string[]
+  requiredColumns?: string[],
+  queryFilters?: {
+    timeFilters?: Array<{
+      type: 'year' | 'month' | 'quarter' | 'dateRange' | 'relative';
+      column?: string | null;
+      years?: number[] | null;
+      months?: string[] | null;
+      startDate?: string | null;
+      endDate?: string | null;
+    }>;
+    valueFilters?: Array<{
+      column: string;
+      operator: '>' | '>=' | '<' | '<=' | '=' | 'between' | '!=';
+      value?: number | null;
+      value2?: number | null;
+    }>;
+    exclusionFilters?: Array<{
+      column: string;
+      values: (string | number)[];
+    }>;
+  }
 ): Promise<Record<string, any>[]> {
   let fullData: Record<string, any>[] = [];
   
@@ -141,8 +163,40 @@ export async function loadLatestData(
   console.log(`   - currentDataBlob: ${chatDocument.currentDataBlob?.blobName || 'none'}`);
   console.log(`   - original blob: ${chatDocument.blobInfo?.blobName || 'none'}`);
   console.log(`   - columnarStorage: ${(chatDocument as any).columnarStoragePath || 'none'}`);
+  console.log(`   - chunkIndex: ${chatDocument.chunkIndexBlob?.blobName || 'none'}`);
   
-  // Priority 0: For large files, use columnar storage
+  // Priority 0: For chunked files, use intelligent chunk loading based on query filters
+  if (chatDocument.chunkIndexBlob) {
+    try {
+      console.log(`📦 Loading from chunked storage (${chatDocument.chunkIndexBlob.totalChunks} chunks)...`);
+      
+      const { loadChunkIndex, findRelevantChunks, loadChunkData } = await import('../lib/chunkingService.js');
+      const chunkIndex = await loadChunkIndex(chatDocument.sessionId);
+      
+      if (chunkIndex) {
+        // If we have query filters, use them to find relevant chunks
+        const relevantChunks = queryFilters
+          ? findRelevantChunks(chunkIndex, queryFilters)
+          : chunkIndex.chunks; // Load all chunks if no filters
+        
+        // Load data from relevant chunks
+        fullData = await loadChunkData(relevantChunks, requiredColumns);
+        
+        // Normalize numeric columns
+        fullData = normalizeNumericColumns(fullData);
+        const numericColumns = chatDocument.dataSummary?.numericColumns || [];
+        fullData = convertDashToZeroForNumericColumns(fullData, numericColumns);
+        
+        console.log(`✅ Loaded ${fullData.length} rows from ${relevantChunks.length} chunks`);
+        return fullData;
+      }
+    } catch (error) {
+      console.error('⚠️ Failed to load from chunked storage, trying other sources:', error);
+      // Fall through to other methods
+    }
+  }
+  
+  // Priority 0.5: For large files, use columnar storage
   if ((chatDocument as any).columnarStoragePath) {
     try {
       console.log(`📊 Loading from columnar storage for large file...`);
@@ -306,12 +360,13 @@ export async function loadLatestData(
  */
 export async function loadDataForColumns(
   chatDocument: ChatDocument,
-  requiredColumns: string[]
+  requiredColumns: string[],
+  queryFilters?: Parameters<typeof loadLatestData>[2]
 ): Promise<Record<string, any>[]> {
   if (!requiredColumns || requiredColumns.length === 0) {
-    return loadLatestData(chatDocument);
+    return loadLatestData(chatDocument, undefined, queryFilters);
   }
   
-  return loadLatestData(chatDocument, requiredColumns);
+  return loadLatestData(chatDocument, requiredColumns, queryFilters);
 }
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, KeyboardEvent } from "react";
 import {
   Dialog,
   DialogContent,
@@ -12,16 +12,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Badge } from "@/components/ui/badge";
+import { X } from "lucide-react";
 import { sharedDashboardsApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-
-// Utility function to parse multiple emails from space-separated input
-const parseEmails = (input: string): string[] => {
-  return input
-    .split(/\s+/)
-    .map(email => email.trim())
-    .filter(email => email.length > 0);
-};
 
 // Utility function to validate email format
 const isValidEmail = (email: string): boolean => {
@@ -42,16 +36,66 @@ export const ShareDashboardDialog = ({
   dashboardId,
   dashboardName,
 }: ShareDashboardDialogProps) => {
-  const [targetEmail, setTargetEmail] = useState("");
+  const [emails, setEmails] = useState<string[]>([]);
+  const [emailInput, setEmailInput] = useState("");
   const [note, setNote] = useState("");
   const [permission, setPermission] = useState<"view" | "edit">("view");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { toast } = useToast();
 
   const resetForm = () => {
-    setTargetEmail("");
+    setEmails([]);
+    setEmailInput("");
     setNote("");
     setPermission("view");
+  };
+
+  const addEmail = (email: string) => {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) return;
+    
+    if (!isValidEmail(trimmedEmail)) {
+      toast({
+        title: "Invalid email format",
+        description: `"${trimmedEmail}" is not a valid email address.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    if (emails.includes(trimmedEmail)) {
+      toast({
+        title: "Duplicate email",
+        description: `"${trimmedEmail}" has already been added.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    setEmails([...emails, trimmedEmail]);
+    setEmailInput("");
+  };
+
+  const removeEmail = (emailToRemove: string) => {
+    setEmails(emails.filter(email => email !== emailToRemove));
+  };
+
+  const handleEmailInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      if (emailInput.trim()) {
+        addEmail(emailInput);
+      }
+    } else if (e.key === "Backspace" && !emailInput && emails.length > 0) {
+      // Remove last email when backspace is pressed on empty input
+      removeEmail(emails[emails.length - 1]);
+    }
+  };
+
+  const handleEmailInputBlur = () => {
+    if (emailInput.trim()) {
+      addEmail(emailInput);
+    }
   };
 
   const handleClose = (next: boolean) => {
@@ -64,20 +108,11 @@ export const ShareDashboardDialog = ({
   };
 
   const handleShare = async () => {
-    if (!dashboardId || !targetEmail.trim()) return;
+    if (!dashboardId) return;
     
-    // Parse multiple emails from input
-    const emails = parseEmails(targetEmail);
-    
-    // Validate all emails
-    const invalidEmails = emails.filter(email => !isValidEmail(email));
-    if (invalidEmails.length > 0) {
-      toast({
-        title: "Invalid email format",
-        description: `Please check these emails: ${invalidEmails.join(', ')}`,
-        variant: "destructive",
-      });
-      return;
+    // Add any remaining email in the input field
+    if (emailInput.trim()) {
+      addEmail(emailInput);
     }
     
     if (emails.length === 0) {
@@ -136,18 +171,42 @@ export const ShareDashboardDialog = ({
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-2">
-            <Label htmlFor="share-email">Recipient email</Label>
-            <Input
-              id="share-email"
-              type="text"
-              placeholder="teammate@example.com teammate2@example.com"
-              value={targetEmail}
-              onChange={(event) => setTargetEmail(event.target.value)}
-              disabled={isSubmitting}
-              required
-            />
+            <Label htmlFor="share-email">Recipient emails</Label>
+            <div className="min-h-[42px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2">
+              <div className="flex flex-wrap gap-2">
+                {emails.map((email) => (
+                  <Badge
+                    key={email}
+                    variant="secondary"
+                    className="flex items-center gap-1.5 pr-1 py-1"
+                  >
+                    <span className="text-xs">{email}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeEmail(email)}
+                      disabled={isSubmitting}
+                      className="rounded-full hover:bg-secondary-foreground/20 p-0.5 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                      aria-label={`Remove ${email}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+                <Input
+                  id="share-email"
+                  type="text"
+                  placeholder={emails.length === 0 ? "Enter email addresses..." : ""}
+                  value={emailInput}
+                  onChange={(e) => setEmailInput(e.target.value)}
+                  onKeyDown={handleEmailInputKeyDown}
+                  onBlur={handleEmailInputBlur}
+                  disabled={isSubmitting}
+                  className="flex-1 min-w-[200px] border-0 p-0 focus-visible:ring-0 focus-visible:ring-offset-0 h-7"
+                />
+              </div>
+            </div>
             <p className="text-xs text-muted-foreground">
-              Enter multiple emails separated by spaces
+              Press Enter or comma to add emails. Click × to remove.
             </p>
           </div>
           <div className="space-y-3">
@@ -183,7 +242,7 @@ export const ShareDashboardDialog = ({
           <Button variant="outline" onClick={() => handleClose(false)} disabled={isSubmitting}>
             Cancel
           </Button>
-          <Button onClick={handleShare} disabled={!targetEmail.trim() || isSubmitting}>
+          <Button onClick={handleShare} disabled={emails.length === 0 || isSubmitting}>
             {isSubmitting ? "Sending..." : "Send invite"}
           </Button>
         </DialogFooter>

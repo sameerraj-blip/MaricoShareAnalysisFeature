@@ -1,6 +1,7 @@
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse } from "axios";
 import { getUserEmail } from "@/utils/userStorage";
 import { API_BASE_URL } from "@/lib/config";
+import { logger } from "@/lib/logger";
 
 // Dedicated axios instance for server communication
 export const apiClient = axios.create({
@@ -14,12 +15,12 @@ export const apiClient = axios.create({
 
 apiClient.interceptors.request.use(
   (config) => {
-    console.log(`Making ${config.method?.toUpperCase()} request to: ${config.url}`);
+    logger.log(`Making ${config.method?.toUpperCase()} request to: ${config.url}`);
     const userEmail = getUserEmail();
     if (userEmail) {
       config.headers = config.headers || {};
       config.headers["X-User-Email"] = userEmail;
-      console.log(`Adding user email to headers: ${userEmail}`);
+      logger.log(`Adding user email to headers: ${userEmail}`);
     }
     return config;
   },
@@ -34,7 +35,7 @@ apiClient.interceptors.response.use(
       error?.code === "ERR_CANCELED" ||
       error?.name === "AbortError"
     ) {
-      console.log("🚫 Request was cancelled");
+      logger.log("🚫 Request was cancelled");
       const cancelError = new Error("Request cancelled");
       (cancelError as any).isCancel = true;
       (cancelError as any).code = "ERR_CANCELED";
@@ -47,13 +48,13 @@ apiClient.interceptors.response.use(
       error.message.includes("Network Error") ||
       error.message.includes("Failed to fetch")
     ) {
-      console.log("CORS/Network error detected, retrying once...");
+      logger.log("CORS/Network error detected, retrying once...");
       try {
         if (error.config) {
           return await apiClient.request(error.config);
         }
       } catch (retryError) {
-        console.log("Retry failed:", retryError);
+        logger.log("Retry failed:", retryError);
         throw new Error("Network error: CORS issue persists after retry");
       }
     }
@@ -92,7 +93,7 @@ export async function apiRequest<T = any>({
   signal,
 }: ApiRequestOptions): Promise<T> {
   try {
-    console.log(`🌐 Making ${method} request to ${route}`);
+    logger.log(`🌐 Making ${method} request to ${route}`);
     const response = await apiClient.request({
       method,
       url: route,
@@ -100,8 +101,8 @@ export async function apiRequest<T = any>({
       signal,
       ...config,
     });
-    console.log(`✅ ${method} ${route} - Status: ${response.status}`);
-    console.log("📦 Response data:", response.data);
+    logger.log(`✅ ${method} ${route} - Status: ${response.status}`);
+    logger.log("📦 Response data:", response.data);
     return response.data;
   } catch (error: any) {
     if (
@@ -111,10 +112,10 @@ export async function apiRequest<T = any>({
       error?.isCancel === true ||
       error?.message === "Request cancelled"
     ) {
-      console.log(`🚫 ${method} ${route} was cancelled`);
+      logger.log(`🚫 ${method} ${route} was cancelled`);
       throw new Error("Request cancelled");
     }
-    console.error(`❌ ${method} ${route} failed:`, error);
+    logger.error(`❌ ${method} ${route} failed:`, error);
     throw error;
   }
 }
@@ -170,7 +171,7 @@ export async function uploadFile<T = any>(
 
   if (userEmail) {
     headers["X-User-Email"] = userEmail;
-    console.log(`Adding user email to upload headers: ${userEmail}`);
+    logger.log(`Adding user email to upload headers: ${userEmail}`);
   }
 
   return apiRequest<T>({

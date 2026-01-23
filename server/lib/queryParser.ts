@@ -201,14 +201,15 @@ function sanitiseParsedQuery(raw: Nullable<QueryParserResult>, summary?: DataSum
     }
   }
   
-  // Fix groupBy: if dateAggregationPeriod is set, ensure groupBy uses actual date column
-  if (parsed.dateAggregationPeriod && summary && summary.dateColumns.length > 0) {
+  // Fix groupBy: if dateAggregationPeriod is set AND aggregations are requested, ensure groupBy uses actual date column
+  // Only auto-add groupBy if aggregations are explicitly present (user requested aggregation)
+  if (parsed.dateAggregationPeriod && parsed.aggregations && parsed.aggregations.length > 0 && summary && summary.dateColumns.length > 0) {
     const dateColumn = summary.dateColumns[0]; // Use first date column
     const periodNames = ['year', 'month', 'quarter', 'day', 'years', 'months', 'quarters', 'days'];
     
     if (!parsed.groupBy || parsed.groupBy.length === 0) {
-      // If groupBy is not set but dateAggregationPeriod is, automatically add date column
-      console.log(`🔧 Auto-adding date column "${dateColumn}" to groupBy for period "${parsed.dateAggregationPeriod}"`);
+      // If groupBy is not set but dateAggregationPeriod and aggregations are, automatically add date column
+      console.log(`🔧 Auto-adding date column "${dateColumn}" to groupBy for period "${parsed.dateAggregationPeriod}" (aggregation requested)`);
       parsed.groupBy = [dateColumn];
     } else {
       // Check if groupBy contains period names instead of actual date columns
@@ -224,11 +225,15 @@ function sanitiseParsedQuery(raw: Nullable<QueryParserResult>, summary?: DataSum
         // Remove duplicates
         parsed.groupBy = Array.from(new Set(parsed.groupBy));
       } else if (!hasDateColumn) {
-        // If no date column in groupBy but dateAggregationPeriod is set, add it
+        // If no date column in groupBy but dateAggregationPeriod is set with aggregations, add it
         console.log(`🔧 Adding date column "${dateColumn}" to groupBy for period aggregation`);
         parsed.groupBy = [dateColumn, ...parsed.groupBy];
       }
     }
+  } else if (parsed.dateAggregationPeriod && (!parsed.aggregations || parsed.aggregations.length === 0)) {
+    // If dateAggregationPeriod is set but no aggregations, clear it (user didn't request aggregation)
+    console.log(`⚠️ dateAggregationPeriod set but no aggregations requested - clearing dateAggregationPeriod to return raw data`);
+    parsed.dateAggregationPeriod = undefined;
   }
   
   parsed.timeFilters = sanitiseTimeFilters(raw?.timeFilters as Nullable<TimeFilter>[]);
@@ -392,25 +397,22 @@ DATE COLUMNS: ${summary.dateColumns.join(', ') || 'None'}
 YOUR TASK:
 - Extract the user's intent into structured filters.
 - Use ONLY the columns provided.
+- CRITICAL: DO NOT add aggregations, groupBy, or pivots UNLESS the user explicitly requests them using words like:
+  * "aggregate", "aggregated", "aggregation", "sum", "total", "average", "mean", "count", "group by", "grouped by", 
+  * "pivot", "pivoted", "by category", "by month" (when combined with aggregation words), etc.
+- DEFAULT BEHAVIOR: Return raw, unaggregated data. Only apply filters (time, value, exclusion) unless aggregation is explicitly requested.
 - If the user references time (years, months, quarters, ranges), capture it in timeFilters.
 - If the user mentions specific dates like "Apr-24", "March 2022", "2024", "15/01/2024", extract them and create timeFilters.
   * For month-year formats (e.g., "Apr-24", "March 2022"), create a timeFilter with type "month" and include the full month name (e.g., "April", "March").
   * For year-only mentions (e.g., "2024"), create a timeFilter with type "year" and include the year number.
   * For specific dates (e.g., "2024-01-15", "15/01/2024"), create a timeFilter with type "dateRange" using that date as both startDate and endDate.
   * For date ranges (e.g., "from Apr-24 to Jun-24"), create a timeFilter with type "dateRange" with startDate and endDate.
-- If the user asks for "monthly revenue", "yearly sales", "by month", "by year", "aggregate by month", "aggregated over year", etc., 
+- ONLY if the user explicitly asks for aggregation with time periods (e.g., "monthly revenue", "yearly sales", "aggregate by month", "aggregated over year"), 
   set "dateAggregationPeriod" to "month", "monthOnly", "year", "quarter", or "day" accordingly. This indicates that 
   date columns should be normalized to this period before grouping/aggregation.
-- CRITICAL: If the user asks about "seasonal patterns", "seasonal trends", "seasonal variations", or "patterns over time", 
-  set "dateAggregationPeriod" to "month" (to show trends over time with month-year grouping). Also ensure the date column 
-  is included in "groupBy" if not already specified.
-- CRITICAL: If the user asks about "month-over-month growth", "month over month growth", "consistent month-over-month growth", 
-  "month-over-month revenue growth", or similar time series growth patterns:
-  * Set "dateAggregationPeriod" to "month" (to group by month-year)
-  * Include the date column in "groupBy" 
-  * Include the category/grouping column in "groupBy" (e.g., "category", "Category", "product_category")
-  * Set aggregations to sum the revenue/total column
-  * These queries require time series analysis - extract all relevant filters and aggregations
+- IMPORTANT: Questions about "month-over-month growth", "consistent month-over-month growth", "seasonal patterns", etc. 
+  should ONLY apply time filters and return raw data. DO NOT automatically add aggregations or groupBy unless the user 
+  explicitly asks to "aggregate", "sum", "group by", etc.
 - IMPORTANT: Distinguish between:
   * "month" - groups by month-year (e.g., "Jan 2024", "Jan 2022" are separate)
   * "monthOnly" - groups by month name only, combining all years (e.g., all "Jan" values combined regardless of year)
@@ -437,34 +439,18 @@ YOUR TASK:
   * Example: "Which months had total revenue above the yearly monthly average" → valueFilter: {column: "total", operator: ">", reference: "mean"}
   * The column should be the metric being compared - match to available numeric columns
 - If the user wants to exclude categories, use exclusionFilters.
-- CRITICAL: If the user asks for aggregation with category filters, extract and handle immediately:
-  * Patterns include:
-    - "sum of all the value for [category] category"
-    - "sum of [column] for [category]"
-    - "aggregated value for category X"
-    - "aggregated value for X"
-    - "aggregated column name value for the column category X"
-    - "total for category X"
-    - "aggregate [column] for [category]"
-  * Extract the category value (e.g., "men's fashion", "Into the moon") from patterns like:
-    - "for the column category X"
-    - "for category X"
-    - "for X category"
-    - "for X" (when X appears to be a category value, not a column name)
+- ONLY if the user explicitly requests aggregation (using words like "aggregate", "sum", "total", "group by"), then:
   * Extract the aggregation column if mentioned (e.g., "sum of total" → column: "total", operation: "sum")
-  * If no specific aggregation column is mentioned, look for patterns like "sum of all the value" → this means sum ALL numeric values
-  * Determine which column contains the category (look for columns like "category", "Category", "product_category", etc.)
-  * If no specific aggregation column is mentioned, default to aggregating common numeric columns (total, qty_ordered, price, amount, value, revenue, sales) with sum operation
-  * Set aggregations to sum the numeric columns if not specified
-  * Create appropriate exclusionFilters or valueFilters to filter data by the category value
-  * IMPORTANT: These are DIRECT aggregation operations - do NOT ask for clarification, just extract what you can and proceed
+  * Extract the grouping columns if mentioned (e.g., "group by category" → groupBy: ["category"])
+  * Set aggregations and groupBy only when explicitly requested
+  * Patterns that indicate explicit aggregation requests:
+    - "sum of [column] for [category]"
+    - "aggregate [column] by [dimension]"
+    - "total revenue by category"
+    - "group by [dimension]"
+    - "pivot by [dimension]"
 - If the user asks for top/bottom N, populate topBottom.
-- Capture requested aggregations (sum, mean, count, etc.) and groupings.
-- IMPORTANT: When user says "aggregated value" without specifying which column, infer a default aggregation:
-  * If "total" column exists, use sum(total)
-  * Else if "qty_ordered" exists, use sum(qty_ordered)
-  * Else if "price" exists, use sum(price)
-  * Else use sum() of the first numeric column
+- ONLY capture aggregations (sum, mean, count, etc.) and groupings when explicitly requested by the user.
 - Identify chart type hints (line, bar, scatter, pie, area) if strongly implied.
 - List key variables mentioned.
 - Provide a confidence score between 0 and 1.

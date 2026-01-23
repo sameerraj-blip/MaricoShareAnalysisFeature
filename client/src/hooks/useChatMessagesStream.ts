@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Message } from '@/shared/schema';
 import { getUserEmail } from '@/utils/userStorage';
+import { logger } from '@/lib/logger';
 
 interface UseChatMessagesStreamProps {
   sessionId: string | null;
@@ -24,7 +25,7 @@ export const useChatMessagesStream = ({
     if (!sessionId || !enabled) {
       // Close existing connection if disabled
       if (eventSourceRef.current) {
-        console.log('🚫 SSE stream disabled - closing connection');
+        logger.log('🚫 SSE stream disabled - closing connection');
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
@@ -63,11 +64,11 @@ export const useChatMessagesStream = ({
           const data = JSON.parse(event.data);
           // Initial load - send initial messages if available
           if (data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
-            console.log(`📥 SSE init: Received ${data.messages.length} initial messages`);
+            logger.log(`📥 SSE init: Received ${data.messages.length} initial messages`);
             onNewMessages(data.messages);
           }
         } catch (err) {
-          console.error('Failed to parse SSE init data:', err);
+          logger.error('Failed to parse SSE init data:', err);
         }
       });
 
@@ -75,18 +76,18 @@ export const useChatMessagesStream = ({
         try {
           const data = JSON.parse(event.data);
           if (data.messages && Array.isArray(data.messages)) {
-            console.log(`📥 SSE messages: Received ${data.messages.length} new messages`);
+            logger.log(`📥 SSE messages: Received ${data.messages.length} new messages`);
             onNewMessages(data.messages);
           }
           reconnectAttemptsRef.current = 0;
         } catch (err) {
-          console.error('Failed to parse SSE messages data:', err);
+          logger.error('Failed to parse SSE messages data:', err);
         }
       });
 
       // Handle 'done' event - close connection after receiving one response
       eventSource.addEventListener('done', () => {
-        console.log('✅ Chat response complete - closing SSE connection');
+        logger.log('✅ Chat response complete - closing SSE connection');
         if (eventSourceRef.current) {
           eventSourceRef.current.close();
           eventSourceRef.current = null;
@@ -95,7 +96,7 @@ export const useChatMessagesStream = ({
 
       // Handle 'complete' event - close connection after initial analysis
       eventSource.addEventListener('complete', () => {
-        console.log('✅ Initial analysis complete - closing SSE connection');
+        logger.log('✅ Initial analysis complete - closing SSE connection');
         if (eventSourceRef.current) {
           eventSourceRef.current.close();
           eventSourceRef.current = null;
@@ -107,18 +108,18 @@ export const useChatMessagesStream = ({
       });
 
       eventSource.addEventListener('error', (event) => {
-        console.error('SSE error event:', event);
+        logger.error('SSE error event:', event);
       });
 
       eventSource.onerror = (error) => {
         // Check if connection was closed normally (readyState 2 = CLOSED)
         if (eventSource.readyState === EventSource.CLOSED) {
-          console.log('✅ SSE connection closed normally');
+          logger.log('✅ SSE connection closed normally');
           eventSourceRef.current = null;
           return;
         }
         
-        console.warn('⚠️ SSE connection error, readyState:', eventSource.readyState);
+        logger.warn('⚠️ SSE connection error, readyState:', eventSource.readyState);
         eventSource.close();
         eventSourceRef.current = null;
 
@@ -127,7 +128,7 @@ export const useChatMessagesStream = ({
         if (enabled && reconnectAttemptsRef.current < maxReconnectAttempts) {
           const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
           reconnectAttemptsRef.current++;
-          console.log(`🔄 SSE: Attempting reconnect ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${delay}ms`);
+          logger.log(`🔄 SSE: Attempting reconnect ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${delay}ms`);
           
           reconnectTimeoutRef.current = setTimeout(() => {
             if (enabled) { // Check again before reconnecting
@@ -135,7 +136,7 @@ export const useChatMessagesStream = ({
             }
           }, delay);
         } else {
-          console.log('🚫 SSE: Not reconnecting (disabled or max attempts reached)');
+          logger.log('🚫 SSE: Not reconnecting (disabled or max attempts reached)');
         }
       };
     };

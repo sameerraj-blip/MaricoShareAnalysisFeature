@@ -73,6 +73,11 @@ export interface ChatDocument {
   };
   dataOpsMode?: boolean; // Whether Data Ops mode is enabled for this session
   permanentContext?: string; // Permanent context provided by user during upload, sent to AI with each message
+  chunkIndexBlob?: { // Chunk index for chunked files (faster querying)
+    blobName: string;
+    totalChunks: number;
+    totalRows: number;
+  };
 }
 
 // Helper functions
@@ -751,16 +756,22 @@ const retryOnConnectionError = async <T>(
       const errorMessage = error instanceof Error ? error.message : String(error);
       
       // Check if it's a connection error that might be retryable
+      // Include PARSE_ERROR and query timeout errors (subStatusCode 1004)
       const isRetryableError = 
         error.code === "ECONNREFUSED" || 
         error.code === "ETIMEDOUT" || 
         error.code === "ENOTFOUND" ||
         error.code === "ECONNRESET" ||
         error.code === "RestError" ||
+        error.code === "PARSE_ERROR" ||
+        error.name === "RestError" ||
+        (error.diagnostics?.clientSideRequestStatistics?.gatewayStatistics?.[0]?.subStatusCode === 1004) ||
         errorMessage.includes("ECONNREFUSED") ||
         errorMessage.includes("ETIMEDOUT") ||
         errorMessage.includes("ENOTFOUND") ||
-        errorMessage.includes("ECONNRESET");
+        errorMessage.includes("ECONNRESET") ||
+        errorMessage.includes("aborted") ||
+        errorMessage.includes("PARSE_ERROR");
       
       if (isRetryableError && attempt < maxRetries) {
         const delay = Math.min(attempt * 1000, 5000); // Exponential backoff: 1s, 2s, 3s (max 5s)
@@ -973,43 +984,51 @@ export const deleteSessionBySessionId = async (sessionId: string, username: stri
 
 /**
  * Get all sessions from CosmosDB container (optionally filtered by username)
+ * Uses retry logic to handle connection errors and query timeouts
  */
 export const getAllSessions = async (username?: string): Promise<ChatDocument[]> => {
-  try {
-    const containerInstance = await waitForContainer();
-    
-    let query = "SELECT * FROM c";
-    const parameters: Array<{ name: string; value: any }> = [];
-    
-    // Add username filter if provided
-    if (username) {
-      query += " WHERE (ARRAY_CONTAINS(c.collaborators, @username) OR c.username = @username)";
-      parameters.push({ name: "@username", value: normalizeEmail(username) || username });
+  return retryOnConnectionError(async () => {
+    try {
+      const containerInstance = await waitForContainer();
+      
+      let query = "SELECT * FROM c";
+      const parameters: Array<{ name: string; value: any }> = [];
+      
+      // Add username filter if provided
+      if (username) {
+        query += " WHERE (ARRAY_CONTAINS(c.collaborators, @username) OR c.username = @username)";
+        parameters.push({ name: "@username", value: normalizeEmail(username) || username });
+      }
+      
+      query += " ORDER BY c.createdAt DESC";
+      
+      const queryOptions = parameters.length > 0 ? { parameters } : {};
+      
+      // Add query configuration to limit items per page and avoid timeout
+      // Cross-partition queries are enabled by default in Cosmos DB SDK v4+
+      const { resources } = await containerInstance.items
+        .query(
+          {
+            query,
+            ...queryOptions,
+          },
+          { 
+            maxItemCount: 1000, // Limit items per page to avoid timeout
+          }
+        )
+        .fetchAll();
+      
+      console.log(`✅ Retrieved ${resources.length} sessions from CosmosDB${username ? ` for user: ${username}` : ''}`);
+      return resources.map((doc) => {
+        const typed = doc as ChatDocument;
+        ensureCollaborators(typed);
+        return typed;
+      });
+    } catch (error) {
+      console.error("❌ Failed to get all sessions:", error);
+      throw error;
     }
-    
-    query += " ORDER BY c.createdAt DESC";
-    
-    const queryOptions = parameters.length > 0 ? { parameters } : {};
-    const { resources } = await containerInstance.items
-      .query(
-        {
-          query,
-          ...queryOptions,
-        },
-        { enableCrossPartitionQuery: true }
-      )
-      .fetchAll();
-    
-    console.log(`✅ Retrieved ${resources.length} sessions from CosmosDB${username ? ` for user: ${username}` : ''}`);
-    return resources.map((doc) => {
-      const typed = doc as ChatDocument;
-      ensureCollaborators(typed);
-      return typed;
-    });
-  } catch (error) {
-    console.error("❌ Failed to get all sessions:", error);
-    throw error;
-  }
+  }, 3, "getAllSessions");
 };
 
 /**
